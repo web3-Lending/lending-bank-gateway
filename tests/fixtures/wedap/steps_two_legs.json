@@ -1,0 +1,15 @@
+{
+  "code": "200", "msg": "SUCCESS",
+  "data": {
+    "bizSeqNo": "DSB-20260611-0001234567890",
+    "steps": [
+      {"stepType": "DISBURSEMENT_COLLECTION", "stepSeq": 1, "sysRefNo": "HSBC202606110001",
+       "amount": "60.0000", "currencyCode": "USD", "payerAccount": "L001", "payeeAccount": "POOL",
+       "status": "SUCCESS", "txnDate": "20260611"},
+      {"stepType": "DISBURSEMENT_DISTRIBUTION", "stepSeq": 2, "sysRefNo": "HSBC202606110002",
+       "amount": "60.0000", "currencyCode": "USD", "payerAccount": "POOL", "payeeAccount": "B001",
+       "status": "SUCCESS", "txnDate": "20260611"}
+    ]
+  },
+  "timestamp": 1781164800000
+}
