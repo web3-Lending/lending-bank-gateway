@@ -12,6 +12,7 @@ from app.api.v1.bank_funds import router as bank_funds_router
 from app.api.v1.composite import router as composite_router
 from app.api.v1.health import router as health_router
 from app.api.v1.loans import router as loans_router
+from app.clients.wedap import WedapClient
 from app.core.config import get_settings
 from app.core.context import IdentifierMiddleware, current_ids
 from app.core.db import build_engine, build_session_factory
@@ -115,6 +116,10 @@ def create_app() -> FastAPI:
     )
     app.state.engine = engine
     app.state.session_factory = build_session_factory(engine)
+    app.state.wedap = WedapClient(
+        base_url=settings.wedap_base_url,
+        timeout_seconds=settings.wedap_timeout_seconds,
+    )
     app.state.callback_after_ingest = _after_ingest
     app.include_router(health_router)
     app.include_router(loans_router)

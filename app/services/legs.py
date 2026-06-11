@@ -16,6 +16,16 @@ from app.models.txn import BankTxnLeg, BankTxnOrder
 
 logger = logging.getLogger(__name__)
 
+# 完全终态：不允许任何覆盖（REVERSED/FAILED/REVERSAL 不可改）。
+# SUCCESS 可从 SUCCESS 推进到 REVERSED（合法冲正），故不列入完全终态集合；
+# 但 SUCCESS→PENDING/UNKNOWN 等非终态倒退同样被拒（见下方 _ALLOWED_FROM_SUCCESS）。
+_HARD_TERMINAL_LEG_STATUSES: frozenset[str] = frozenset(
+    {LegStatus.REVERSED, LegStatus.FAILED, LegStatus.REVERSAL}
+)
+
+# SUCCESS 只允许向 REVERSED 推进（冲正），其余变更视为非法倒退
+_ALLOWED_FROM_SUCCESS: frozenset[str] = frozenset({LegStatus.SUCCESS, LegStatus.REVERSED})
+
 
 async def sync_legs_for(
     factory: async_sessionmaker[AsyncSession],
@@ -29,6 +39,9 @@ async def sync_legs_for(
     upsert key: (tenant, biz_seq, step_seq)。
     防御：聚合 ValueError / IllegalTransition 不上抛（log+留待下次回调/重放收敛），
     保证回调摄取不被单笔脏数据阻塞。
+
+    注意：sync_legs_for 与 inbox status 推进为两事务（至少一次语义），崩溃窗口由重放再
+    驱动收敛。
     """
     steps = await wedap.get_composite_steps(tenant_id=tenant_id, biz_seq_no=biz_seq_no)
     async with factory() as session:
@@ -58,7 +71,30 @@ async def sync_legs_for(
             for s in steps:
                 seq = int(s["stepSeq"])
                 if seq in existing:
-                    existing[seq].status = str(s["status"])
+                    leg = existing[seq]
+                    new_status = str(s["status"])
+                    # ref 漂移告警：external_ref 不可变，不同时只告警不修改
+                    if str(s["sysRefNo"]) != leg.external_ref:
+                        logger.warning(
+                            "external_ref drift: seq=%s old=%s new=%s",
+                            seq,
+                            leg.external_ref,
+                            s["sysRefNo"],
+                        )
+                    # 终态防倒退：完全终态不可改；SUCCESS 只允许向 REVERSED 推进
+                    is_terminal_overwrite = (
+                        leg.status in _HARD_TERMINAL_LEG_STATUSES and new_status != leg.status
+                    ) or (
+                        leg.status == LegStatus.SUCCESS and new_status not in _ALLOWED_FROM_SUCCESS
+                    )
+                    if is_terminal_overwrite:
+                        logger.warning(
+                            "terminal leg status overwrite rejected: seq=%s status=%s",
+                            seq,
+                            leg.status,
+                        )
+                    else:
+                        leg.status = new_status
                 else:
                     session.add(
                         BankTxnLeg(

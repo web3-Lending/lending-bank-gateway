@@ -1,12 +1,22 @@
 import pytest
 from fastapi import FastAPI
 
+from app.clients.wedap import WedapClient
 from app.core.config import get_settings
 from app.main import create_app
 
 
 def test_create_app_returns_fastapi(app: FastAPI) -> None:
     assert isinstance(app, FastAPI)
+
+
+def test_create_app_initializes_wedap_client() -> None:
+    """create_app 必须初始化 app.state.wedap 为 WedapClient 实例。
+
+    防回归：生产首个回调不能因 wedap 未接线而 AttributeError。
+    """
+    result = create_app()
+    assert isinstance(result.state.wedap, WedapClient)
 
 
 def test_create_app_prod_without_secret_raises(monkeypatch: pytest.MonkeyPatch) -> None:

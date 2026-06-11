@@ -7,7 +7,9 @@
 - 空 steps → 不动 leg、order 状态不变
 - aggregate 抛 ValueError → 不崩、order 状态不变、logger.error 产生
 - IllegalTransition（order 已 FAILED 又来 SUCCESS legs）→ 不崩、order 状态不变、logger.error 产生
-- callbacks 端点 after_ingest 接线端到端：POST 回调 → legs 落库 → order 推进
+- callbacks 端点 after_ingest 接线端到端：POST 回调 → legs 落库 → order 推进 → inbox PROCESSED
+- external_ref 漂移：再同步时 sysRefNo 变化 → logger.warning 产生，external_ref 不被修改
+- 终态 leg 防倒退：SUCCESS leg 再同步为 PENDING → 拒绝写入 + logger.warning
 """
 
 import asyncio
@@ -204,7 +206,7 @@ async def test_no_status_change_skips_transition(factory) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 端到端：after_ingest 接线 → POST 回调 → legs 落库 → order 推进
+# 端到端：after_ingest 接线 → POST 回调 → legs 落库 → order 推进 → inbox PROCESSED
 # ---------------------------------------------------------------------------
 
 
@@ -212,12 +214,13 @@ def test_after_ingest_wires_legs_and_advances_order() -> None:
     """callbacks 端点 after_ingest 接线后端到端。
 
     POST /api/v1/callbacks/wedap/transactions → after_ingest（真实实现）
-    → sync_legs_for → legs 落库 → order 推进 SUCCEEDED。
+    → sync_legs_for → legs 落库 → order 推进 SUCCEEDED → inbox.status == PROCESSED。
     """
     from fastapi.testclient import TestClient
 
     from app.main import create_app
     from app.models.base import Base
+    from app.models.callback import CallbackInbox
 
     app = create_app()
 
@@ -273,7 +276,71 @@ def test_after_ingest_wires_legs_and_advances_order() -> None:
         async with f() as s:
             legs = (await s.execute(select(BankTxnLeg))).scalars().all()
             order = (await s.execute(select(BankTxnOrder))).scalar_one()
+            inbox_row = (
+                await s.execute(
+                    select(CallbackInbox).where(
+                        CallbackInbox.tenant_id == "OCBC",
+                        CallbackInbox.request_id == "cb-e2e-001",
+                    )
+                )
+            ).scalar_one()
         assert len(legs) == 2
         assert order.status == OrderStatus.SUCCEEDED
+        # Finding 2：inbox 行必须推进为 PROCESSED
+        assert inbox_row.status == "PROCESSED"
 
     asyncio.run(_verify())
+
+
+# ---------------------------------------------------------------------------
+# Finding 3：external_ref 漂移告警
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_external_ref_drift_warns_and_does_not_update(factory, caplog) -> None:
+    """再同步时 sysRefNo 与已有 external_ref 不同 → logger.warning 产生，external_ref 不被修改。"""
+    # 先落一条 leg（sysRefNo="R1"）
+    await sync_legs_for(factory, wedap=_wedap([STEP]), tenant_id="OCBC", biz_seq_no=BIZ)
+
+    # 再同步：sysRefNo 变成 "R1-DRIFT"
+    drifted = {**STEP, "sysRefNo": "R1-DRIFT"}
+    with caplog.at_level(logging.WARNING, logger="app.services.legs"):
+        await sync_legs_for(factory, wedap=_wedap([drifted]), tenant_id="OCBC", biz_seq_no=BIZ)
+
+    async with factory() as s:
+        legs = (await s.execute(select(BankTxnLeg))).scalars().all()
+
+    # external_ref 不被修改，仍是原值
+    assert len(legs) == 1
+    assert legs[0].external_ref == "R1"
+
+    # 必须产生漂移告警
+    assert any("external_ref drift" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Finding 4：终态 leg 防倒退
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_terminal_leg_status_not_overwritten(factory, caplog) -> None:
+    """SUCCESS（终态）leg 再同步为 PENDING → 拒绝写入，状态保持 SUCCESS，warning 产生。"""
+    # 先落一条 SUCCESS leg
+    await sync_legs_for(factory, wedap=_wedap([STEP]), tenant_id="OCBC", biz_seq_no=BIZ)
+
+    # 再同步：status 变回 PENDING（倒退）
+    downgrade = {**STEP, "status": "PENDING"}
+    with caplog.at_level(logging.WARNING, logger="app.services.legs"):
+        await sync_legs_for(factory, wedap=_wedap([downgrade]), tenant_id="OCBC", biz_seq_no=BIZ)
+
+    async with factory() as s:
+        legs = (await s.execute(select(BankTxnLeg))).scalars().all()
+
+    # 状态不应被覆盖为 PENDING
+    assert len(legs) == 1
+    assert legs[0].status == "SUCCESS"
+
+    # 必须产生终态防倒退告警
+    assert any("terminal leg status overwrite rejected" in r.message for r in caplog.records)
