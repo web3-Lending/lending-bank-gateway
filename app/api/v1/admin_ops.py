@@ -1,0 +1,32 @@
+"""admin 操作端点：outbox 重放等运维接口。"""
+
+from fastapi import APIRouter, HTTPException, Request
+
+from app.core.context import current_ids
+from app.core.envelope import ok
+from app.services.outbox import replay_dead
+
+router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
+
+
+@router.post("/outbox/{outbox_id}/replay")
+async def replay_outbox(outbox_id: int, request: Request) -> dict[str, object]:
+    """将 DEAD 状态的 outbox 行重置为 PENDING 以触发重新投递。
+
+    - 行不存在或非 DEAD 状态 → 404 GW_404_OUTBOX
+    - 成功 → ok({"replayed": outbox_id})
+    """
+    trace_id = current_ids().trace_id
+    factory = request.app.state.session_factory
+    async with factory() as session:
+        async with session.begin():
+            replayed = await replay_dead(session, outbox_id=outbox_id)
+    if not replayed:
+        raise HTTPException(
+            404,
+            detail={
+                "code": "GW_404_OUTBOX",
+                "message": f"outbox {outbox_id} not found or not DEAD",
+            },
+        )
+    return ok({"replayed": outbox_id}, trace_id=trace_id)

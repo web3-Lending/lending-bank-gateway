@@ -425,3 +425,37 @@ def test_replay_received_row_after_ingest_fails_again(client: TestClient) -> Non
     )
     assert row is not None
     assert row.status == "RECEIVED"  # type: ignore[union-attr]
+
+
+# ---------------------------------------------------------------------------
+# T17：after_ingest 真实执行时 outbox 行落库（target=lifecycle）
+# ---------------------------------------------------------------------------
+
+
+def test_after_ingest_enqueues_outbox_row(client: TestClient) -> None:
+    """callback 接收后 _after_ingest 真实执行 → CallbackOutbox 行落库，target=lifecycle。
+
+    mock sync_legs_for（需要 wedap），让 enqueue_forward 真实写库。
+    """
+    from unittest.mock import patch
+
+    from sqlalchemy import select
+
+    from app.models.callback import CallbackOutbox
+
+    async def _query_outbox(engine: Any) -> list[Any]:
+        async with engine.connect() as conn:
+            result = await conn.execute(
+                select(CallbackOutbox).where(CallbackOutbox.tenant_id == "OCBC")
+            )
+            return list(result.fetchall())
+
+    with patch("app.services.legs.sync_legs_for", new_callable=AsyncMock):
+        r = client.post("/api/v1/callbacks/wedap/transactions", json=BODY, headers=HEADERS)
+
+    assert r.status_code == 200
+    assert r.json()["data"]["received"] is True
+
+    rows = asyncio.run(_query_outbox(client.app.state.engine))  # type: ignore[union-attr]
+    assert len(rows) == 1
+    assert rows[0].target == "lifecycle"  # type: ignore[union-attr]

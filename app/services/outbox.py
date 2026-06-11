@@ -1,0 +1,128 @@
+"""outbox 转发服务：enqueue / dispatch_once / replay_dead。
+
+设计要点（规范 14）：
+- 外呼（HTTP POST）在事务外执行，避免长事务持锁
+- dispatch_once 先读 snapshot（无事务），再逐条外呼，再开独立事务更新状态
+- backoff：FAILED 时写 next_retry_at = now + base * 2^(attempts-1)
+- worker 上下文无 HTTP 中间件，日志用 outbox id 关联（trace_id=outbox-<id>）
+"""
+
+import datetime as dt
+import logging
+from typing import Any
+
+import httpx
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from app.models.callback import CallbackOutbox
+
+logger = logging.getLogger(__name__)
+
+
+async def enqueue_forward(
+    session: AsyncSession,
+    *,
+    tenant_id: str,
+    target: str,
+    payload: dict[str, Any],
+) -> CallbackOutbox:
+    """在当前 session（调用方负责事务）插入一条 PENDING outbox 行并返回。"""
+    row = CallbackOutbox(tenant_id=tenant_id, target=target, payload=payload)
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def dispatch_once(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    targets: dict[str, str],
+    max_attempts: int,
+    backoff_base_seconds: float = 2.0,
+) -> int:
+    """投递一轮到期 PENDING/FAILED 行；返回实际处理条数。
+
+    外呼在事务外（规范 14）：先快照读，再逐条外呼，再独立事务写状态。
+    """
+    now = dt.datetime.now(dt.UTC)
+
+    # 1. 快照读（无事务）：取所有 PENDING/FAILED 行
+    async with factory() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(CallbackOutbox).where(CallbackOutbox.status.in_(("PENDING", "FAILED")))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        due = [
+            r
+            for r in rows
+            if r.next_retry_at is None or r.next_retry_at.replace(tzinfo=dt.UTC) <= now
+        ]
+        snapshot = [(r.id, r.tenant_id, r.target, r.payload) for r in due]
+
+    # 2. 逐条外呼（事务外）+ 独立事务更新状态
+    handled = 0
+    for oid, tenant_id, target, payload in snapshot:
+        url = targets.get(target)
+        ok_flag, error = False, None
+
+        if url is None:
+            error = f"no url for target {target}"
+        else:
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.post(
+                        url,
+                        json=payload,
+                        headers={
+                            "X-Caller-Service": "lending-bank-gateway",
+                            "X-Tenant-Id": tenant_id,
+                            "X-Trace-Id": f"outbox-{oid}",
+                            "X-Request-Id": f"outbox-{oid}",
+                        },
+                    )
+                ok_flag = resp.status_code < 300
+                error = None if ok_flag else f"http {resp.status_code}"
+            except httpx.HTTPError as exc:
+                error = type(exc).__name__
+
+        async with factory() as session:
+            async with session.begin():
+                row = await session.get(CallbackOutbox, oid)
+                if row is None:  # pragma: no cover - 理论不可达
+                    continue
+                row.attempts += 1
+                if ok_flag:
+                    row.status = "SENT"
+                elif row.attempts >= max_attempts:
+                    row.status = "DEAD"
+                    row.last_error = error
+                    logger.error("outbox %s DEAD after %s attempts: %s", oid, row.attempts, error)
+                else:
+                    row.status = "FAILED"
+                    row.last_error = error
+                    row.next_retry_at = dt.datetime.now(dt.UTC) + dt.timedelta(
+                        seconds=backoff_base_seconds * (2 ** (row.attempts - 1))
+                    )
+        handled += 1
+
+    return handled
+
+
+async def replay_dead(session: AsyncSession, *, outbox_id: int) -> bool:
+    """将 DEAD 行重置为 PENDING（attempts 清零）。
+
+    调用方负责事务；行不存在或非 DEAD 状态返回 False。
+    """
+    row = await session.get(CallbackOutbox, outbox_id)
+    if row is None or row.status != "DEAD":
+        return False
+    row.status = "PENDING"
+    row.attempts = 0
+    row.next_retry_at = None
+    return True

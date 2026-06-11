@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.v1 import callbacks
+from app.api.v1.admin_ops import router as admin_ops_router
 from app.api.v1.bank_funds import router as bank_funds_router
 from app.api.v1.composite import router as composite_router
 from app.api.v1.health import router as health_router
@@ -18,6 +19,7 @@ from app.core.context import IdentifierMiddleware, current_ids
 from app.core.db import build_engine, build_session_factory
 from app.core.envelope import err
 from app.core.s2s import S2SMiddleware
+from app.services.outbox import enqueue_forward
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +70,7 @@ async def _generic_exception_handler(request: Request, exc: Exception) -> JSONRe
 
 
 async def _after_ingest(request: Request, *, tenant_id: str, body: dict[str, Any]) -> None:
-    """T16 接线：leg 同步 + 父单聚合。T17 outbox 转发追加到此函数。"""
+    """T16 接线：leg 同步 + 父单聚合。T17 outbox 转发：独立事务 enqueue。"""
     from app.services.legs import sync_legs_for
 
     await sync_legs_for(
@@ -77,6 +79,16 @@ async def _after_ingest(request: Request, *, tenant_id: str, body: dict[str, Any
         tenant_id=tenant_id,
         biz_seq_no=str(body.get("bizSeqNo", "")),
     )
+
+    # T17：outbox enqueue（独立事务，与 legs 隔离）
+    async with request.app.state.session_factory() as session:
+        async with session.begin():
+            await enqueue_forward(
+                session,
+                tenant_id=tenant_id,
+                target="lifecycle",
+                payload=body,
+            )
 
 
 def create_app() -> FastAPI:
@@ -120,12 +132,17 @@ def create_app() -> FastAPI:
         base_url=settings.wedap_base_url,
         timeout_seconds=settings.wedap_timeout_seconds,
     )
+    # outbox_targets 供 dispatcher worker（T24）读取；key=target 名，value=目标 URL
+    app.state.outbox_targets = {
+        "lifecycle": settings.callback_target_lifecycle_url,
+    }
     app.state.callback_after_ingest = _after_ingest
     app.include_router(health_router)
     app.include_router(loans_router)
     app.include_router(bank_funds_router)
     app.include_router(composite_router)
     app.include_router(callbacks.router)
+    app.include_router(admin_ops_router)
     return app
 
 
