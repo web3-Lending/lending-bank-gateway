@@ -2,12 +2,16 @@
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import select
 
 from app.api.deps import require_headers
+from app.clients.wedap import WedapError
 from app.core.envelope import ok
+from app.models.txn import BankTxnOrder
 
-router = APIRouter(prefix="/api/v1/composite", tags=["composite"])
+router = APIRouter(prefix="/api/v1/composite-transactions", tags=["composite"])
 
 
 @router.get("/{biz_seq_no}/steps")
@@ -16,9 +20,31 @@ async def composite_steps(
     biz_seq_no: str,
     ids: dict[str, str] = Depends(require_headers),
 ) -> dict[str, Any]:
-    """透传 wedap composite-transactions steps，不做本地 DB 校验。"""
-    steps = await request.app.state.wedap.get_composite_steps(
-        tenant_id=ids["tenant_id"],
-        biz_seq_no=biz_seq_no,
-    )
+    """本地 order 守卫 + 透传 wedap composite-transactions steps。"""
+    # 先查本地 order，不存在则 404
+    factory = request.app.state.session_factory
+    async with factory() as session:
+        row = await session.scalar(
+            select(BankTxnOrder).where(
+                BankTxnOrder.tenant_id == ids["tenant_id"],
+                BankTxnOrder.biz_seq_no == biz_seq_no,
+            )
+        )
+    if row is None:
+        raise HTTPException(
+            404,
+            detail={"code": "GW_404_ORDER", "message": "order not found"},
+        )
+
+    # 再打 wedap，超时/网络错误/wedap 业务错误 → 502
+    try:
+        steps = await request.app.state.wedap.get_composite_steps(
+            tenant_id=ids["tenant_id"],
+            biz_seq_no=biz_seq_no,
+        )
+    except (httpx.TimeoutException, httpx.TransportError, WedapError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={"code": "GW_502_UPSTREAM", "message": "wedap unavailable"},
+        ) from exc
     return ok({"bizSeqNo": biz_seq_no, "steps": steps}, trace_id=ids["trace_id"])

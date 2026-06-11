@@ -1,13 +1,17 @@
-"""北向银行资金 API：collect-from-users + distribute-to-users。"""
+"""北向银行资金 API：collect-from-users + distribute-to-users + status。"""
 
 from decimal import Decimal
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 
 from app.api.deps import assert_idempotency_key_matches, parse_amount, require_headers
+from app.clients.wedap import WedapError
 from app.core.envelope import ok
+from app.models.txn import BankTxnOrder
 from app.services.idempotency import IdempotencyConflict
 from app.services.submit import SubmitRequest, submit_order
 
@@ -116,3 +120,44 @@ async def distribute_to_users(
         currency=body.currencyCode,
         wedap_payload=body.model_dump(mode="json"),
     )
+
+
+@router.get("/status")
+async def query_status(
+    request: Request,
+    ids: dict[str, str] = Depends(require_headers),
+    biz_seq_no: str = Query(..., alias="bizSeqNo"),
+) -> dict[str, Any]:
+    """查询本地 order 状态 + wedap 实时状态（wedap 不可用时降级为 unavailable=True）。"""
+    factory = request.app.state.session_factory
+    async with factory() as session:
+        row = await session.scalar(
+            select(BankTxnOrder).where(
+                BankTxnOrder.tenant_id == ids["tenant_id"],
+                BankTxnOrder.biz_seq_no == biz_seq_no,
+            )
+        )
+    if row is None:
+        raise HTTPException(
+            404,
+            detail={"code": "GW_404_ORDER", "message": f"order not found: {biz_seq_no}"},
+        )
+
+    # 查询 wedap 实时状态；失败降级，不向外抛 500
+    try:
+        wedap_data: dict[str, Any] = await request.app.state.wedap.query_funds_status(
+            tenant_id=ids["tenant_id"],
+            request_id=ids["request_id"],
+            biz_seq_no=biz_seq_no,
+        )
+    except (httpx.TimeoutException, httpx.TransportError):
+        wedap_data = {"unavailable": True, "reason": "timeout"}
+    except WedapError:
+        wedap_data = {"unavailable": True, "reason": "wedap_error"}
+
+    result: dict[str, Any] = {
+        "bizSeqNo": row.biz_seq_no,
+        "orderStatus": row.status,
+        "wedap": wedap_data,
+    }
+    return ok(result, trace_id=ids["trace_id"])
