@@ -64,6 +64,7 @@ def db_session(mysql_engine: sa.Engine):
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
+from app.models.callback import CallbackInbox  # noqa: E402
 from app.models.txn import BankTxnLeg, BankTxnOrder  # noqa: E402
 
 
@@ -266,3 +267,15 @@ def test_alembic_upgrade_head_and_on_update_mysql(mysql_engine: sa.Engine) -> No
         ).scalar_one()
 
     assert after > before, f"ON UPDATE CURRENT_TIMESTAMP 未生效：before={before!r}, after={after!r}"
+
+
+def test_inbox_uq_tenant_src_req_mysql(db_session: Session) -> None:
+    """MySQL：同 (tenant_id, source, request_id) 触发 IntegrityError (uq_inbox_tenant_src_req)。"""
+    row = dict(
+        tenant_id="WBTHK01", source="WEDAP_TXN", request_id="CB-20260611-001", payload={"k": 1}
+    )
+    db_session.add(CallbackInbox(**row))
+    db_session.flush()
+    db_session.add(CallbackInbox(**row))
+    with pytest.raises(IntegrityError):
+        db_session.flush()
