@@ -263,3 +263,34 @@ def test_non_dedup_integrity_error_500() -> None:
 async def _create_tables_app(app: Any) -> None:
     async with app.state.engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+
+# ---------------------------------------------------------------------------
+# T18-a：version 下界 v0 → 400
+# ---------------------------------------------------------------------------
+
+
+def test_version_zero_400(client: TestClient) -> None:
+    """X-Request-Id version=0 → 400 GW_400_VALIDATION（version must be >= 1）。"""
+    h = {**HEADERS, "X-Request-Id": "recon-result-RECON-OCBC-20260604-v0"}
+    r = client.post("/api/v1/recon/notify", json=BODY, headers=h)
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "GW_400_VALIDATION"
+
+
+# ---------------------------------------------------------------------------
+# T18-b：taskNo 含多段 -v 时，右起第一个 -v<digits> 是版本段
+# ---------------------------------------------------------------------------
+
+
+def test_ambiguous_task_no_rsplit_parse(client: TestClient) -> None:
+    """X-Request-Id=recon-result-A-v2-v3 → taskNo=="A-v2", version==3。
+
+    rsplit("-v", 1) 语义钉死：右起第一个 -v<digits> 为版本段，taskNo 取中段（含 A-v2）。
+    """
+    h = {**HEADERS, "X-Request-Id": "recon-result-A-v2-v3"}
+    r = client.post("/api/v1/recon/notify", json=BODY, headers=h)
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["taskNo"] == "A-v2"
+    assert data["version"] == 3

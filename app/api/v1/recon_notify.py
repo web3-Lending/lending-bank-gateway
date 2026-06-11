@@ -25,7 +25,7 @@ from app.models.recon import ReconResultTask
 
 router = APIRouter(prefix="/api/v1/recon", tags=["recon"])
 
-_REQ_ID = re.compile(r"^recon-result-(?P<task_no>.+)-v(?P<version>\d+)$")
+_REQ_ID = re.compile(r"^recon-result-.+-v\d+$")
 
 # 唯一约束名（MySQL）与 SQLite UNIQUE constraint failed 字段路径
 _DEDUP_CONSTRAINTS = (
@@ -52,14 +52,29 @@ def _is_dedup(exc: IntegrityError) -> bool:
     )
 
 
+def _parse_request_id(request_id: str) -> tuple[str, int] | None:
+    """从 X-Request-Id 解析 (task_no, version)。
+
+    格式：recon-result-{taskNo}-v{version}
+    解析策略：rsplit("-v", 1) 右起第一个 -v<digits> 为版本段，消除贪婪正则歧义。
+    形态校验仍由 _REQ_ID 全局正则兜底。
+    """
+    if not _REQ_ID.match(request_id):
+        return None
+    # 去掉 "recon-result-" 前缀后 rsplit
+    body_part = request_id[len("recon-result-") :]
+    task_no, ver_str = body_part.rsplit("-v", 1)
+    return task_no, int(ver_str)
+
+
 @router.post("/notify")
 async def recon_notify(request: Request, body: dict[str, Any]) -> dict[str, Any]:
     hdr = require_headers(request)
-    m = _REQ_ID.match(hdr["request_id"])
+    parsed = _parse_request_id(hdr["request_id"])
     files = body.get("files") or []
 
     if (
-        not m
+        parsed is None
         or not re.fullmatch(r"\d{8}", str(body.get("reconDate", "")))
         or not body.get("s3Bucket")
         or not files
@@ -82,8 +97,15 @@ async def recon_notify(request: Request, body: dict[str, Any]) -> dict[str, Any]
             },
         )
 
-    task_no = m.group("task_no")
-    version = int(m.group("version"))
+    task_no, version = parsed
+    if version < 1:
+        raise HTTPException(
+            400,
+            detail={
+                "code": "GW_400_VALIDATION",
+                "message": "version must be >= 1",
+            },
+        )
     dedup = False
 
     try:
