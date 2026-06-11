@@ -1,0 +1,7 @@
+.worktrees/
+.venv/
+__pycache__/
+*.pyc
+.coverage
+.gstack/
+.context/
