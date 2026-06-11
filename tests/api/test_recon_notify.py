@@ -294,3 +294,34 @@ def test_ambiguous_task_no_rsplit_parse(client: TestClient) -> None:
     data = r.json()["data"]
     assert data["taskNo"] == "A-v2"
     assert data["version"] == 3
+
+
+# ---------------------------------------------------------------------------
+# P2-2: files 门禁 — 多文件 → 400
+# ---------------------------------------------------------------------------
+
+
+def test_two_files_400(client: TestClient) -> None:
+    """P2-2: files 含 2 个元素 → 400 GW_400_VALIDATION exactly one file expected。"""
+    two_files_body = {
+        **BODY,
+        "files": [
+            {
+                "fileName": "file1.xlsx",
+                "s3Key": "k/file1.xlsx",
+                "md5": "aabbccdd",
+                "totalCount": 0,
+            },
+            {
+                "fileName": "file2.xlsx",
+                "s3Key": "k/file2.xlsx",
+                "md5": "eeff0011",
+                "totalCount": 0,
+            },
+        ],
+    }
+    r = client.post("/api/v1/recon/notify", json=two_files_body, headers=HEADERS)
+    assert r.status_code == 400
+    detail = r.json()["error"]
+    assert detail["code"] == "GW_400_VALIDATION"
+    assert "exactly one file" in detail["message"]

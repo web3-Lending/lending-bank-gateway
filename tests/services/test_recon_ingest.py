@@ -840,3 +840,392 @@ async def test_parse_and_land_idempotent_on_superseded(factory, tmp_path) -> Non
         ).scalar_one()
 
     assert diff_count == 0, "SUPERSEDED 任务不应写入任何差异行"
+
+
+# ───────────────────────── Test: DataQualityError 属性 ──────────────────────
+
+
+def test_data_quality_error_attributes() -> None:
+    """DataQualityError 携带 column 和 value 属性。"""
+    from app.services.recon_ingest import DataQualityError
+
+    err = DataQualityError("amount", "abc")
+    assert err.column == "amount"
+    assert err.value == "abc"
+    assert "column='amount'" in str(err)
+    assert "value='abc'" in str(err)
+
+
+def test_dec_invalid_without_column_returns_none() -> None:
+    """_dec 无效值 + column=None → 返回 None（不抛异常）。"""
+    from app.services.recon_ingest import _dec
+
+    assert _dec("not-a-number", column=None) is None
+
+
+def test_dec_invalid_with_column_raises() -> None:
+    """_dec 无效值 + column 非 None → 抛 DataQualityError。"""
+    from app.services.recon_ingest import DataQualityError, _dec
+
+    with pytest.raises(DataQualityError) as exc_info:
+        _dec("abc", column="wedap_amount")
+    assert exc_info.value.column == "wedap_amount"
+    assert exc_info.value.value == "abc"
+
+
+# ───────────────────────── Test: 脏金额 FAILED + 三表 0 行 ──────────────────
+
+
+@pytest.mark.asyncio
+async def test_dirty_amount_fails_task_no_rows(factory, tmp_path) -> None:
+    """差异 sheet 中有无法解析的金额 → task FAILED + column_check data_error + 三表 0 行。"""
+    from sqlalchemy import func, select
+
+    xlsx = tmp_path / "dirty.xlsx"
+    wb = __import__("openpyxl", fromlist=["Workbook"]).Workbook()
+    ws = wb.active
+    ws.title = "Differences"
+    ws.append(DIFF_HEADER)
+    # wedap_amount = "abc"（脏金额）
+    ws.append(["AMOUNT", "DSB-001", "BANK-001", "abc", "99.9900", "0.0100", "SUCCESS", "SETTLED"])
+    w2 = wb.create_sheet("WeDAP Source")
+    w2.append(WEDAP_HEADER)
+    w3 = wb.create_sheet("Bank Source")
+    w3.append(BANK_HEADER)
+    wb.save(xlsx)
+
+    async with factory() as session:
+        async with session.begin():
+            task = _task(status="DOWNLOADED", diff_count=1)
+            session.add(task)
+    async with factory() as session:
+        row = (
+            await session.execute(
+                __import__("sqlalchemy", fromlist=["select"]).select(ReconResultTask)
+            )
+        ).scalar_one()
+        tid = row.id
+
+    from app.services.recon_ingest import DataQualityError
+
+    with pytest.raises(DataQualityError):
+        await parse_and_land(factory, task_id=tid, xlsx_path=str(xlsx))
+
+    async with factory() as session:
+        task = await session.get(ReconResultTask, tid)
+        assert task is not None
+        assert task.status == "FAILED"
+        assert task.column_check is not None
+        assert "data_error" in task.column_check
+
+        # 三表均 0 行（事务回滚）
+        diff_count = (
+            await session.execute(
+                select(func.count())
+                .select_from(ReconResultDiff)
+                .where(ReconResultDiff.task_id == tid)
+            )
+        ).scalar_one()
+        wedap_count = (
+            await session.execute(
+                select(func.count())
+                .select_from(ReconResultSourceWedap)
+                .where(ReconResultSourceWedap.task_id == tid)
+            )
+        ).scalar_one()
+        bank_count = (
+            await session.execute(
+                select(func.count())
+                .select_from(ReconResultSourceBank)
+                .where(ReconResultSourceBank.task_id == tid)
+            )
+        ).scalar_one()
+    assert diff_count == 0, "脏金额事务回滚后 ReconResultDiff 应 0 行"
+    assert wedap_count == 0
+    assert bank_count == 0
+
+
+# ───────────────────────── Test: 事务内 txn-guard DOWNLOADING skip ───────────
+
+
+@pytest.mark.asyncio
+async def test_parse_entry_guard_skips_downloading(factory, tmp_path) -> None:
+    """入口预检查：task 为 DOWNLOADING 时 parse_and_land 静默 return（lines 169-175）。"""
+    xlsx = tmp_path / "guard_entry.xlsx"
+    _make_xlsx(xlsx)
+
+    async with factory() as session:
+        async with session.begin():
+            task = _task(status="DOWNLOADING")
+            session.add(task)
+    async with factory() as session:
+        row = (
+            await session.execute(
+                __import__("sqlalchemy", fromlist=["select"]).select(ReconResultTask)
+            )
+        ).scalar_one()
+        tid = row.id
+
+    # 入口预检查读到 DOWNLOADING，直接 return（幂等）
+    await parse_and_land(factory, task_id=tid, xlsx_path=str(xlsx))
+
+    async with factory() as session:
+        task = await session.get(ReconResultTask, tid)
+    # 状态保持 DOWNLOADING
+    assert task is not None
+    assert task.status == "DOWNLOADING"
+
+
+@pytest.mark.asyncio
+async def test_parse_txn_guard_skips_non_downloaded(factory, tmp_path) -> None:
+    """事务内 txn-guard（lines 224-229）：入口预检查通过后，with_for_update 重读到
+    非 DOWNLOADED 状态时，静默 return，不落行。
+
+    用 _WrappedFactory 代理 factory：第 2 次 __call__ 进入 context 时先把 DB
+    里的 task 改成 DOWNLOADING，使 txn-guard 触发。
+    """
+    from sqlalchemy import select as sa_select
+    from sqlalchemy import update
+
+    xlsx = tmp_path / "guard_txn.xlsx"
+    _make_xlsx(xlsx)
+
+    async with factory() as session:
+        async with session.begin():
+            task = _task(status="DOWNLOADED")
+            session.add(task)
+
+    async with factory() as session:
+        row = (await session.execute(sa_select(ReconResultTask))).scalar_one()
+        tid = row.id
+
+    class _PatchedCtx:
+        """第 2 次 factory() 返回的 context manager：进入时先改 DB 状态再代理真 session。"""
+
+        def __init__(self, real_factory):
+            self._real_factory = real_factory
+            self._real_ctx = None
+
+        async def __aenter__(self):
+            # 先改状态
+            async with self._real_factory() as s:
+                async with s.begin():
+                    await s.execute(
+                        update(ReconResultTask)
+                        .where(ReconResultTask.id == tid)
+                        .values(status="DOWNLOADING")
+                    )
+            # 再打开真 session
+            self._real_ctx = self._real_factory()
+            return await self._real_ctx.__aenter__()
+
+        async def __aexit__(self, *args):
+            if self._real_ctx is not None:
+                return await self._real_ctx.__aexit__(*args)
+
+    class _WrappedFactory:
+        def __init__(self, real):
+            self._real = real
+            self._call_count = 0
+
+        def __call__(self):
+            self._call_count += 1
+            if self._call_count == 2:
+                return _PatchedCtx(self._real)
+            return self._real()
+
+    wrapped = _WrappedFactory(factory)
+
+    await parse_and_land(wrapped, task_id=tid, xlsx_path=str(xlsx))
+
+    async with factory() as session:
+        t = await session.get(ReconResultTask, tid)
+    # txn-guard 触发 return → 三表 0 行，task 保持 DOWNLOADING（未被 PARSED）
+    assert t is not None
+    assert t.status == "DOWNLOADING"
+
+
+# ───────────────────────── Test: worker 原子 claim 失败 skip ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_worker_atomic_claim_skips_already_claimed(factory, tmp_path, monkeypatch) -> None:
+    """worker 中 _atomic_claim 返回 False（已被他人 claim）→ skip，handled 不计入。
+
+    monkeypatch _atomic_claim 直接返回 False，确保 snapshot 查到 NOTIFIED task 但 claim 路径
+    走到 skip-continue 分支（lines 100-105）。
+    """
+    from app.clients.s3 import S3FileClient
+    from app.workers import recon_worker
+    from app.workers.recon_worker import ingest_pending_once
+
+    async with factory() as session:
+        async with session.begin():
+            task = _task(status="NOTIFIED", task_no="RECON-CLAIM-001", request_id="REQ-CLAIM-001")
+            session.add(task)
+
+    def no_download(self, *, bucket, key, expected_md5, dest):
+        raise AssertionError("download should not be called when claim fails")
+
+    monkeypatch.setattr(S3FileClient, "download_verified", no_download)
+
+    # monkeypatch _atomic_claim 返回 False（模拟他人已先 claim）
+    async def fake_claim(factory_, task_id):
+        return False
+
+    monkeypatch.setattr(recon_worker, "_atomic_claim", fake_claim)
+
+    s3 = S3FileClient(endpoint_url=None)
+    handled = await ingest_pending_once(factory, s3=s3, archive_dir=str(tmp_path / "arch_claim"))
+    # claim 失败 → skip → handled=0
+    assert handled == 0
+
+
+# ───────────────────────── Test: worker parse RuntimeError 置 FAILED ─────────
+
+
+@pytest.mark.asyncio
+async def test_worker_parse_runtime_error_fails_task_continues(
+    factory, tmp_path, monkeypatch
+) -> None:
+    """worker parse 阶段 parse_and_land 抛 RuntimeError → task FAILED + parse_error 留痕 +
+    后续 task 仍被处理（不阻塞）。"""
+    from app.clients.s3 import S3FileClient
+    from app.workers.recon_worker import ingest_pending_once
+
+    # 建两个 NOTIFIED task：第一个解析会失败，第二个正常
+    xlsx_ok = tmp_path / "ok2.xlsx"
+    _make_xlsx(
+        xlsx_ok,
+        diff_rows=[["AMOUNT", "DSB-003", "BANK-003", "50.0000", "50.0000", "0.0000", "OK", "OK"]],
+        wedap_rows=[["DSB", "DSB-003", "BANK-003", "50.0000", "USD", "P1", "P2", "OK", None]],
+        bank_rows=[["BANK-003", "20260611", "50.0000", "USD", "P1", "P2", "OK", "f.xlsx", 1]],
+    )
+
+    async with factory() as session:
+        async with session.begin():
+            t_err = _task(
+                status="NOTIFIED", task_no="RECON-ERR-001", version=1, request_id="REQ-ERR-001"
+            )
+            t_ok = _task(
+                status="NOTIFIED", task_no="RECON-RT-OK-001", version=1, request_id="REQ-RT-OK-001"
+            )
+            session.add(t_err)
+            session.add(t_ok)
+
+    from sqlalchemy import select
+
+    async with factory() as session:
+        rows = (
+            (await session.execute(select(ReconResultTask).order_by(ReconResultTask.task_no)))
+            .scalars()
+            .all()
+        )
+    tid_err = next(r.id for r in rows if r.task_no == "RECON-ERR-001")
+    tid_ok = next(r.id for r in rows if r.task_no == "RECON-RT-OK-001")
+
+    call_count = 0
+
+    def fake_download(self, *, bucket, key, expected_md5, dest):
+        nonlocal call_count
+        call_count += 1
+        import shutil
+
+        # RECON-ERR-001 下载成功（再在 parse 阶段注入错误）
+        shutil.copy(str(xlsx_ok), dest)
+
+    monkeypatch.setattr(S3FileClient, "download_verified", fake_download)
+
+    # 对 parse_and_land 打补丁：仅第一次（ERR task）抛 RuntimeError
+    from app.services import recon_ingest
+
+    original_parse = recon_ingest.parse_and_land
+    parse_call = 0
+
+    async def patched_parse(factory, *, task_id, xlsx_path):
+        nonlocal parse_call
+        parse_call += 1
+        if parse_call == 1:
+            raise RuntimeError("injected parse error")
+        return await original_parse(factory, task_id=task_id, xlsx_path=xlsx_path)
+
+    monkeypatch.setattr("app.workers.recon_worker.parse_and_land", patched_parse)
+
+    s3 = S3FileClient(endpoint_url=None)
+    handled = await ingest_pending_once(factory, s3=s3, archive_dir=str(tmp_path / "arch_rt"))
+    assert handled == 2
+
+    async with factory() as session:
+        t_err_row = await session.get(ReconResultTask, tid_err)
+        t_ok_row = await session.get(ReconResultTask, tid_ok)
+
+    assert t_err_row is not None
+    assert t_err_row.status == "FAILED"
+    assert t_err_row.column_check is not None
+    assert t_err_row.column_check.get("parse_error") == "RuntimeError"
+
+    assert t_ok_row is not None
+    assert t_ok_row.status == "PARSED"
+
+
+# ───────────────────────── Test: 跨租户 supersede 隔离 ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_supersede_tenant_isolation(factory, tmp_path) -> None:
+    """P1-1: A 租户解析 v2 后，B 租户同 task_no 同 version v1 不被 SUPERSEDED。"""
+    from sqlalchemy import select
+
+    xlsx_v2 = tmp_path / "v2_iso.xlsx"
+    _make_xlsx(xlsx_v2)
+
+    # 插：A 租户 v1(PARSED) + A 租户 v2(DOWNLOADED) + B 租户 v1(PARSED)
+    async with factory() as session:
+        async with session.begin():
+            a_v1 = _task(tenant_id="TENANT_A", version=1, status="PARSED", request_id="REQ-A-001")
+            a_v2 = _task(
+                tenant_id="TENANT_A", version=2, status="DOWNLOADED", request_id="REQ-A-002"
+            )
+            b_v1 = _task(
+                tenant_id="TENANT_B",
+                version=1,
+                status="PARSED",
+                request_id="REQ-B-001",
+                s3_key="recon/20260611/result_b.xlsx",  # 不同 s3_key 避免唯一冲突
+            )
+            session.add(a_v1)
+            session.add(a_v2)
+            session.add(b_v1)
+
+    async with factory() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(ReconResultTask).order_by(
+                        ReconResultTask.tenant_id, ReconResultTask.version
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    tid_a_v1 = next(r.id for r in rows if r.tenant_id == "TENANT_A" and r.version == 1)
+    tid_a_v2 = next(r.id for r in rows if r.tenant_id == "TENANT_A" and r.version == 2)
+    tid_b_v1 = next(r.id for r in rows if r.tenant_id == "TENANT_B" and r.version == 1)
+
+    # 解析 A 的 v2
+    await parse_and_land(factory, task_id=tid_a_v2, xlsx_path=str(xlsx_v2))
+
+    async with factory() as session:
+        a1 = await session.get(ReconResultTask, tid_a_v1)
+        a2 = await session.get(ReconResultTask, tid_a_v2)
+        b1 = await session.get(ReconResultTask, tid_b_v1)
+
+    # A 租户 v1 → SUPERSEDED（正常 supersede）
+    assert a1 is not None and a1.status == "SUPERSEDED"
+    # A 租户 v2 → PARSED
+    assert a2 is not None and a2.status == "PARSED"
+    # B 租户 v1 → 仍 PARSED（跨租户隔离，不受影响）
+    assert b1 is not None and b1.status == "PARSED", (
+        f"B 租户 v1 应保持 PARSED，实际状态: {b1.status}"
+    )

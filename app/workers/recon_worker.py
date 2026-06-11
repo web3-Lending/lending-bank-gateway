@@ -1,6 +1,14 @@
 """app/workers/recon_worker.py
 
-摄取 worker：扫 NOTIFIED 任务 → 下载校验 → DOWNLOADED → 解析落库 PARSED。
+摄取 worker：扫 NOTIFIED 任务 → 原子 claim DOWNLOADING → 下载校验 → DOWNLOADED → 解析落库 PARSED。
+
+状态枚举（完整）：
+  NOTIFIED    — 已收到通知，等待 worker 处理
+  DOWNLOADING — 已被某 worker 原子 claim，正在下载（并发安全）
+  DOWNLOADED  — 下载完成，等待解析
+  PARSED      — 解析落库完成
+  FAILED      — 下载或解析失败
+  SUPERSEDED  — 被同 task_no 更高版本覆盖
 
 run_forever 为薄壳循环，pragma: no cover；核心逻辑在 ingest_pending_once。
 """
@@ -10,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from typing import cast
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -38,18 +47,39 @@ async def _set_status(
             )
 
 
+async def _atomic_claim(
+    factory: async_sessionmaker[AsyncSession],
+    task_id: int,
+) -> bool:
+    """原子 claim：UPDATE ... SET status='DOWNLOADING' WHERE id=:id AND status='NOTIFIED'。
+
+    返回 True 表示 claim 成功（rowcount==1）；False 表示已被他人 claim，调用方应 skip。
+    """
+    async with factory() as session:
+        async with session.begin():
+            result = await session.execute(
+                update(ReconResultTask)
+                .where(
+                    ReconResultTask.id == task_id,
+                    ReconResultTask.status == "NOTIFIED",
+                )
+                .values(status="DOWNLOADING")
+            )
+    return cast(bool, result.rowcount == 1)  # type: ignore[attr-defined]
+
+
 async def ingest_pending_once(
     factory: async_sessionmaker[AsyncSession],
     *,
     s3: S3FileClient,
     archive_dir: str,
 ) -> int:
-    """扫 NOTIFIED → to_thread 下载校验 → DOWNLOADED → 解析落库 PARSED。
+    """扫 NOTIFIED → 原子 claim DOWNLOADING → to_thread 下载校验 → DOWNLOADED → 解析落库 PARSED。
 
-    单笔失败（Md5Mismatch/ColumnDrift/S3 异常）置 FAILED 不阻塞其它 task；
+    单笔失败（Md5Mismatch/ColumnDrift/S3 异常/其它异常）置 FAILED 不阻塞其它 task；
     worker 上下文无 trace（X-Trace-Id 语义不适用，日志以 task_no/version 关联）。
 
-    返回本轮处理的 task 数量（含失败）。
+    返回本轮处理的 task 数量（含失败；被他人 claim 的不计入）。
     """
     async with factory() as session:
         tasks = (
@@ -65,6 +95,16 @@ async def ingest_pending_once(
 
     handled = 0
     for tid, bucket, key, md5, task_no, version in snapshot:
+        # ── 原子 claim：防止多 worker 并发重复处理 ───────────────────────
+        claimed = await _atomic_claim(factory, tid)
+        if not claimed:
+            logger.warning(
+                "recon ingest skip %s v%s: already claimed by another worker",
+                task_no,
+                version,
+            )
+            continue
+
         dest = f"{archive_dir}/{task_no}_v{version}.xlsx"
         os.makedirs(os.path.dirname(dest), exist_ok=True)
 
@@ -95,7 +135,19 @@ async def ingest_pending_once(
         try:
             await parse_and_land(factory, task_id=tid, xlsx_path=dest)
         except ColumnDrift:
-            logger.exception("recon ingest parse failed %s v%s", task_no, version)
+            # ColumnDrift 已由 parse_and_land 自置 FAILED，不重复处理
+            logger.exception("recon ingest parse failed (ColumnDrift) %s v%s", task_no, version)
+        except Exception as exc:
+            # 其它异常（DataQualityError / RuntimeError / ...）→ 置 FAILED + 留痕
+            logger.exception(
+                "recon ingest parse failed (%s) %s v%s", type(exc).__name__, task_no, version
+            )
+            await _set_status(
+                factory,
+                tid,
+                "FAILED",
+                {"column_check": {"parse_error": type(exc).__name__}},
+            )
 
         handled += 1
 

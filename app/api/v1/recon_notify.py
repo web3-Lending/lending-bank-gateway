@@ -87,7 +87,17 @@ async def recon_notify(request: Request, body: dict[str, Any]) -> dict[str, Any]
             },
         )
 
-    f = files[0]  # 契约：当前恒 1 个文件
+    # P2-2: 严格要求恰好 1 个文件（多文件为调用方错误，拒绝 400）
+    if len(files) != 1:
+        raise HTTPException(
+            400,
+            detail={
+                "code": "GW_400_VALIDATION",
+                "message": "exactly one file expected",
+            },
+        )
+
+    f = files[0]
     if not all(f.get(k) for k in ("fileName", "s3Key", "md5")) or "totalCount" not in f:
         raise HTTPException(
             400,

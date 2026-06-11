@@ -29,6 +29,16 @@ from app.models.recon import (
     ReconResultTask,
 )
 
+
+class DataQualityError(Exception):
+    """非空金额字段无法解析为 Decimal（脏数据，应触发 FAILED 置位）。"""
+
+    def __init__(self, column: str, value: Any) -> None:
+        super().__init__(f"column={column!r} value={value!r} cannot be parsed as Decimal")
+        self.column = column
+        self.value = value
+
+
 logger = logging.getLogger(__name__)
 
 PARSER_VERSION = "1"
@@ -74,13 +84,20 @@ class ColumnDrift(Exception):
     """Sheet 列头与期望不符，或必要 Sheet 缺失。"""
 
 
-def _dec(v: Any) -> Decimal | None:
-    """将单元格值转为 Decimal；空值返回 None。"""
+def _dec(v: Any, column: str | None = None) -> Decimal | None:
+    """将单元格值转为 Decimal；空值返回 None；非空非法值抛 DataQualityError。
+
+    Args:
+        v: 单元格原值。
+        column: 列名，仅在非空解析失败时填入 DataQualityError。
+    """
     if v is None or v == "":
         return None
     try:
         return Decimal(str(v))
-    except InvalidOperation:
+    except InvalidOperation as exc:
+        if column is not None:
+            raise DataQualityError(column, v) from exc
         return None
 
 
@@ -141,14 +158,15 @@ async def parse_and_land(
 
     成功：task → PARSED，三子表批量 insert，低版本（status != SUPERSEDED）→ SUPERSEDED。
     失败（ColumnDrift）：task → FAILED，column_check 记录 drift 信息，re-raise。
+    失败（DataQualityError）：task → FAILED，column_check 记录 data_error，re-raise。
     """
-    # ── 1. 读取 task 基础信息 ──────────────────────────────────────────────
+    # ── 1. 读取 task 基础信息（入口预检查，无锁；事务内终检为准）──────────
     async with factory() as session:
         task = await session.get(ReconResultTask, task_id)
         if task is None:
             raise ValueError(f"ReconResultTask id={task_id} not found")
-        # 幂等防御：PARSED / SUPERSEDED 状态表示已解析完成，直接返回避免重复写入
-        if task.status in ("PARSED", "SUPERSEDED"):
+        # 幂等防御入口预检查：非 DOWNLOADED 状态直接跳过
+        if task.status not in ("DOWNLOADED",):
             logger.warning(
                 "parse_and_land called on task_id=%s with status=%s; skipping (idempotent)",
                 task_id,
@@ -200,104 +218,127 @@ async def parse_and_land(
     # ── 4. 单事务：批量 insert + task PARSED + supersede 低版本 ───────────
     async with factory() as session:
         async with session.begin():
+            # 4-pre. 事务内终检：with_for_update 重读，仅 DOWNLOADED 可继续
+            t_check = await session.get(ReconResultTask, task_id, with_for_update=True)
+            if t_check is None or t_check.status not in ("DOWNLOADED",):
+                logger.warning(
+                    "parse_and_land txn-guard: task_id=%s status=%s; skipping",
+                    task_id,
+                    t_check.status if t_check is not None else "GONE",
+                )
+                return
+
             # 4a. 差异明细
-            for row in diff_rows:
-                (
-                    diff_type,
-                    wedap_biz_seq_no,
-                    bank_seq_no,
-                    wedap_amount,
-                    bank_amount,
-                    diff_amount,
-                    wedap_status,
-                    bank_status,
-                ) = row[:8]
-                session.add(
-                    ReconResultDiff(
-                        tenant_id=tenant_id,
-                        task_id=task_id,
-                        diff_type=_str(diff_type) or "",
-                        wedap_biz_seq_no=_str(wedap_biz_seq_no),
-                        bank_seq_no=_str(bank_seq_no),
-                        wedap_amount=_dec(wedap_amount),
-                        bank_amount=_dec(bank_amount),
-                        diff_amount=_dec(diff_amount),
-                        wedap_status=_str(wedap_status),
-                        bank_status=_str(bank_status),
+            try:
+                for _row_idx, row in enumerate(diff_rows):
+                    (
+                        diff_type,
+                        wedap_biz_seq_no,
+                        bank_seq_no,
+                        wedap_amount,
+                        bank_amount,
+                        diff_amount,
+                        wedap_status,
+                        bank_status,
+                    ) = row[:8]
+                    session.add(
+                        ReconResultDiff(
+                            tenant_id=tenant_id,
+                            task_id=task_id,
+                            diff_type=_str(diff_type) or "",
+                            wedap_biz_seq_no=_str(wedap_biz_seq_no),
+                            bank_seq_no=_str(bank_seq_no),
+                            wedap_amount=_dec(wedap_amount, "wedap_amount"),
+                            bank_amount=_dec(bank_amount, "bank_amount"),
+                            diff_amount=_dec(diff_amount, "diff_amount"),
+                            wedap_status=_str(wedap_status),
+                            bank_status=_str(bank_status),
+                        )
                     )
-                )
 
-            # 4b. WeDAP 源数据
-            for row in wedap_rows:
-                (
-                    biz_type,
-                    biz_seq_no,
-                    bank_biz_seq_no,
-                    amount,
-                    currency,
-                    payer,
-                    payee,
-                    status,
-                    error,
-                ) = row[:9]
-                session.add(
-                    ReconResultSourceWedap(
-                        tenant_id=tenant_id,
-                        task_id=task_id,
-                        biz_type=_str(biz_type),
-                        biz_seq_no=_str(biz_seq_no) or "",
-                        bank_biz_seq_no=_str(bank_biz_seq_no),
-                        amount=_dec(amount),
-                        currency=_str(currency),
-                        payer_account=_str(payer),
-                        payee_account=_str(payee),
-                        status=_str(status),
-                        error_msg=_str(error),
+                # 4b. WeDAP 源数据
+                for _row_idx, row in enumerate(wedap_rows):
+                    (
+                        biz_type,
+                        biz_seq_no,
+                        bank_biz_seq_no,
+                        amount,
+                        currency,
+                        payer,
+                        payee,
+                        status,
+                        error,
+                    ) = row[:9]
+                    session.add(
+                        ReconResultSourceWedap(
+                            tenant_id=tenant_id,
+                            task_id=task_id,
+                            biz_type=_str(biz_type),
+                            biz_seq_no=_str(biz_seq_no) or "",
+                            bank_biz_seq_no=_str(bank_biz_seq_no),
+                            amount=_dec(amount, "amount"),
+                            currency=_str(currency),
+                            payer_account=_str(payer),
+                            payee_account=_str(payee),
+                            status=_str(status),
+                            error_msg=_str(error),
+                        )
                     )
-                )
 
-            # 4c. 银行源数据
-            for row in bank_rows:
-                (
-                    bank_seq_no,
-                    txn_date,
-                    amount,
-                    currency,
-                    payer,
-                    payee,
-                    status,
-                    file_name,
-                    line_no,
-                ) = row[:9]
-                session.add(
-                    ReconResultSourceBank(
-                        tenant_id=tenant_id,
-                        task_id=task_id,
-                        bank_seq_no=_str(bank_seq_no) or "",
-                        txn_date=_str(txn_date),
-                        amount=_dec(amount),
-                        currency=_str(currency),
-                        payer_account=_str(payer),
-                        payee_account=_str(payee),
-                        status=_str(status),
-                        file_name=_str(file_name),
-                        line_no=_int(line_no),
+                # 4c. 银行源数据
+                for _row_idx, row in enumerate(bank_rows):
+                    (
+                        bank_seq_no,
+                        txn_date,
+                        amount,
+                        currency,
+                        payer,
+                        payee,
+                        status,
+                        file_name,
+                        line_no,
+                    ) = row[:9]
+                    session.add(
+                        ReconResultSourceBank(
+                            tenant_id=tenant_id,
+                            task_id=task_id,
+                            bank_seq_no=_str(bank_seq_no) or "",
+                            txn_date=_str(txn_date),
+                            amount=_dec(amount, "amount"),
+                            currency=_str(currency),
+                            payer_account=_str(payer),
+                            payee_account=_str(payee),
+                            status=_str(status),
+                            file_name=_str(file_name),
+                            line_no=_int(line_no),
+                        )
                     )
-                )
+            except DataQualityError as dqe:
+                # 脏金额不静默：独立事务置 FAILED + data_error 留痕，主事务回滚（三表 0 行）
+                dq_payload: dict[str, Any] = {
+                    "data_error": f"column={dqe.column!r} value={dqe.value!r}"
+                }
+                async with factory() as _sess:
+                    async with _sess.begin():
+                        _t = await _sess.get(ReconResultTask, task_id)
+                        if _t is not None:  # pragma: no branch
+                            _t.status = "FAILED"
+                            _t.column_check = dq_payload
+                raise
 
             # 4d. 更新 task 为 PARSED
-            t = await session.get(ReconResultTask, task_id)
-            if t is not None:  # pragma: no branch
-                t.status = "PARSED"
-                t.parser_version = PARSER_VERSION
-                t.schema_version = SCHEMA_VERSION
-                t.column_check = column_check
-                t.archive_path = xlsx_path
+            t_check.status = "PARSED"
+            t_check.parser_version = PARSER_VERSION
+            t_check.schema_version = SCHEMA_VERSION
+            t_check.column_check = column_check
+            t_check.archive_path = xlsx_path
 
-            # 4e. 同 task_no 低版本（status != SUPERSEDED）→ SUPERSEDED
+            # 4e. 同 tenant_id + task_no 低版本（status != SUPERSEDED）→ SUPERSEDED
+            # P1-1 修复：加 tenant_id 条件，防止跨租户污染
             await session.execute(
                 update(ReconResultTask)
                 .where(
+                    ReconResultTask.tenant_id == tenant_id,
                     ReconResultTask.task_no == task_no,
                     ReconResultTask.version < current_version,
                     ReconResultTask.status != "SUPERSEDED",
