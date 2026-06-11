@@ -1,0 +1,17 @@
+{
+  "code": "200", "msg": "SUCCESS",
+  "data": {
+    "userId": "U-0001",
+    "accounts": [
+      {
+        "custAccountNo": "ACC-001",
+        "balance": "12345.6789",
+        "currencyCode": "USD",
+        "accountType": "SAVINGS"
+      }
+    ],
+    "totalBalance": "12345.6789",
+    "currencyCode": "USD"
+  },
+  "timestamp": 1781164800000
+}

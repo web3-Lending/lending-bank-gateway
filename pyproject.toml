@@ -23,8 +23,11 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-addopts = "-m 'not integration' --cov=app --cov-branch --cov-report=term-missing"
-markers = ["integration: 需要 docker 的 MySQL 约束/迁移测试"]
+addopts = "-m 'not integration and not compat' --cov=app --cov-branch --cov-report=term-missing"
+markers = [
+  "integration: 需要 docker 的 MySQL 约束/迁移测试",
+  "compat: 直连 wedap dev 环境的兼容性套件（nightly/里程碑手动跑，不进 CI 必跑集）",
+]
 
 [tool.coverage.run]
 omit = ["tests/*", "alembic/*"]
