@@ -14,6 +14,7 @@ from app.clients.wedap import WedapError
 from app.domain.biz_seq import validate_biz_seq_no
 from app.domain.states import OrderStatus, assert_transition
 from app.models.txn import BankTxnOrder
+from app.services.audit import write_audit
 from app.services.idempotency import (
     IdempotencyConflict,
     IdempotencyInFlight,
@@ -115,7 +116,7 @@ async def submit_order(
         new_status = OrderStatus.FAILED
         response = {"txnStatus": "FAILED", "bizSeqNo": req.biz_seq_no, "errorCode": exc.code}
 
-    # 事务2：assert_transition 守卫非法直写 + update order 状态 + submitted_at + record_response
+    # 事务2：状态推进 + submitted_at + record_response + audit
     assert_transition(OrderStatus.ACCEPTED, new_status)
     now = dt.datetime.now(dt.UTC)
     async with factory() as session:
@@ -135,5 +136,13 @@ async def submit_order(
                 idempotency_key=req.biz_seq_no,
                 response=response,
                 final_effect_id=f"order:{req.biz_seq_no}",
+            )
+            await write_audit(
+                session,
+                tenant_id=req.tenant_id,
+                actor=f"svc:{req.caller_service}",
+                action=f"ORDER_{new_status}",
+                entity=f"bank_txn_order:{req.biz_seq_no}",
+                payload={"business_action": req.business_action, "amount": str(req.amount)},
             )
     return response

@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from app.core.db import build_engine, build_session_factory
 from app.domain.states import OrderStatus
+from app.models.audit import AuditLog
 from app.models.base import Base
 from app.models.txn import BankTxnOrder
 from app.services.submit import SubmitRequest, submit_order
@@ -179,3 +180,16 @@ async def test_order_exists_without_idempotency_raises_conflict(factory, caplog)
             await submit_order(factory, wedap_call=wedap.submit_disbursement, req=req)
 
     assert any("order exists without idempotency record" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_submit_writes_audit_log(factory) -> None:
+    """受理成功后 audit_log 有一行 action=ORDER_SUBMITTED。"""
+    wedap = AsyncMock()
+    wedap.submit_disbursement.return_value = {"txnStatus": "PROCESSING"}
+    await submit_order(factory, wedap_call=wedap.submit_disbursement, req=_req())
+    async with factory() as s:
+        row = (await s.execute(select(AuditLog))).scalar_one()
+        assert row.action == "ORDER_SUBMITTED"
+        assert row.actor == "svc:lifecycle"
+        assert row.entity == f"bank_txn_order:{_req().biz_seq_no}"
