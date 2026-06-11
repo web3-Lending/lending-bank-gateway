@@ -139,3 +139,34 @@ def test_aggregate_multi_success_legs() -> None:
 def test_aggregate_only_failed_legs() -> None:
     legs = [(LegStatus.FAILED, "100"), (LegStatus.FAILED, "200")]
     assert aggregate_order_status(legs) == OrderStatus.FAILED
+
+
+# ── saga 补偿场景：FAILED 优先于冲正判定 ──────────────────────────────────────
+
+
+def test_aggregate_saga_failed_with_reversal_and_reversed_is_failed() -> None:
+    """FAILED leg + REVERSAL leg + REVERSED leg 共存（saga 中途失败+已补偿）→ FAILED。
+
+    spec §6：业务失败优先于冲正语义，补偿净额归零不改变"单子失败"结论。
+    """
+    legs = [
+        (LegStatus.FAILED, "60"),
+        (LegStatus.REVERSED, "60"),
+        (LegStatus.REVERSAL, "60"),
+    ]
+    assert aggregate_order_status(legs) == OrderStatus.FAILED
+
+
+def test_aggregate_saga_failed_with_reversal_only_is_failed() -> None:
+    """FAILED leg + REVERSAL leg 共存（无对应 REVERSED leg）→ FAILED。"""
+    legs = [
+        (LegStatus.FAILED, "60"),
+        (LegStatus.REVERSAL, "60"),
+    ]
+    assert aggregate_order_status(legs) == OrderStatus.FAILED
+
+
+def test_aggregate_reversal_without_source_leg_raises() -> None:
+    """纯 REVERSAL 无任何 SUCCESS/REVERSED 源 leg → 畸形数据，必须 ValueError。"""
+    with pytest.raises(ValueError, match="malformed legs"):
+        aggregate_order_status([(LegStatus.REVERSAL, "100")])

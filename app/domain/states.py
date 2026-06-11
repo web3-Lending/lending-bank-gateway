@@ -67,6 +67,13 @@ def aggregate_order_status(legs: list[tuple[LegStatus, str]]) -> OrderStatus:
     """spec §6 父子聚合表。legs: [(status, amount_str)]；REVERSAL 金额按覆盖度判部分/全额冲正。
 
     SUBMITTED 后 wedap 拆 leg 期间无 leg 数据 → 空列表视为在途（PROCESSING）。
+
+    优先级（从高到低）：
+    1. UNKNOWN → RESULT_UNKNOWN
+    2. PENDING → PROCESSING
+    3. FAILED 优先于冲正判定（saga 补偿后整单仍为 FAILED）
+    4. REVERSAL → REVERSED / PARTIALLY_REVERSED
+    5. 全 SUCCESS → SUCCEEDED
     """
     if not legs:
         return OrderStatus.PROCESSING
@@ -75,10 +82,14 @@ def aggregate_order_status(legs: list[tuple[LegStatus, str]]) -> OrderStatus:
         return OrderStatus.RESULT_UNKNOWN
     if LegStatus.PENDING in statuses:
         return OrderStatus.PROCESSING
+    # FAILED 优先于冲正判定：saga 补偿场景（FAILED leg + REVERSAL leg 共存）
+    # 整单业务语义仍为 FAILED，补偿性 REVERSAL 不改变失败结论。
+    if LegStatus.FAILED in statuses:
+        return OrderStatus.FAILED
     reversal = sum(Decimal(a) for s, a in legs if s == LegStatus.REVERSAL)
     if reversal > 0:
         gross = sum(Decimal(a) for s, a in legs if s in (LegStatus.SUCCESS, LegStatus.REVERSED))
+        if gross == 0:
+            raise ValueError("malformed legs: REVERSAL without source leg")
         return OrderStatus.REVERSED if reversal >= gross else OrderStatus.PARTIALLY_REVERSED
-    if LegStatus.FAILED in statuses:
-        return OrderStatus.FAILED
     return OrderStatus.SUCCEEDED
