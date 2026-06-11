@@ -1,8 +1,10 @@
 import hashlib
 import json
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.idempotency import IdempotencyRecord
@@ -12,8 +14,24 @@ class IdempotencyConflict(Exception):
     """同 key 不同 payload —— 北向必须回 409。"""
 
 
+def _json_default(obj: Any) -> str:
+    """JSON 序列化兜底。
+
+    调用方必须传 JSON-native 类型（Pydantic 用 .model_dump(mode="json")），
+    金额统一字符串（如 "100.0000"）。
+
+    Decimal 显式转 str 确保 Decimal("100.0000") 与 str "100.0000" hash 一致；
+    其它不可序列化类型统一 str() 兜底，与 Python 内置 float 的 JSON 表示不同，
+    故 float(100.0) 与 str "100.0000" 的 hash 不相同——调用方不应传 float 金额。
+    """
+    if isinstance(obj, Decimal):
+        # 显式分支：Decimal("100.0000") → "100.0000"，与字符串入参 hash 一致
+        return str(obj)
+    return str(obj)
+
+
 def payload_hash(payload: dict[str, Any]) -> str:
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=_json_default)
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
@@ -38,18 +56,37 @@ async def check_or_register(
         )
     ).scalar_one_or_none()
     if row is None:
-        session.add(
-            IdempotencyRecord(
-                tenant_id=tenant_id,
-                business_scope=business_scope,
-                idempotency_key=idempotency_key,
-                method=method,
-                path=path,
-                payload_hash=h,
-            )
-        )
-        await session.flush()
-        return None
+        try:
+            async with session.begin_nested():
+                session.add(
+                    IdempotencyRecord(
+                        tenant_id=tenant_id,
+                        business_scope=business_scope,
+                        idempotency_key=idempotency_key,
+                        method=method,
+                        path=path,
+                        payload_hash=h,
+                    )
+                )
+        except IntegrityError:
+            # 并发同键：对手在 SELECT 与 INSERT 之间抢先插入；
+            # FOR UPDATE 穿透 RR 快照，确保读到对手刚提交的行。
+            row = (
+                await session.execute(
+                    select(IdempotencyRecord)
+                    .where(
+                        IdempotencyRecord.tenant_id == tenant_id,
+                        IdempotencyRecord.business_scope == business_scope,
+                        IdempotencyRecord.idempotency_key == idempotency_key,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if row is None:  # pragma: no cover - 理论不可达
+                raise
+        else:
+            return None
+    # 走到这里 row 非 None：比对 hash → 409 或返回 first_response
     if row.payload_hash != h:
         raise IdempotencyConflict(idempotency_key)
     return row.first_response
@@ -72,6 +109,10 @@ async def record_response(
                 IdempotencyRecord.idempotency_key == idempotency_key,
             )
         )
-    ).scalar_one()
+    ).scalar_one_or_none()
+    if row is None:
+        raise ValueError(
+            f"IdempotencyRecord not found: {tenant_id}/{business_scope}/{idempotency_key}"
+        )
     row.first_response = response
     row.final_effect_id = final_effect_id

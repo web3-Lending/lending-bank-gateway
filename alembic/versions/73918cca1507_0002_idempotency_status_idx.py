@@ -23,6 +23,8 @@ _ON_UPDATE_TABLES = ("bank_txn_order", "bank_txn_leg", "idempotency_record")
 
 # MySQL 专属：ON UPDATE CURRENT_TIMESTAMP —— SQLite 无此语法，用 dialect guard 隔离
 _MYSQL_UPGRADE_TMPL = (
+    # MODIFY COLUMN 重申列类型为 MySQL 必需（ADD COLUMN 无此约束，ALTER 须完整指定）；
+    # 新库无数据无锁风险，存量库执行需评估表锁（规范 14：高峰期禁止 DDL）。
     "ALTER TABLE {table} MODIFY updated_at DATETIME NOT NULL"
     " DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
 )
