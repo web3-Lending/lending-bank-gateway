@@ -1,7 +1,7 @@
 import datetime as dt
 from typing import Any
 
-from sqlalchemy import JSON, BigInteger, DateTime, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, DateTime, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TenantMixin, TimestampMixin
@@ -26,6 +26,7 @@ class CallbackInbox(Base, TenantMixin, TimestampMixin):
     id: Mapped[int] = mapped_column(_BIG_PK, primary_key=True, autoincrement=True)
     source: Mapped[str] = mapped_column(String(32), nullable=False)  # WEDAP_TXN / WEDAP_RECON
     request_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    # 只写不改：直接修改 dict 不触发 dirty tracking
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="RECEIVED")
     error: Mapped[str | None] = mapped_column(Text)
@@ -34,15 +35,18 @@ class CallbackInbox(Base, TenantMixin, TimestampMixin):
 class CallbackOutbox(Base, TenantMixin, TimestampMixin):
     """对下游服务的事件推送出站记录（dispatcher 扫 status=PENDING 发送）。
 
-    status 索引：dispatcher 按 (status, next_retry_at) 扫表，index=True 避免全表扫。
+    status+next_retry_at 复合索引：dispatcher 按 (status, next_retry_at) 扫表，
+    复合索引比单列索引更高效（覆盖两列过滤条件）。
     """
 
     __tablename__ = "callback_outbox"
+    __table_args__ = (Index("ix_callback_outbox_status_retry", "status", "next_retry_at"),)
 
     id: Mapped[int] = mapped_column(_BIG_PK, primary_key=True, autoincrement=True)
     target: Mapped[str] = mapped_column(String(32), nullable=False)  # lifecycle / customers
+    # 只写不改：直接修改 dict 不触发 dirty tracking
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
-    status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING", index=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING")
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     next_retry_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)

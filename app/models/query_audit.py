@@ -1,0 +1,47 @@
+"""app/models/query_audit.py
+
+查询审计与余额快照：
+- QueryAudit      — 记录每次外部查询请求（endpoint/params_hash/trace_id/caller_service）
+- BalanceSnapshot — 余额快照（account_id/balance/currency/source_endpoint/captured_at）
+"""
+
+import datetime as dt
+from decimal import Decimal
+
+from sqlalchemy import BigInteger, DateTime, Index, Integer, Numeric, String
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.models.base import Base, TimestampMixin
+
+# SQLite 的 autoincrement 只支持 INTEGER 类型；MySQL 生产环境需要 BIGINT。
+# with_variant 在 SQLite 测试中降级为 Integer，在 MySQL 中保持 BigInteger。
+_BIG_PK = BigInteger().with_variant(Integer, "sqlite")
+
+
+class QueryAudit(Base, TimestampMixin):
+    """查询审计记录表。"""
+
+    __tablename__ = "query_audit"
+
+    id: Mapped[int] = mapped_column(_BIG_PK, primary_key=True, autoincrement=True)
+    endpoint: Mapped[str] = mapped_column(String(128), nullable=False)
+    params_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    trace_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    caller_service: Mapped[str | None] = mapped_column(String(32))
+
+
+class BalanceSnapshot(Base, TimestampMixin):
+    """余额快照表。
+
+    captured_at 必须带时区（timezone=True），确保跨时区对账时的时间语义正确。
+    """
+
+    __tablename__ = "balance_snapshot"
+    __table_args__ = (Index("ix_balance_snapshot_account_id", "account_id"),)
+
+    id: Mapped[int] = mapped_column(_BIG_PK, primary_key=True, autoincrement=True)
+    account_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    balance: Mapped[Decimal] = mapped_column(Numeric(21, 4), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    source_endpoint: Mapped[str] = mapped_column(String(128), nullable=False)
+    captured_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
