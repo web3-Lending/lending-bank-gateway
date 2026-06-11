@@ -64,8 +64,27 @@ async def vault_transactions(
         }
         for leg in legs
     ]
+    # totalAmount：双向流水总额（含 payer 侧与 payee 侧，即所有命中 leg 的 amount 之和）
     total = sum((Decimal(i["amount"]) for i in items), Decimal("0"))
+    # inflowAmount：账户作为收款方（payee == accountNo）的流水之和
+    inflow = sum(
+        (Decimal(i["amount"]) for i in items if i["payee"] == accountNo),
+        Decimal("0"),
+    )
+    # outflowAmount：账户作为付款方（payer == accountNo）的流水之和
+    outflow = sum(
+        (Decimal(i["amount"]) for i in items if i["payer"] == accountNo),
+        Decimal("0"),
+    )
     return ok(
-        {"items": items, "aggregate": {"count": len(items), "totalAmount": f"{total:.4f}"}},
+        {
+            "items": items,
+            "aggregate": {
+                "count": len(items),
+                "totalAmount": f"{total:.4f}",
+                "inflowAmount": f"{inflow:.4f}",
+                "outflowAmount": f"{outflow:.4f}",
+            },
+        },
         trace_id=hdr["trace_id"],
     )

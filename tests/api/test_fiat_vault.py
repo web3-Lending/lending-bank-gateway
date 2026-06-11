@@ -1,13 +1,14 @@
-"""fiat-vault/transactions 供数端点测试（M5 收尾）。
+"""fiat-vault/transactions 供数端点测试（M5 收尾 + T21 inflow/outflow 聚合拆分）。
 
 覆盖：
-1. 按账户+窗口查中：items 字段全断言 + aggregate.totalAmount 精度 "60.0000"
+1. 按账户+窗口查中：items 字段全断言 + aggregate.totalAmount/inflowAmount/outflowAmount 精度
 2. payer 侧命中（账户做付方也算）
 3. 窗口外日期不命中；txn_date 为 NULL 的 leg 不命中
 4. 跨 tenant 隔离（B 租户查不到 A 的）
 5. limit 截断 + limit 越界 400 + 日期格式错 400 + dateFrom>dateTo 400
-6. 空结果：items=[] aggregate.count=0 totalAmount="0.0000"
+6. 空结果：items=[] aggregate.count=0 totalAmount/inflowAmount/outflowAmount="0.0000"
 7. 缺 X-Tenant-Id 400
+8. T21 双向流水聚合：inflow/outflow/total 各自正确（含双向种数据）
 """
 
 import asyncio
@@ -164,6 +165,9 @@ def test_basic_hit_payee(client: TestClient) -> None:
     agg = body["data"]["aggregate"]
     assert agg["count"] == 2
     assert agg["totalAmount"] == "60.0000"
+    # 两条 leg 均为 payee=VAULT01，inflow=60，outflow=0
+    assert agg["inflowAmount"] == "60.0000"
+    assert agg["outflowAmount"] == "0.0000"
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +257,8 @@ def test_out_of_window_and_null_txn_date_excluded(client: TestClient) -> None:
     assert data["items"] == []
     assert data["aggregate"]["count"] == 0
     assert data["aggregate"]["totalAmount"] == "0.0000"
+    assert data["aggregate"]["inflowAmount"] == "0.0000"
+    assert data["aggregate"]["outflowAmount"] == "0.0000"
 
 
 # ---------------------------------------------------------------------------
@@ -412,6 +418,8 @@ def test_empty_result(client: TestClient) -> None:
     assert data["items"] == []
     assert data["aggregate"]["count"] == 0
     assert data["aggregate"]["totalAmount"] == "0.0000"
+    assert data["aggregate"]["inflowAmount"] == "0.0000"
+    assert data["aggregate"]["outflowAmount"] == "0.0000"
 
 
 # ---------------------------------------------------------------------------
@@ -429,3 +437,66 @@ def test_missing_tenant_id_400(client: TestClient) -> None:
     )
     assert r.status_code == 400
     assert r.json()["error"]["code"] == "GW_400_HEADER"
+
+
+# ---------------------------------------------------------------------------
+# 8. T21 双向流水聚合：inflow/outflow/total 各自正确
+# ---------------------------------------------------------------------------
+
+
+def test_bidirectional_aggregate(client: TestClient) -> None:
+    """双向流水：VAULT01 作 payee（inflow）和 payer（outflow）各有一条，三字段断言正确。
+
+    inflow  = 100.0000（VAULT01 为 payee 的 leg）
+    outflow = 40.0000 （VAULT01 为 payer 的 leg）
+    total   = 140.0000（所有命中 leg 之和，含双向）
+    """
+    engine = client.app.state.engine  # type: ignore[union-attr]
+
+    # 一条 inflow：VAULT01 收款
+    order_in = asyncio.run(_insert_order(engine, tenant_id="OCBC", biz_seq_no="BSQ-BIDIR-001"))
+    asyncio.run(
+        _insert_leg(
+            engine,
+            tenant_id="OCBC",
+            order_id=order_in,
+            biz_seq_no="BSQ-BIDIR-001",
+            external_ref="EXT-BIDIR-IN",
+            step_type="DEPOSIT",
+            step_seq=1,
+            amount="100.0000",
+            payer_account="EXTERNAL01",
+            payee_account="VAULT01",
+            txn_date="20260611",
+        )
+    )
+
+    # 一条 outflow：VAULT01 付款
+    order_out = asyncio.run(_insert_order(engine, tenant_id="OCBC", biz_seq_no="BSQ-BIDIR-002"))
+    asyncio.run(
+        _insert_leg(
+            engine,
+            tenant_id="OCBC",
+            order_id=order_out,
+            biz_seq_no="BSQ-BIDIR-002",
+            external_ref="EXT-BIDIR-OUT",
+            step_type="WITHDRAWAL",
+            step_seq=1,
+            amount="40.0000",
+            payer_account="VAULT01",
+            payee_account="EXTERNAL02",
+            txn_date="20260611",
+        )
+    )
+
+    r = client.get(
+        "/api/v1/fiat-vault/transactions",
+        params={"accountNo": "VAULT01", "dateFrom": "20260601", "dateTo": "20260630"},
+        headers=HEADERS,
+    )
+    assert r.status_code == 200
+    agg = r.json()["data"]["aggregate"]
+    assert agg["count"] == 2
+    assert agg["totalAmount"] == "140.0000"
+    assert agg["inflowAmount"] == "100.0000"
+    assert agg["outflowAmount"] == "40.0000"

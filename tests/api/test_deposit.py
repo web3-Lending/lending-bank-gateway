@@ -8,6 +8,7 @@
 5. 脏余额数据（balance="abc"）→ 200 + 快照跳过该行 + warning
 6. 缺 X-Tenant-Id → 400
 7. 幂等语义：GET 重复调用审计行累加（查询审计非去重）断言 2 行
+8. T22 缺 custAccountNo（None）→ 不落快照 + warning
 """
 
 import asyncio
@@ -254,3 +255,35 @@ def test_repeated_get_accumulates_audit_rows(client: TestClient) -> None:
     sf = client.app.state.session_factory  # type: ignore[union-attr]
     count = asyncio.run(_count_audit_rows(sf, tenant_id="OCBC", endpoint="deposit/accounts"))
     assert count == 2
+
+
+# ── 8. T22 缺 custAccountNo（None）→ 不落快照 + warning ──
+
+
+def test_missing_cust_account_no_skips_snapshot_and_warns(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """accounts 中 custAccountNo 缺失（None）→ 跳过该行快照 + warning；正常行仍落快照。"""
+    data_with_null = {
+        "accounts": [
+            {"custAccountNo": None, "balance": "300.0000", "currencyCode": "USD"},
+            {"custAccountNo": "ACC_GOOD", "balance": "150.0000", "currencyCode": "HKD"},
+        ]
+    }
+    client.app.state.wedap.get_deposit_balance_total.return_value = data_with_null  # type: ignore[union-attr]
+
+    with caplog.at_level(logging.WARNING, logger="app.api.v1.deposit"):
+        r = client.get("/api/v1/deposit/balances/total", params={"userId": "U1"}, headers=HEADERS)
+
+    assert r.status_code == 200
+    assert r.json()["success"] is True
+
+    # warning 日志被触发（missing custAccountNo）
+    assert any("missing custAccountNo" in rec.message for rec in caplog.records)
+
+    sf = client.app.state.session_factory  # type: ignore[union-attr]
+    snapshots = asyncio.run(_get_snapshots(sf, tenant_id="OCBC"))
+    # 只有 ACC_GOOD 成功写入，None custAccountNo 的行被跳过
+    assert len(snapshots) == 1
+    assert snapshots[0].account_id == "ACC_GOOD"
+    assert snapshots[0].balance == Decimal("150.0000")

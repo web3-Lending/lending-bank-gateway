@@ -92,6 +92,12 @@ async def deposit_balance_total(request: Request, userId: str) -> dict[str, Any]
     async with request.app.state.session_factory() as session:
         async with session.begin():
             for acct in data.get("accounts", []):
+                if acct.get("custAccountNo") is None:
+                    logger.warning(
+                        "Skipping snapshot for account: missing custAccountNo in %r",
+                        acct,
+                    )
+                    continue
                 try:
                     balance = Decimal(str(acct.get("balance", "0")))
                 except InvalidOperation:
@@ -135,7 +141,10 @@ async def deposit_accounts(request: Request, userId: str) -> dict[str, Any]:
 
 @router.get("/api/v1/users/info")
 async def users_info(request: Request) -> dict[str, Any]:
-    """用户信息查询：原样透传所有 query params + 审计。"""
+    """用户信息查询：原样透传所有 query params + 审计。
+
+    params 原样透传 wedap（契约 C）；参数白名单收紧候选项见 spec §11 协调清单。
+    """
     hdr = require_headers(request)
     params = dict(request.query_params)
     wedap = request.app.state.wedap
