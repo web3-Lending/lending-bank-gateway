@@ -45,7 +45,7 @@ lending-bank-gateway 是 lending 项目群对接 wedap（银行资金通道平�
 | 9 | 用户信息查询 | GET /api/v1/users/info | ✅ Public 3.3.1 | customers |
 | 10 | 对账结果摄取 | POST /api/v1/recon/notify（wedap → gateway） | ✅ 契约已定稿（2026-06-08 v1.0.0） | wedap 主动调 |
 | 11 | 交易结果回调接收 | POST /api/v1/callbacks/wedap/transactions（wedap → gateway） | ✅ LendingTransactionNotifyService | wedap 主动调 |
-| 12 | 回调转发 | gateway → 9000 / customers（outbox 投递） | — | 9000 transaction-callback / customers webhooks |
+| 12 | 回调转发（cutover 仅 9000） | gateway → 9000（outbox 投递）；**customers webhook 兼容转发随 C4/迁移阶段 5 放行**，不在 cutover | — | 9000 transaction-callback |
 | 13 | recon 对账供数 | GET /api/v1/fiat-vault/transactions 平移 + gateway 库跨库读 | 不依赖 wedap（gateway 自有库供数） | recon (8040) |
 
 ### 3.2 v1-coordination 轨（wedap 对应物未确认/不存在，逐项协调，确认一项放行一项，不阻塞 cutover）
@@ -94,7 +94,7 @@ custody 系列（liquidation 走 `CUSTODY_SERVICE_URL`→8100 mock / lending-cus
 | `bank_txn_order` | `UNIQUE(tenant_id, biz_seq_no)`；FK 无（顶层） | 业务单：biz_type、amount、currency、caller_service、business_action、状态机（§6）、submitted_at/acked_at/finalized_at |
 | `bank_txn_leg` | `UNIQUE(tenant_id, external_system, external_ref)`；`UNIQUE(tenant_id, biz_seq_no, step_seq)`；FK→order_id | leg：step_type、step_seq、external_ref、amount、currency、payer/payee、status、posted_at；REVERSAL 冲正 leg 事后幂等 upsert 追加 |
 | `idempotency_record` | `UNIQUE(tenant_id, business_scope, idempotency_key)` | codex P1-4：存 method/path/payload_hash/first_response/final_effect_id；同 key 不同 payload_hash → 409 |
-| `callback_inbox` | `UNIQUE(source, request_id)` | wedap 入站回调/notify 幂等登记，原始 payload 落档 |
+| `callback_inbox` | `UNIQUE(tenant_id, source, request_id)` | wedap 入站回调/notify 幂等登记，原始 payload 落档（不依赖 request_id 全局唯一的假设） |
 | `callback_outbox` | 状态机 PENDING/SENT/FAILED/DEAD | gateway→9000/customers 转发可靠投递（规范 04 Outbox），dead letter 重放入口 |
 | `exchange_quote` / `exchange_trade_order` | quote 含汇率快照 + 有效期 | codex P1-8：独立于 order/leg；幂等重放不得重取实时汇率（规范 12）；随 C3 协调放行 |
 | `query_audit` | — | 查询类接口落 request metadata + payload hash + trace_id，不落业务响应全量（codex P1-7） |
@@ -129,12 +129,19 @@ ACCEPTED → SUBMITTED → PROCESSING → SUCCEEDED | FAILED | EXPIRED | CANCELL
 ## 7. 对账支撑（四段模型，codex P1-3 补第 0 段）
 
 ```
-第0段 发起意图对账: wbt_admin 业务资金事件/outbox ↔ bank_txn_order
+第0段 发起意图对账: wbt_admin.admin_bank_intent ↔ bank_txn_order
        （tenant_id + biz_seq_no + business_action 对齐；缺 order = lending 发了但 gateway 没收到 → finding）
 第1段 受理对账:     bank_txn_order/leg ↔ WeDAP Source（GROUP BY biz_seq_no 聚合 + external_ref 集合相等串单校验）
 第2段 执行对账:     wedap ↔ 银行（wedap 已对完，Differences 透传成 finding，version supersede 关旧 finding）
 第3段 三角抽查(可选): lending leg external_ref 直接 join Bank Source（存在性+金额，独立验证 wedap 无系统性漏记）
 ```
+
+**第 0 段权威数据源（定稿，不留调查项）**：9000 新增 `admin_bank_intent` 表（属 9000 整改范围新增项，与 biz_seq_no 统一整改同批；复用 9000 既有 outbox 基建先例 `admin_event_outbox`，与 W2 `admin_external_call_result_unknown` 机制衔接）：
+
+- 约束/列：`UNIQUE(tenant_id, biz_seq_no)`；`business_action`（DISBURSE/REPAY/COLLECT/DISTRIBUTE/…）、`amount`、`currency`、`caller_module`、`status`、`created_at/submitted_at`
+- 写入时机：与业务状态变更**同库同事务**先落 `INTENT_CREATED`（事务内不发外部 HTTP，规范 14），事务提交后发起 gateway 调用，按结果推进 `SUBMITTED / SUBMIT_FAILED / ABORTED`；RESULT_UNKNOWN 单在 intent 标记并由现有 W2 worker 收敛
+- 对账规则：`status≥SUBMITTED` 超宽限窗口而 gateway 无对应 order → finding；`INTENT_CREATED` 卡住超窗（发起前夭折）→ finding；`ABORTED`（前置校验失败/草稿）不参与对账
+- liquidation / customers 调用方在各自迁移阶段（§10）接入同模式
 
 - recon 侧沿用**跨库只读 collector** 模式读 `lending_bank_gateway` 库（先例 BaffleCollector）
 - 新规则供给：就绪性（每 tenant×对账日 T+1 截止前必须收到 notify）/ 差异透传 / 第 0+1 段对账
@@ -160,9 +167,9 @@ ACCEPTED → SUBMITTED → PROCESSING → SUCCEEDED | FAILED | EXPIRED | CANCELL
 |---|---|---|
 | 1 | read-only 查询（deposit 余额/账户/用户信息） | per-caller feature flag 回切 8021 |
 | 2 | 非资金写（用户创建等，待 C7 放行） | 同上 |
-| 3 | 单一资金写（collect/distribute/refund） | flag 回切 + 在途单收敛后切换 |
+| 3 | 单一资金写（collect/distribute——cutover 轨已确认项；**refund 不在本阶段**，待 C6 放行后并入，或经协调证实 liquidation refund 复用已确认的 user-distributions 后提前并入） | flag 回切 + 在途单收敛后切换 |
 | 4 | 组合交易（p2p-disbursements/repayments） | 同上 + 对账双跑核对 |
-| 5 | customers wallet（待 C4 放行；新旧路径收口） | 保留旧 fallback 链直至验收 |
+| 5 | customers wallet（待 C4 放行；新旧路径收口；customers webhook 兼容转发随本阶段，见 §3.1 #12 拆分） | 保留旧 fallback 链直至验收 |
 
 每阶段独立 feature flag；BFF 反代 audience 切换走既有 ssot-cutover SOP；回切目标 8021 在 baffle 冻结期内始终可用。
 
@@ -191,3 +198,4 @@ ACCEPTED → SUBMITTED → PROCESSING → SUCCEEDED | FAILED | EXPIRED | CANCELL
 |---|---|---|
 | 1 | codex consult：契约姿态 A/B/C 对比（130k tokens） | VERDICT: C；揪出 ADR-0031 自相矛盾 + 07 §2 leg 粒度阻塞项 |
 | 2 | codex 全量设计评审（363k tokens，resume session） | NEEDS-CHANGES：12 P1 + 5 P2，本 spec 已全量吸收（§3 双轨 / §3.4 改造矩阵 / §5 幂等三元组+tenant 约束+exchange 独立模型+查询落库策略 / §6 状态机 / §7 第 0 段 / §8 签名如实声明 / §9 CI 口径 / §10 迁移顺序） |
+| 3 | codex spec 验收评审（593k tokens，resume session） | GATE: FAIL→修复：旧 P1 10/12 RESOLVED；剩余 3 P1 已修——§7 第 0 段定稿 `admin_bank_intent` 权威数据源（9000 整改新增项）/ §10 阶段 3 剔除 refund + §3.1 #12 拆分 customers 转发随 C4 / `callback_inbox` 唯一约束补 tenant_id |
