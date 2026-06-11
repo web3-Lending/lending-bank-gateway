@@ -1,0 +1,20 @@
+services:
+  lending-bank-gateway:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: lending-bank-gateway
+    ports:
+      - "8050:8050"
+    env_file:
+      - env.local
+    environment:
+      GW_DB_URL: mysql+asyncmy://${DB_USER}:${DB_PASS}@${DB_HOST}:3306/lending_bank_gateway
+      GW_WEDAP_BASE_URL: ${WEDAP_BASE_URL}
+      GW_S2S_SECRET: ${GW_S2S_SECRET}
+      GW_ENV: ${GW_ENV:-local}
+    networks:
+      - wedap-network
+networks:
+  wedap-network:
+    external: true
