@@ -54,8 +54,8 @@ class ReconResultTask(Base, TenantMixin, TimestampMixin):
     # status 枚举值：NOTIFIED / DOWNLOADED / PARSED / FAILED / SUPERSEDED
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     request_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    parser_version: Mapped[str | None] = mapped_column(String(16))
-    schema_version: Mapped[str | None] = mapped_column(String(16))
+    parser_version: Mapped[str | None] = mapped_column(String(32))
+    schema_version: Mapped[str | None] = mapped_column(String(32))
     column_check: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     archive_path: Mapped[str | None] = mapped_column(String(256))
 

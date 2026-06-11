@@ -1,0 +1,144 @@
+> """M5 对账通知接收端点：wedap 对账完成后 POST 此端点。
+  
+> 契约（2026-06-08 v1.0.0）：
+> - Header：X-Request-Id=recon-result-{taskNo}-v{version}（幂等键）、X-Tenant-Id
+> - Body：reconDate(yyyyMMdd)/tenantId/s3Bucket/files[{fileName,s3Key,md5,totalCount}]
+> - 重发幂等：同 X-Request-Id 返回 deduplicated=True，不重复落库
+  
+> 幂等收窄：
+> - uq_inbox_tenant_src_req（callback_inbox 三元组）
+> - uq_recon_task_req（recon_result_task.tenant_id+request_id）
+> - uq_recon_task_ver（recon_result_task.tenant_id+task_no+version）
+> 任一触发均视为 dedup；非以上约束的 IntegrityError 透传 500。
+> """
+  
+> import re
+> from typing import Any
+  
+> from fastapi import APIRouter, HTTPException, Request
+> from sqlalchemy.exc import IntegrityError
+  
+> from app.api.deps import require_headers
+> from app.core.envelope import ok
+> from app.models.callback import CallbackInbox
+> from app.models.recon import ReconResultTask
+  
+> router = APIRouter(prefix="/api/v1/recon", tags=["recon"])
+  
+> _REQ_ID = re.compile(r"^recon-result-.+-v\d+$")
+  
+  # 唯一约束名（MySQL）与 SQLite UNIQUE constraint failed 字段路径
+> _DEDUP_CONSTRAINTS = (
+>     "uq_inbox_tenant_src_req",  # callback_inbox 三元组
+>     "uq_recon_task_req",  # recon_result_task.(tenant_id, request_id)
+>     "uq_recon_task_ver",  # recon_result_task.(tenant_id, task_no, version)
+> )
+  # SQLite 报文片段（含表名字段名）
+> _DEDUP_SQLITE_FRAGMENTS = (
+>     "callback_inbox.tenant_id",
+>     "recon_result_task.tenant_id",
+> )
+  
+  
+> def _is_dedup(exc: IntegrityError) -> bool:
+>     """判别 IntegrityError 是否来自对账通知幂等唯一约束。
+  
+>     MySQL：orig 消息含约束名（uq_inbox_tenant_src_req / uq_recon_task_req / uq_recon_task_ver）
+>     SQLite：orig 消息含 UNIQUE constraint failed: <table>.<col>
+>     """
+!     msg = str(exc.orig)
+!     return any(c in msg for c in _DEDUP_CONSTRAINTS) or any(
+!         f in msg for f in _DEDUP_SQLITE_FRAGMENTS
+!     )
+  
+  
+> def _parse_request_id(request_id: str) -> tuple[str, int] | None:
+>     """从 X-Request-Id 解析 (task_no, version)。
+  
+>     格式：recon-result-{taskNo}-v{version}
+>     解析策略：rsplit("-v", 1) 右起第一个 -v<digits> 为版本段，消除贪婪正则歧义。
+>     形态校验仍由 _REQ_ID 全局正则兜底。
+>     """
+!     if not _REQ_ID.match(request_id):
+!         return None
+      # 去掉 "recon-result-" 前缀后 rsplit
+!     body_part = request_id[len("recon-result-") :]
+!     task_no, ver_str = body_part.rsplit("-v", 1)
+!     return task_no, int(ver_str)
+  
+  
+> @router.post("/notify")
+> async def recon_notify(request: Request, body: dict[str, Any]) -> dict[str, Any]:
+!     hdr = require_headers(request)
+!     parsed = _parse_request_id(hdr["request_id"])
+!     files = body.get("files") or []
+  
+!     if (
+!         parsed is None
+!         or not re.fullmatch(r"\d{8}", str(body.get("reconDate", "")))
+!         or not body.get("s3Bucket")
+!         or not files
+!     ):
+!         raise HTTPException(
+!             400,
+!             detail={
+!                 "code": "GW_400_VALIDATION",
+!                 "message": "bad notify body or X-Request-Id",
+!             },
+!         )
+  
+!     f = files[0]  # 契约：当前恒 1 个文件
+!     if not all(f.get(k) for k in ("fileName", "s3Key", "md5")) or "totalCount" not in f:
+!         raise HTTPException(
+!             400,
+!             detail={
+!                 "code": "GW_400_VALIDATION",
+!                 "message": "bad files[0] fields",
+!             },
+!         )
+  
+!     task_no, version = parsed
+!     if version < 1:
+!         raise HTTPException(
+!             400,
+!             detail={
+!                 "code": "GW_400_VALIDATION",
+!                 "message": "version must be >= 1",
+!             },
+!         )
+!     dedup = False
+  
+!     try:
+!         async with request.app.state.session_factory() as session:
+!             async with session.begin():
+!                 session.add(
+!                     CallbackInbox(
+!                         tenant_id=hdr["tenant_id"],
+!                         source="WEDAP_RECON",
+!                         request_id=hdr["request_id"],
+!                         payload=body,
+!                     )
+!                 )
+!                 session.add(
+!                     ReconResultTask(
+!                         tenant_id=hdr["tenant_id"],
+!                         task_no=task_no,
+!                         version=version,
+!                         recon_date=str(body["reconDate"]),
+!                         s3_bucket=str(body["s3Bucket"]),
+!                         s3_key=str(f["s3Key"]),
+!                         file_md5=str(f["md5"]).lower(),
+!                         diff_count=int(f["totalCount"]),
+!                         status="NOTIFIED",
+!                         request_id=hdr["request_id"],
+!                     )
+!                 )
+!     except IntegrityError as exc:
+!         if not _is_dedup(exc):
+!             raise
+!         dedup = True
+  
+!     return ok(
+!         {"taskNo": task_no, "version": version, "deduplicated": dedup},
+!         trace_id=hdr["trace_id"],
+!     )

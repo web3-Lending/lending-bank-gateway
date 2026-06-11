@@ -714,3 +714,129 @@ async def test_worker_t_is_none_branches(factory, tmp_path, monkeypatch) -> None
     s3 = S3FileClient(endpoint_url=None)
     handled = await ingest_pending_once(factory, s3=s3, archive_dir=str(tmp_path / "arch2"))
     assert handled == 0  # snapshot 为空（task 已删），正常返回 0
+
+
+# ───────────────────────── Test: 重复解析幂等防御 ────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_parse_and_land_idempotent_on_parsed(factory, tmp_path) -> None:
+    """task.status == PARSED 时再次调用 parse_and_land → 直接 return，三表行数不变。"""
+    from sqlalchemy import func, select
+
+    xlsx = tmp_path / "idempotent_parsed.xlsx"
+    _make_xlsx(
+        xlsx,
+        diff_rows=[["AMOUNT", "DSB-001", "BANK-001", "100.0000", "99.9900", "0.0100", "OK", "OK"]],
+        wedap_rows=[["DSB", "DSB-001", "BANK-001", "100.0000", "USD", "P1", "P2", "OK", None]],
+        bank_rows=[["BANK-001", "20260611", "99.9900", "USD", "P1", "P2", "OK", "f.xlsx", 1]],
+    )
+
+    # 先正常解析一次 → PARSED
+    async with factory() as session:
+        async with session.begin():
+            task = _task(status="DOWNLOADED")
+            session.add(task)
+    async with factory() as session:
+        row = (
+            await session.execute(
+                __import__("sqlalchemy", fromlist=["select"]).select(ReconResultTask)
+            )
+        ).scalar_one()
+        tid = row.id
+
+    await parse_and_land(factory, task_id=tid, xlsx_path=str(xlsx))
+
+    # 读取各表行数（首次解析后）
+    async with factory() as session:
+        diff_count = (
+            await session.execute(
+                select(func.count())
+                .select_from(ReconResultDiff)
+                .where(ReconResultDiff.task_id == tid)
+            )
+        ).scalar_one()
+        wedap_count = (
+            await session.execute(
+                select(func.count())
+                .select_from(ReconResultSourceWedap)
+                .where(ReconResultSourceWedap.task_id == tid)
+            )
+        ).scalar_one()
+        bank_count = (
+            await session.execute(
+                select(func.count())
+                .select_from(ReconResultSourceBank)
+                .where(ReconResultSourceBank.task_id == tid)
+            )
+        ).scalar_one()
+
+    assert diff_count == 1
+    assert wedap_count == 1
+    assert bank_count == 1
+
+    # 再次调用（task 已是 PARSED）→ 幂等空操作，行数不变
+    await parse_and_land(factory, task_id=tid, xlsx_path=str(xlsx))
+
+    async with factory() as session:
+        diff_count2 = (
+            await session.execute(
+                select(func.count())
+                .select_from(ReconResultDiff)
+                .where(ReconResultDiff.task_id == tid)
+            )
+        ).scalar_one()
+        wedap_count2 = (
+            await session.execute(
+                select(func.count())
+                .select_from(ReconResultSourceWedap)
+                .where(ReconResultSourceWedap.task_id == tid)
+            )
+        ).scalar_one()
+        bank_count2 = (
+            await session.execute(
+                select(func.count())
+                .select_from(ReconResultSourceBank)
+                .where(ReconResultSourceBank.task_id == tid)
+            )
+        ).scalar_one()
+
+    assert diff_count2 == 1, "重复调用不应追加新行到 ReconResultDiff"
+    assert wedap_count2 == 1, "重复调用不应追加新行到 ReconResultSourceWedap"
+    assert bank_count2 == 1, "重复调用不应追加新行到 ReconResultSourceBank"
+
+
+@pytest.mark.asyncio
+async def test_parse_and_land_idempotent_on_superseded(factory, tmp_path) -> None:
+    """task.status == SUPERSEDED 时再次调用 parse_and_land → 直接 return，三表行数不变。"""
+    from sqlalchemy import func, select
+
+    xlsx = tmp_path / "idempotent_superseded.xlsx"
+    _make_xlsx(xlsx)
+
+    # 直接插入 SUPERSEDED 状态的 task（无需真正解析过）
+    async with factory() as session:
+        async with session.begin():
+            task = _task(status="SUPERSEDED")
+            session.add(task)
+    async with factory() as session:
+        row = (
+            await session.execute(
+                __import__("sqlalchemy", fromlist=["select"]).select(ReconResultTask)
+            )
+        ).scalar_one()
+        tid = row.id
+
+    # 调用 parse_and_land → 幂等空操作
+    await parse_and_land(factory, task_id=tid, xlsx_path=str(xlsx))
+
+    async with factory() as session:
+        diff_count = (
+            await session.execute(
+                select(func.count())
+                .select_from(ReconResultDiff)
+                .where(ReconResultDiff.task_id == tid)
+            )
+        ).scalar_one()
+
+    assert diff_count == 0, "SUPERSEDED 任务不应写入任何差异行"

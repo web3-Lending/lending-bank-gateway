@@ -1,0 +1,27 @@
+> """outbox dispatcher worker：循环投递 PENDING/FAILED outbox 行。
+  
+> run_forever 供部署时作为后台 asyncio task 启动（T24 接线），
+> 本任务标 pragma: no cover，测试由 dispatch_once 覆盖。
+> """
+  
+! import asyncio
+  
+! from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+  
+! from app.services.outbox import dispatch_once
+  
+  
+- async def run_forever(  # pragma: no cover
+-     factory: async_sessionmaker[AsyncSession],
+-     *,
+-     targets: dict[str, str],
+-     max_attempts: int,
+-     interval_seconds: float = 5.0,
+- ) -> None:
+-     """无限循环投递 outbox，每轮间隔 interval_seconds 秒。
+  
+-     由 T24 部署任务在 lifespan 中以 asyncio.create_task 启动。
+-     """
+-     while True:
+-         await dispatch_once(factory, targets=targets, max_attempts=max_attempts)
+-         await asyncio.sleep(interval_seconds)

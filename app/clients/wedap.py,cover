@@ -1,0 +1,192 @@
+> from typing import Any
+  
+> import httpx
+  
+  
+> class WedapError(Exception):
+>     def __init__(self, code: str, msg: str) -> None:
+!         super().__init__(f"wedap {code}: {msg}")
+!         self.code = code
+  
+  
+> class WedapClient:
+>     """南向 client：所有外呼带 timeout（规范07 §1），写操作不自动重试。
+  
+>     幂等靠上层 RESULT_UNKNOWN 收敛。
+>     """
+  
+>     def __init__(self, *, base_url: str, timeout_seconds: float) -> None:
+>         self._base = base_url.rstrip("/")
+>         self._timeout = timeout_seconds
+  
+>     def _headers(self, tenant_id: str, request_id: str) -> dict[str, str]:
+!         return {
+!             "X-Tenant-Id": tenant_id,
+!             "X-Request-Id": request_id,
+!             "Content-Type": "application/json",
+!         }
+  
+>     async def _post(
+>         self,
+>         path: str,
+>         *,
+>         tenant_id: str,
+>         request_id: str,
+>         payload: dict[str, Any],
+>     ) -> dict[str, Any]:
+!         async with httpx.AsyncClient(timeout=self._timeout) as client:
+!             r = await client.post(
+!                 f"{self._base}{path}",
+!                 json=payload,
+!                 headers=self._headers(tenant_id, request_id),
+!             )
+!         return self._unwrap(r)
+  
+>     async def _get(
+>         self,
+>         path: str,
+>         *,
+>         tenant_id: str,
+>         request_id: str,
+>         params: dict[str, str] | None = None,
+>     ) -> dict[str, Any]:
+!         async with httpx.AsyncClient(timeout=self._timeout) as client:
+!             r = await client.get(
+!                 f"{self._base}{path}",
+!                 params=params,
+!                 headers=self._headers(tenant_id, request_id),
+!             )
+!         return self._unwrap(r)
+  
+>     @staticmethod
+>     def _unwrap(r: httpx.Response) -> dict[str, Any]:
+!         r.raise_for_status()
+!         body: dict[str, Any] = r.json()
+!         if str(body.get("code")) != "200":
+!             raise WedapError(str(body.get("code")), str(body.get("msg")))
+!         return dict(body.get("data") or {})
+  
+>     async def submit_disbursement(
+>         self,
+>         *,
+>         tenant_id: str,
+>         request_id: str,
+>         payload: dict[str, Any],
+>     ) -> dict[str, Any]:
+!         return await self._post(
+!             "/api/v1/loans/p2p-disbursements",
+!             tenant_id=tenant_id,
+!             request_id=request_id,
+!             payload=payload,
+!         )
+  
+>     async def submit_repayment(
+>         self,
+>         *,
+>         tenant_id: str,
+>         request_id: str,
+>         payload: dict[str, Any],
+>     ) -> dict[str, Any]:
+!         return await self._post(
+!             "/api/v1/loans/p2p-repayments",
+!             tenant_id=tenant_id,
+!             request_id=request_id,
+!             payload=payload,
+!         )
+  
+>     async def collect_from_users(
+>         self,
+>         *,
+>         tenant_id: str,
+>         request_id: str,
+>         payload: dict[str, Any],
+>     ) -> dict[str, Any]:
+!         return await self._post(
+!             "/api/v1/bank-funds/collect-from-users",
+!             tenant_id=tenant_id,
+!             request_id=request_id,
+!             payload=payload,
+!         )
+  
+>     async def distribute_to_users(
+>         self,
+>         *,
+>         tenant_id: str,
+>         request_id: str,
+>         payload: dict[str, Any],
+>     ) -> dict[str, Any]:
+!         return await self._post(
+!             "/api/v1/bank-funds/distribute-to-users",
+!             tenant_id=tenant_id,
+!             request_id=request_id,
+!             payload=payload,
+!         )
+  
+>     async def query_funds_status(
+>         self,
+>         *,
+>         tenant_id: str,
+>         request_id: str,
+>         biz_seq_no: str,
+>     ) -> dict[str, Any]:
+!         return await self._get(
+!             "/api/v1/bank-funds/status",
+!             tenant_id=tenant_id,
+!             request_id=request_id,
+!             params={"bizSeqNo": biz_seq_no},
+!         )
+  
+>     async def get_composite_steps(
+>         self,
+>         *,
+>         tenant_id: str,
+>         biz_seq_no: str,
+>     ) -> list[dict[str, Any]]:
+!         data = await self._get(
+!             f"/api/v1/composite-transactions/{biz_seq_no}/steps",
+!             tenant_id=tenant_id,
+!             request_id=f"steps-{biz_seq_no}",
+!         )
+!         return list(data.get("steps") or [])
+  
+>     async def get_deposit_balance_total(
+>         self,
+>         *,
+>         tenant_id: str,
+>         request_id: str,
+>         user_id: str,
+>     ) -> dict[str, Any]:
+!         return await self._get(
+!             "/api/v1/deposit/balances/total",
+!             tenant_id=tenant_id,
+!             request_id=request_id,
+!             params={"userId": user_id},
+!         )
+  
+>     async def get_deposit_accounts(
+>         self,
+>         *,
+>         tenant_id: str,
+>         request_id: str,
+>         user_id: str,
+>     ) -> dict[str, Any]:
+!         return await self._get(
+!             "/api/v1/deposit/accounts",
+!             tenant_id=tenant_id,
+!             request_id=request_id,
+!             params={"userId": user_id},
+!         )
+  
+>     async def get_user_info(
+>         self,
+>         *,
+>         tenant_id: str,
+>         request_id: str,
+>         params: dict[str, str],
+>     ) -> dict[str, Any]:
+!         return await self._get(
+!             "/api/v1/users/info",
+!             tenant_id=tenant_id,
+!             request_id=request_id,
+!             params=params,
+!         )

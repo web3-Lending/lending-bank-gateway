@@ -1,0 +1,135 @@
+> import hashlib
+> import json
+> from decimal import Decimal
+> from typing import Any
+  
+> from sqlalchemy import select
+> from sqlalchemy.exc import IntegrityError
+> from sqlalchemy.ext.asyncio import AsyncSession
+  
+> from app.models.idempotency import IdempotencyRecord
+  
+  
+> class IdempotencyConflict(Exception):
+>     """同 key 不同 payload —— 北向必须回 409。"""
+  
+  
+> class IdempotencyInFlight(Exception):
+>     """同 key 同 payload 但请求仍在处理中（first_response 为 None）——
+>     语义：相同请求正在被处理，调用方应返回 PROCESSING / 查询状态，禁止重新执行业务逻辑。
+>     """
+  
+  
+> def _json_default(obj: Any) -> str:
+>     """JSON 序列化兜底。
+  
+>     调用方必须传 JSON-native 类型（Pydantic 用 .model_dump(mode="json")），
+>     金额统一字符串（如 "100.0000"）。
+  
+>     Decimal 显式转 str 确保 Decimal("100.0000") 与 str "100.0000" hash 一致；
+>     其它不可序列化类型统一 str() 兜底，与 Python 内置 float 的 JSON 表示不同，
+>     故 float(100.0) 与 str "100.0000" 的 hash 不相同——调用方不应传 float 金额。
+>     """
+!     if isinstance(obj, Decimal):
+          # 显式分支：Decimal("100.0000") → "100.0000"，与字符串入参 hash 一致
+!         return str(obj)
+!     return str(obj)
+  
+  
+> def payload_hash(payload: dict[str, Any]) -> str:
+!     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=_json_default)
+!     return hashlib.sha256(canonical.encode()).hexdigest()
+  
+  
+> async def check_or_register(
+>     session: AsyncSession,
+>     *,
+>     tenant_id: str,
+>     business_scope: str,
+>     idempotency_key: str,
+>     method: str,
+>     path: str,
+>     payload: dict[str, Any],
+> ) -> dict[str, Any] | None:
+>     """幂等注册/查询。
+  
+>     返回语义（三态）：
+>     - None：首次注册，调用方继续执行业务逻辑。
+>     - dict：已完成的重放，调用方直接返回 first_response。
+>     - raises IdempotencyInFlight：同 key 同 payload 但尚未记录响应，
+>       请求仍在处理中，调用方应返回 PROCESSING/查询状态，禁止重新执行业务逻辑。
+>     - raises IdempotencyConflict：同 key 不同 payload，北向必须回 409。
+>     """
+!     h = payload_hash(payload)
+!     row = (
+!         await session.execute(
+!             select(IdempotencyRecord).where(
+!                 IdempotencyRecord.tenant_id == tenant_id,
+!                 IdempotencyRecord.business_scope == business_scope,
+!                 IdempotencyRecord.idempotency_key == idempotency_key,
+!             )
+!         )
+!     ).scalar_one_or_none()
+!     if row is None:
+!         try:
+!             async with session.begin_nested():
+!                 session.add(
+!                     IdempotencyRecord(
+!                         tenant_id=tenant_id,
+!                         business_scope=business_scope,
+!                         idempotency_key=idempotency_key,
+!                         method=method,
+!                         path=path,
+!                         payload_hash=h,
+!                     )
+!                 )
+!         except IntegrityError:
+              # 并发同键：对手在 SELECT 与 INSERT 之间抢先插入；
+              # FOR UPDATE 穿透 RR 快照，确保读到对手刚提交的行。
+!             row = (
+!                 await session.execute(
+!                     select(IdempotencyRecord)
+!                     .where(
+!                         IdempotencyRecord.tenant_id == tenant_id,
+!                         IdempotencyRecord.business_scope == business_scope,
+!                         IdempotencyRecord.idempotency_key == idempotency_key,
+!                     )
+!                     .with_for_update()
+!                 )
+!             ).scalar_one_or_none()
+-             if row is None:  # pragma: no cover - 理论不可达
+-                 raise
+!         else:
+!             return None
+      # 走到这里 row 非 None：比对 hash → 409 / in-flight / 重放
+!     if row.payload_hash != h:
+!         raise IdempotencyConflict(idempotency_key)
+!     if row.first_response is None:
+!         raise IdempotencyInFlight(idempotency_key)
+!     return row.first_response
+  
+  
+> async def record_response(
+>     session: AsyncSession,
+>     *,
+>     tenant_id: str,
+>     business_scope: str,
+>     idempotency_key: str,
+>     response: dict[str, Any],
+>     final_effect_id: str | None = None,
+> ) -> None:
+!     row = (
+!         await session.execute(
+!             select(IdempotencyRecord).where(
+!                 IdempotencyRecord.tenant_id == tenant_id,
+!                 IdempotencyRecord.business_scope == business_scope,
+!                 IdempotencyRecord.idempotency_key == idempotency_key,
+!             )
+!         )
+!     ).scalar_one_or_none()
+!     if row is None:
+!         raise ValueError(
+!             f"IdempotencyRecord not found: {tenant_id}/{business_scope}/{idempotency_key}"
+!         )
+!     row.first_response = response
+!     row.final_effect_id = final_effect_id

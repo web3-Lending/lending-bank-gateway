@@ -1,0 +1,184 @@
+> """北向银行资金 API：collect-from-users + distribute-to-users + status。"""
+  
+> from decimal import Decimal
+> from typing import Any
+  
+> import httpx
+> from fastapi import APIRouter, Depends, HTTPException, Query, Request
+> from pydantic import BaseModel, Field
+> from sqlalchemy import select
+  
+> from app.api.deps import (
+>     assert_idempotency_key_matches,
+>     parse_amount,
+>     require_headers,
+>     validate_detail_consistency,
+> )
+> from app.clients.wedap import WedapError
+> from app.core.envelope import ok
+> from app.models.txn import BankTxnOrder
+> from app.services.idempotency import IdempotencyConflict
+> from app.services.submit import SubmitRequest, submit_order
+  
+> router = APIRouter(prefix="/api/v1/bank-funds", tags=["bank-funds"])
+  
+  
+  # ── Pydantic request schemas ───────────────────────────────────────────────────
+  
+  
+> class BankFundsRequest(BaseModel):
+>     bizSeqNo: str
+>     totalAmount: str
+>     currencyCode: str
+>     userList: list[dict[str, Any]] = Field(default_factory=list)
+  
+  
+  # ── 内部提交 helper ────────────────────────────────────────────────────────────
+  
+  
+> async def _submit(
+>     request: Request,
+>     *,
+>     ids: dict[str, str],
+>     biz_seq_no: str,
+>     business_action: str,
+>     biz_type: str,
+>     business_scope: str,
+>     wedap_method: str,
+>     amount: Decimal,
+>     currency: str,
+>     wedap_payload: dict[str, Any],
+> ) -> dict[str, Any]:
+>     """validate biz_seq_no → submit_order → catch IdempotencyConflict → ok envelope。"""
+!     try:
+!         result = await submit_order(
+!             request.app.state.session_factory,
+!             wedap_call=getattr(request.app.state.wedap, wedap_method),
+!             req=SubmitRequest(
+!                 tenant_id=ids["tenant_id"],
+!                 biz_seq_no=biz_seq_no,
+!                 business_action=business_action,
+!                 biz_type=biz_type,
+!                 amount=amount,
+!                 currency=currency,
+!                 caller_service=ids["caller_service"],
+!                 request_id=ids["request_id"],
+!                 business_scope=business_scope,
+!                 wedap_payload=wedap_payload,
+!             ),
+!         )
+!     except ValueError as exc:
+!         raise HTTPException(
+!             400,
+!             detail={"code": "GW_400_VALIDATION", "message": str(exc)},
+!         ) from exc
+!     except IdempotencyConflict as exc:
+!         raise HTTPException(
+!             409,
+!             detail={"code": "GW_409_IDEMPOTENCY", "message": f"idempotency conflict: {exc}"},
+!         ) from exc
+!     return ok(result, trace_id=ids["trace_id"])
+  
+  
+  # ── Endpoints ─────────────────────────────────────────────────────────────────
+  
+  
+> @router.post("/collect-from-users")
+> async def collect_from_users(
+>     body: BankFundsRequest,
+>     request: Request,
+>     ids: dict[str, str] = Depends(require_headers),
+> ) -> dict[str, Any]:
+!     assert_idempotency_key_matches(request, body.bizSeqNo)
+!     amount = parse_amount(body.totalAmount)
+!     payload = body.model_dump(mode="json")
+!     validate_detail_consistency(
+!         payload,
+!         total=amount,
+!         currency=body.currencyCode,
+!         detail_key="userList",
+!         amount_field="amount",
+!     )
+!     return await _submit(
+!         request,
+!         ids=ids,
+!         biz_seq_no=body.bizSeqNo,
+!         business_action="COLLECT",
+!         biz_type="CLT",
+!         business_scope="bank_collect",
+!         wedap_method="collect_from_users",
+!         amount=amount,
+!         currency=body.currencyCode,
+!         wedap_payload=payload,
+!     )
+  
+  
+> @router.post("/distribute-to-users")
+> async def distribute_to_users(
+>     body: BankFundsRequest,
+>     request: Request,
+>     ids: dict[str, str] = Depends(require_headers),
+> ) -> dict[str, Any]:
+!     assert_idempotency_key_matches(request, body.bizSeqNo)
+!     amount = parse_amount(body.totalAmount)
+!     payload = body.model_dump(mode="json")
+!     validate_detail_consistency(
+!         payload,
+!         total=amount,
+!         currency=body.currencyCode,
+!         detail_key="userList",
+!         amount_field="amount",
+!     )
+!     return await _submit(
+!         request,
+!         ids=ids,
+!         biz_seq_no=body.bizSeqNo,
+!         business_action="DISTRIBUTE",
+!         biz_type="DST",
+!         business_scope="bank_distribute",
+!         wedap_method="distribute_to_users",
+!         amount=amount,
+!         currency=body.currencyCode,
+!         wedap_payload=payload,
+!     )
+  
+  
+> @router.get("/status")
+> async def query_status(
+>     request: Request,
+>     ids: dict[str, str] = Depends(require_headers),
+>     biz_seq_no: str = Query(..., alias="bizSeqNo"),
+> ) -> dict[str, Any]:
+>     """查询本地 order 状态 + wedap 实时状态（wedap 不可用时降级为 unavailable=True）。"""
+!     factory = request.app.state.session_factory
+!     async with factory() as session:
+!         row = await session.scalar(
+!             select(BankTxnOrder).where(
+!                 BankTxnOrder.tenant_id == ids["tenant_id"],
+!                 BankTxnOrder.biz_seq_no == biz_seq_no,
+!             )
+!         )
+!     if row is None:
+!         raise HTTPException(
+!             404,
+!             detail={"code": "GW_404_ORDER", "message": f"order not found: {biz_seq_no}"},
+!         )
+  
+      # 查询 wedap 实时状态；失败降级，不向外抛 500
+!     try:
+!         wedap_data: dict[str, Any] = await request.app.state.wedap.query_funds_status(
+!             tenant_id=ids["tenant_id"],
+!             request_id=ids["request_id"],
+!             biz_seq_no=biz_seq_no,
+!         )
+!     except (httpx.TimeoutException, httpx.TransportError):
+!         wedap_data = {"unavailable": True, "reason": "timeout"}
+!     except WedapError:
+!         wedap_data = {"unavailable": True, "reason": "wedap_error"}
+  
+!     result: dict[str, Any] = {
+!         "bizSeqNo": row.biz_seq_no,
+!         "orderStatus": row.status,
+!         "wedap": wedap_data,
+!     }
+!     return ok(result, trace_id=ids["trace_id"])

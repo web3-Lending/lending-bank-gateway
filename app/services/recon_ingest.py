@@ -14,6 +14,7 @@ Sheet 布局：
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -27,6 +28,8 @@ from app.models.recon import (
     ReconResultSourceWedap,
     ReconResultTask,
 )
+
+logger = logging.getLogger(__name__)
 
 PARSER_VERSION = "1"
 SCHEMA_VERSION = "wedap-recon-3sheet-v1"
@@ -144,6 +147,14 @@ async def parse_and_land(
         task = await session.get(ReconResultTask, task_id)
         if task is None:
             raise ValueError(f"ReconResultTask id={task_id} not found")
+        # 幂等防御：PARSED / SUPERSEDED 状态表示已解析完成，直接返回避免重复写入
+        if task.status in ("PARSED", "SUPERSEDED"):
+            logger.warning(
+                "parse_and_land called on task_id=%s with status=%s; skipping (idempotent)",
+                task_id,
+                task.status,
+            )
+            return
         tenant_id: str = task.tenant_id
         task_no: str = task.task_no
         current_version: int = task.version
@@ -151,27 +162,28 @@ async def parse_and_land(
 
     # ── 2. 解析 xlsx（read_only + data_only，减少内存占用）────────────────
     wb = load_workbook(xlsx_path, read_only=True, data_only=True)
-    wb_sheets: dict[str, Any] = {ws.title: ws for ws in wb.worksheets}
-
     column_check: dict[str, Any] = {}
 
     try:
-        _check_header(wb_sheets, column_check)
-    except ColumnDrift:
-        wb.close()
-        async with factory() as session:
-            async with session.begin():
-                t = await session.get(ReconResultTask, task_id)
-                if t is not None:  # pragma: no branch
-                    t.status = "FAILED"
-                    t.column_check = column_check
-        raise
+        wb_sheets: dict[str, Any] = {ws.title: ws for ws in wb.worksheets}
 
-    # ── 3. 收集数据行 ──────────────────────────────────────────────────────
-    diff_rows = _collect_rows(wb_sheets["Differences"])
-    wedap_rows = _collect_rows(wb_sheets["WeDAP Source"])
-    bank_rows = _collect_rows(wb_sheets["Bank Source"])
-    wb.close()
+        try:
+            _check_header(wb_sheets, column_check)
+        except ColumnDrift:
+            async with factory() as session:
+                async with session.begin():
+                    t = await session.get(ReconResultTask, task_id)
+                    if t is not None:  # pragma: no branch
+                        t.status = "FAILED"
+                        t.column_check = column_check
+            raise
+
+        # ── 3. 收集数据行 ──────────────────────────────────────────────────────
+        diff_rows = _collect_rows(wb_sheets["Differences"])
+        wedap_rows = _collect_rows(wb_sheets["WeDAP Source"])
+        bank_rows = _collect_rows(wb_sheets["Bank Source"])
+    finally:
+        wb.close()
 
     # 标记三个 sheet 列头均 ok
     column_check["Differences"] = "ok"

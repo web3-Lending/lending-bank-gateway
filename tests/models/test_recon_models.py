@@ -346,6 +346,31 @@ async def test_source_bank_nullable_defaults(session) -> None:
     assert row.line_no is None
 
 
+# ─────────────────────── schema_version 列长防回归 ───────────────────────────
+
+
+def test_schema_version_column_fits_constant() -> None:
+    """SCHEMA_VERSION 常量长度必须 <= ReconResultTask.schema_version 列长（防截断）。"""
+    from app.services.recon_ingest import SCHEMA_VERSION
+
+    col_length: int = ReconResultTask.schema_version.type.length  # type: ignore[union-attr]
+    assert len(SCHEMA_VERSION) <= col_length, (
+        f"SCHEMA_VERSION ({len(SCHEMA_VERSION)} chars) exceeds "
+        f"column length ({col_length}): {SCHEMA_VERSION!r}"
+    )
+
+
+def test_parser_version_column_fits_constant() -> None:
+    """PARSER_VERSION 常量长度必须 <= ReconResultTask.parser_version 列长（防截断）。"""
+    from app.services.recon_ingest import PARSER_VERSION
+
+    col_length: int = ReconResultTask.parser_version.type.length  # type: ignore[union-attr]
+    assert len(PARSER_VERSION) <= col_length, (
+        f"PARSER_VERSION ({len(PARSER_VERSION)} chars) exceeds "
+        f"column length ({col_length}): {PARSER_VERSION!r}"
+    )
+
+
 # ─────────────────────── Integration tests (MySQL) ───────────────────────────
 
 pytestmark_integration = pytest.mark.integration
