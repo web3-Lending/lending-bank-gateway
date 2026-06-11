@@ -12,6 +12,9 @@ from app.domain.states import (
 
 def test_legal_transitions() -> None:
     assert_transition(OrderStatus.ACCEPTED, OrderStatus.SUBMITTED)
+    assert_transition(
+        OrderStatus.ACCEPTED, OrderStatus.RESULT_UNKNOWN
+    )  # 外呼超时发生在 ACCEPTED→SUBMITTED 之间
     assert_transition(OrderStatus.SUBMITTED, OrderStatus.RESULT_UNKNOWN)
     assert_transition(OrderStatus.RESULT_UNKNOWN, OrderStatus.SUCCEEDED)
     assert_transition(OrderStatus.SUCCEEDED, OrderStatus.PARTIALLY_REVERSED)

@@ -25,7 +25,12 @@ class LegStatus(StrEnum):
 
 
 _ALLOWED: dict[OrderStatus, set[OrderStatus]] = {
-    OrderStatus.ACCEPTED: {OrderStatus.SUBMITTED, OrderStatus.FAILED, OrderStatus.CANCELLED},
+    OrderStatus.ACCEPTED: {
+        OrderStatus.SUBMITTED,
+        OrderStatus.RESULT_UNKNOWN,
+        OrderStatus.FAILED,
+        OrderStatus.CANCELLED,
+    },
     OrderStatus.SUBMITTED: {
         OrderStatus.PROCESSING,
         OrderStatus.RESULT_UNKNOWN,

@@ -146,3 +146,36 @@ async def test_invalid_biz_seq_no_rejected(factory) -> None:
             wedap_call=wedap.submit_disbursement,
             req=_req(biz_seq_no="WB-1704067200000-DISB-10-0001-123456"),
         )
+
+
+@pytest.mark.asyncio
+async def test_order_exists_without_idempotency_raises_conflict(factory, caplog) -> None:
+    """order 已存在但幂等行缺失（人工补数/迁移脏状态）→ IdempotencyConflict + error 日志。"""
+    import logging
+
+    from app.services.idempotency import IdempotencyConflict
+
+    # 预插 order 但不插幂等行（模拟脏状态）
+    req = _req()
+    async with factory() as s:
+        async with s.begin():
+            s.add(
+                BankTxnOrder(
+                    tenant_id=req.tenant_id,
+                    biz_seq_no=req.biz_seq_no,
+                    business_action=req.business_action,
+                    biz_type=req.biz_type,
+                    amount=req.amount,
+                    currency=req.currency,
+                    caller_service=req.caller_service,
+                    status=OrderStatus.ACCEPTED,
+                    request_id=req.request_id,
+                )
+            )
+
+    wedap = AsyncMock()
+    with caplog.at_level(logging.ERROR, logger="app.services.submit"):
+        with pytest.raises(IdempotencyConflict):
+            await submit_order(factory, wedap_call=wedap.submit_disbursement, req=req)
+
+    assert any("order exists without idempotency record" in r.message for r in caplog.records)
