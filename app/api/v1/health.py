@@ -1,10 +1,11 @@
 from typing import Any
 
 from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from app.core.context import current_ids
-from app.core.envelope import ok
+from app.core.envelope import err, ok
 
 router = APIRouter(tags=["health"])
 
@@ -15,13 +16,21 @@ async def healthz() -> dict[str, Any]:
 
 
 @router.get("/readyz")
-async def readyz(request: Request) -> dict[str, Any]:
+async def readyz(request: Request) -> Any:
     checks: dict[str, str] = {}
+    trace_id = current_ids().trace_id
     factory = getattr(request.app.state, "session_factory", None)
     if factory is None:
         checks["db"] = "not-wired"
     else:
-        async with factory() as session:
-            await session.execute(text("SELECT 1"))
+        try:
+            async with factory() as session:
+                await session.execute(text("SELECT 1"))
             checks["db"] = "ok"
-    return ok(checks, trace_id=current_ids().trace_id)
+        except Exception:
+            checks["db"] = "error"
+            return JSONResponse(
+                err("GW_503_READYZ", "db probe failed", trace_id=trace_id),
+                status_code=503,
+            )
+    return ok(checks, trace_id=trace_id)

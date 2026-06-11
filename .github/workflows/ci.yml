@@ -10,6 +10,6 @@ jobs:
       - run: pip install -e '.[dev]'
       - run: ruff check .
       - run: mypy app
-      - run: pytest -q
+      - run: pytest -q  # coverage 门禁经 pyproject addopts（--cov fail_under=100）生效
       - run: pytest -q -m integration --no-cov
         if: ${{ false }}   # M2 testcontainers 任务启用后改 true
