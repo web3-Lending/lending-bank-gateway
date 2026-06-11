@@ -27,6 +27,7 @@ from app.core.db import build_engine, build_session_factory
 from app.core.envelope import err
 from app.core.s2s import S2SMiddleware
 from app.services.outbox import enqueue_forward
+from app.workers.supervisor import supervised
 
 logger = logging.getLogger(__name__)
 
@@ -116,22 +117,30 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         tasks.append(
             asyncio.create_task(
-                outbox_dispatcher.run_forever(
-                    app.state.session_factory,
-                    targets=app.state.outbox_targets,
-                    max_attempts=settings.outbox_max_attempts,
-                    interval_seconds=settings.outbox_interval_seconds,
+                supervised(
+                    "outbox-dispatcher",
+                    lambda: outbox_dispatcher.run_forever(
+                        app.state.session_factory,
+                        targets=app.state.outbox_targets,
+                        max_attempts=settings.outbox_max_attempts,
+                        interval_seconds=settings.outbox_interval_seconds,
+                    ),
+                    restart_delay_seconds=settings.worker_restart_delay_seconds,
                 ),
                 name="outbox-dispatcher",
             )
         )
         tasks.append(
             asyncio.create_task(
-                recon_worker.run_forever(
-                    app.state.session_factory,
-                    s3=S3FileClient(endpoint_url=settings.s3_endpoint_url),
-                    archive_dir=settings.archive_dir,
-                    interval_seconds=settings.recon_interval_seconds,
+                supervised(
+                    "recon-worker",
+                    lambda: recon_worker.run_forever(
+                        app.state.session_factory,
+                        s3=S3FileClient(endpoint_url=settings.s3_endpoint_url),
+                        archive_dir=settings.archive_dir,
+                        interval_seconds=settings.recon_interval_seconds,
+                    ),
+                    restart_delay_seconds=settings.worker_restart_delay_seconds,
                 ),
                 name="recon-worker",
             )

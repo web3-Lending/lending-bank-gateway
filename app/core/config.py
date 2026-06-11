@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     """recon worker 每轮摄取间隔秒数（GW_RECON_INTERVAL_SECONDS）。"""
     archive_dir: str = "/srv/archive"
     """对账文件本地归档目录（GW_ARCHIVE_DIR）。"""
+    worker_restart_delay_seconds: float = 5.0
+    """worker 崩溃后退避重启间隔秒数（GW_WORKER_RESTART_DELAY_SECONDS）。"""
 
 
 @lru_cache
