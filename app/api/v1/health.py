@@ -21,7 +21,10 @@ async def readyz(request: Request) -> Any:
     trace_id = current_ids().trace_id
     factory = getattr(request.app.state, "session_factory", None)
     if factory is None:
-        checks["db"] = "not-wired"
+        return JSONResponse(
+            err("GW_503_READYZ", "session_factory not wired", trace_id=trace_id),
+            status_code=503,
+        )
     else:
         try:
             async with factory() as session:

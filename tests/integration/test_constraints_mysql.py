@@ -141,3 +141,61 @@ def test_leg_uq_tenant_biz_step_mysql(db_session: Session) -> None:
     db_session.add(BankTxnLeg(**{**leg_base, "external_ref": "HSBC202606110002"}))
     with pytest.raises(IntegrityError):
         db_session.flush()
+
+
+# ── UTC 钉验证 ─────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(scope="module")
+def mysql_async_url(mysql_engine: sa.Engine) -> str:
+    """从 sync engine URL 派生 asyncmy URL，使用 root 凭证。
+
+    testcontainers MySQL 8.0 默认使用 caching_sha2_password，asyncmy 在特定网络拓扑
+    （WSL2 docker bridge）下以 test 用户连接会报 Access denied。
+    root 用户有 '%' 授权且认证兼容，用于验证 _pin_utc 钩子是否生效。
+    """
+    try:
+        import importlib.util
+
+        if importlib.util.find_spec("testcontainers") is None:
+            pytest.skip("testcontainers 未安装")
+    except Exception:
+        pytest.skip("testcontainers 不可用")
+
+    # 从 sync URL 提取 host:port/db，用 root 凭证重新拼 asyncmy URL
+    sync_url = str(mysql_engine.url)
+    # sync_url = mysql+pymysql://test:test@localhost:PORT/test
+    # 提取 @host:port/db 部分
+    at_pos = sync_url.index("@")
+    host_db = sync_url[at_pos + 1 :]  # host:port/db
+    # testcontainers 默认 root_password="test"；此处非生产凭证，仅测试容器用
+    tc_root_pw = "test"  # noqa: S105
+    return f"mysql+asyncmy://root:{tc_root_pw}@{host_db}"
+
+
+@pytest.mark.asyncio
+async def test_utc_pin_async(mysql_async_url: str) -> None:
+    """验证 _pin_utc 钩子在 async engine 连接后把 session time_zone 设为 +00:00。
+
+    使用 mysql+asyncmy:// URL 构建 async engine，执行 SELECT @@session.time_zone，
+    断言结果等于 '+00:00'。
+    """
+    try:
+        import asyncmy  # noqa: F401
+    except ImportError:
+        pytest.skip("asyncmy 未安装")
+
+    from app.core.db import build_engine
+
+    async_engine = build_engine(mysql_async_url)
+    try:
+        from sqlalchemy import text as sa_text
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
+        factory = async_sessionmaker(async_engine, expire_on_commit=False)
+        async with factory() as session:
+            result = await session.execute(sa_text("SELECT @@session.time_zone"))
+            tz_value = result.scalar_one()
+        assert tz_value == "+00:00", f"expected '+00:00', got {tz_value!r}"
+    finally:
+        await async_engine.dispose()

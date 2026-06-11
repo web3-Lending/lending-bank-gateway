@@ -55,7 +55,7 @@ def test_readyz_db_ok(app: FastAPI) -> None:
 
 
 def test_readyz_db_not_wired() -> None:
-    """无 session_factory 时返回 not-wired。"""
+    """无 session_factory 时返回 503 + err envelope（fail-closed）。"""
     bare = FastAPI()
     bare.add_middleware(IdentifierMiddleware)
 
@@ -64,8 +64,10 @@ def test_readyz_db_not_wired() -> None:
     bare.include_router(health_router)
     client = TestClient(bare)
     r = client.get("/readyz")
-    assert r.status_code == 200
-    assert r.json()["data"]["db"] == "not-wired"
+    assert r.status_code == 503
+    body = r.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "GW_503_READYZ"
 
 
 def test_readyz_db_error_returns_503() -> None:

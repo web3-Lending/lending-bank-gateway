@@ -15,6 +15,7 @@ class Settings(BaseSettings):
         "http://lending-lifecycel:9000/api/v1/bank/transaction-callback"
     )
     s2s_secret: str | None = None
+    env: str = "local"
     outbox_max_attempts: int = 8
     db_pool_size: int = 5
     db_max_overflow: int = 10
