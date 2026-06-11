@@ -40,6 +40,8 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "S"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101"]
+# FastAPI 路由函数参数默认值中使用 Depends() 是框架约定，不是真正的函数调用副作用
+"app/api/v1/*.py" = ["B008"]
 # alembic autogenerate 生成文件：允许旧式类型注解、长行、import 排序宽松
 "alembic/versions/**" = ["UP035", "UP007", "E501", "I001", "I"]
 
