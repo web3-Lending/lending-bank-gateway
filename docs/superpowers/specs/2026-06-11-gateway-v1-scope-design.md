@@ -149,7 +149,7 @@ ACCEPTED → SUBMITTED → PROCESSING → SUCCEEDED | FAILED | EXPIRED | CANCELL
 
 ## 8. 可靠性与安全
 
-- **幂等**：北向写操作按 `(tenant_id, business_scope, idempotency_key)` 三元组（§5）；入站回调按 `(source, request_id)` 去重
+- **幂等**：北向写操作按 `(tenant_id, business_scope, idempotency_key)` 三元组（§5）；入站回调按 `(tenant_id, source, request_id)` 去重（与 §5 `callback_inbox` 约束一致）
 - **入站回调安全（codex P1-12，如实声明）**：wedap recon notify **无报文签名**（仅 X-Tenant-Id）。v1 补偿控制：IP allowlist + 内网 S2S token + 时间戳重放窗口 + body/S3 双 md5 校验 + taskNo+version 幂等；报文签名列为 wedap 协调项
 - **出站**：全部外呼强制 timeout（07 §1）+ 断路器（沿用 9000 模式）+ 连接池舱壁；事务内禁外部 HTTP（规范 14）
 - **鉴权**：北向沿用项目群 S2S（HMAC/svc-JWT）；南向按 wedap 要求
