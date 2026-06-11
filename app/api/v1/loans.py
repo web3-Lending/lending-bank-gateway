@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app.api.deps import parse_amount, require_headers
+from app.api.deps import assert_idempotency_key_matches, parse_amount, require_headers
 from app.core.envelope import ok
 from app.services.idempotency import IdempotencyConflict
 from app.services.submit import SubmitRequest, submit_order
@@ -98,6 +98,7 @@ async def p2p_disbursement(
     request: Request,
     ids: dict[str, str] = Depends(require_headers),
 ) -> dict[str, Any]:
+    assert_idempotency_key_matches(request, body.bizSeqNo)
     amount = parse_amount(body.disbursementInfo.txnAmount)
     return await _submit(
         request,
@@ -109,7 +110,7 @@ async def p2p_disbursement(
         wedap_method="submit_disbursement",
         amount=amount,
         currency=body.disbursementInfo.currencyCode,
-        wedap_payload=body.model_dump(),
+        wedap_payload=body.model_dump(mode="json"),
     )
 
 
@@ -119,6 +120,7 @@ async def p2p_repayment(
     request: Request,
     ids: dict[str, str] = Depends(require_headers),
 ) -> dict[str, Any]:
+    assert_idempotency_key_matches(request, body.bizSeqNo)
     amount = parse_amount(body.repaymentInfo.txnAmount)
     return await _submit(
         request,
@@ -130,5 +132,5 @@ async def p2p_repayment(
         wedap_method="submit_repayment",
         amount=amount,
         currency=body.repaymentInfo.currencyCode,
-        wedap_payload=body.model_dump(),
+        wedap_payload=body.model_dump(mode="json"),
     )

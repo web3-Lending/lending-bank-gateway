@@ -77,16 +77,14 @@ def test_bad_biz_seq_no_400(client: TestClient) -> None:
 
 
 def test_missing_amount_400(client: TestClient) -> None:
-    """disbursementInfo 缺 txnAmount → 422 validation（Pydantic 必填）或 400 VALIDATION。"""
+    """disbursementInfo 缺 txnAmount → 422 validation（Pydantic 必填）。"""
     body_no_amount = {
         **BODY,
         "disbursementInfo": {"currencyCode": "USD", "userId": "U1", "userName": "u"},
     }
     r = client.post("/api/v1/loans/p2p-disbursements", json=body_no_amount, headers=HEADERS)
-    # Pydantic 缺必填 → 422；也可接受 400 VALIDATION
-    assert r.status_code in (400, 422)
-    code = r.json()["error"]["code"]
-    assert "VALIDATION" in code
+    assert r.status_code == 422
+    assert "VALIDATION" in r.json()["error"]["code"]
 
 
 def test_invalid_amount_zero_400(client: TestClient) -> None:
@@ -131,3 +129,18 @@ def test_repayment_endpoint_works(client: TestClient) -> None:
         headers={**HEADERS, "Idempotency-Key": body["bizSeqNo"]},
     )
     assert r.json()["data"]["bizSeqNo"] == body["bizSeqNo"]
+
+
+def test_disbursement_idempotency_key_mismatch_400(client: TestClient) -> None:
+    """Idempotency-Key header 存在且与 bizSeqNo 不一致 → 400 GW_400_IDEMPOTENCY_KEY。"""
+    h = {**HEADERS, "Idempotency-Key": "WRONG-KEY-9999"}
+    r = client.post("/api/v1/loans/p2p-disbursements", json=BODY, headers=h)
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "GW_400_IDEMPOTENCY_KEY"
+
+
+def test_disbursement_no_idempotency_key_header_passes(client: TestClient) -> None:
+    """无 Idempotency-Key header → 放行，以 bizSeqNo 为准。"""
+    h = {k: v for k, v in HEADERS.items() if k != "Idempotency-Key"}
+    r = client.post("/api/v1/loans/p2p-disbursements", json=BODY, headers=h)
+    assert r.status_code == 200

@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app.api.deps import parse_amount, require_headers
+from app.api.deps import assert_idempotency_key_matches, parse_amount, require_headers
 from app.core.envelope import ok
 from app.services.idempotency import IdempotencyConflict
 from app.services.submit import SubmitRequest, submit_order
@@ -80,6 +80,7 @@ async def collect_from_users(
     request: Request,
     ids: dict[str, str] = Depends(require_headers),
 ) -> dict[str, Any]:
+    assert_idempotency_key_matches(request, body.bizSeqNo)
     amount = parse_amount(body.totalAmount)
     return await _submit(
         request,
@@ -91,7 +92,7 @@ async def collect_from_users(
         wedap_method="collect_from_users",
         amount=amount,
         currency=body.currencyCode,
-        wedap_payload=body.model_dump(),
+        wedap_payload=body.model_dump(mode="json"),
     )
 
 
@@ -101,6 +102,7 @@ async def distribute_to_users(
     request: Request,
     ids: dict[str, str] = Depends(require_headers),
 ) -> dict[str, Any]:
+    assert_idempotency_key_matches(request, body.bizSeqNo)
     amount = parse_amount(body.totalAmount)
     return await _submit(
         request,
@@ -112,5 +114,5 @@ async def distribute_to_users(
         wedap_method="distribute_to_users",
         amount=amount,
         currency=body.currencyCode,
-        wedap_payload=body.model_dump(),
+        wedap_payload=body.model_dump(mode="json"),
     )

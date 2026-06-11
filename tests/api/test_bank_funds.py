@@ -124,3 +124,18 @@ def test_collect_same_key_different_payload_409(client: TestClient) -> None:
     r = client.post("/api/v1/bank-funds/collect-from-users", json=mutated, headers=HEADERS)
     assert r.status_code == 409
     assert r.json()["error"]["code"] == "GW_409_IDEMPOTENCY"
+
+
+def test_collect_idempotency_key_mismatch_400(client: TestClient) -> None:
+    """Idempotency-Key header 存在且与 bizSeqNo 不一致 → 400 GW_400_IDEMPOTENCY_KEY。"""
+    h = {**HEADERS, "Idempotency-Key": "WRONG-KEY-9999"}
+    r = client.post("/api/v1/bank-funds/collect-from-users", json=COLLECT_BODY, headers=h)
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "GW_400_IDEMPOTENCY_KEY"
+
+
+def test_collect_no_idempotency_key_header_passes(client: TestClient) -> None:
+    """无 Idempotency-Key header → 放行，以 bizSeqNo 为准。"""
+    h = {k: v for k, v in HEADERS.items() if k != "Idempotency-Key"}
+    r = client.post("/api/v1/bank-funds/collect-from-users", json=COLLECT_BODY, headers=h)
+    assert r.status_code == 200
