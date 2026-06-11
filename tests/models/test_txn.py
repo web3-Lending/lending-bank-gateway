@@ -92,3 +92,33 @@ async def test_leg_unique_step_seq(session) -> None:
     session.add(BankTxnLeg(**{**leg_base, "external_ref": "HSBC202606110002"}))
     with pytest.raises(IntegrityError):
         await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_leg_cross_tenant_order_ref_rejected(session) -> None:
+    """leg 跨租户引用 order（order.tenant_id != leg.tenant_id）应触发 IntegrityError。
+
+    复合 FK fk_leg_order_tenant: leg.(order_id, tenant_id) → order.(id, tenant_id)。
+    SQLite 需要 PRAGMA foreign_keys=ON（由 build_engine sqlite 路径自动设置）。
+    """
+    order_t1 = _order(tenant_id="TENANT-A", biz_seq_no="DSB-A-001")
+    session.add(order_t1)
+    await session.commit()
+
+    # leg.tenant_id="TENANT-B" 但 order_id 指向 TENANT-A 的 order
+    # 复合 FK 要求 (order_id, tenant_id) 必须都匹配 → 应触发 IntegrityError
+    cross_leg = BankTxnLeg(
+        tenant_id="TENANT-B",
+        order_id=order_t1.id,  # 指向不同 tenant 的 order
+        biz_seq_no="DSB-B-001",
+        external_system="WEDAP_BANK",
+        external_ref="HSBC-CROSS-0001",
+        step_type="DISBURSEMENT_COLLECTION",
+        step_seq=1,
+        amount=Decimal("50.0000"),
+        currency="USD",
+        status="PENDING",
+    )
+    session.add(cross_leg)
+    with pytest.raises(IntegrityError):
+        await session.commit()

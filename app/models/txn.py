@@ -1,7 +1,15 @@
 import datetime as dt
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    ForeignKeyConstraint,
+    Integer,
+    Numeric,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TenantMixin, TimestampMixin
@@ -13,7 +21,11 @@ _BIG_PK = BigInteger().with_variant(Integer, "sqlite")
 
 class BankTxnOrder(Base, TenantMixin, TimestampMixin):
     __tablename__ = "bank_txn_order"
-    __table_args__ = (UniqueConstraint("tenant_id", "biz_seq_no", name="uq_order_tenant_biz"),)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "biz_seq_no", name="uq_order_tenant_biz"),
+        # 为 BankTxnLeg 复合 FK 提供父键：(id, tenant_id) 唯一
+        UniqueConstraint("id", "tenant_id", name="uq_order_id_tenant"),
+    )
 
     id: Mapped[int] = mapped_column(_BIG_PK, primary_key=True, autoincrement=True)
     biz_seq_no: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -34,12 +46,18 @@ class BankTxnLeg(Base, TenantMixin, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("tenant_id", "external_system", "external_ref", name="uq_leg_tenant_ext"),
         UniqueConstraint("tenant_id", "biz_seq_no", "step_seq", name="uq_leg_tenant_biz_step"),
+        # 复合 FK：leg.order_id + leg.tenant_id → order.id + order.tenant_id
+        # 防止跨租户引用：leg 只能指向同一 tenant 的 order
+        ForeignKeyConstraint(
+            ["order_id", "tenant_id"],
+            ["bank_txn_order.id", "bank_txn_order.tenant_id"],
+            name="fk_leg_order_tenant",
+        ),
     )
 
     id: Mapped[int] = mapped_column(_BIG_PK, primary_key=True, autoincrement=True)
     order_id: Mapped[int] = mapped_column(
         BigInteger().with_variant(Integer, "sqlite"),
-        ForeignKey("bank_txn_order.id"),
         nullable=False,
     )
     biz_seq_no: Mapped[str] = mapped_column(String(32), nullable=False)

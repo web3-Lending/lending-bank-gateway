@@ -61,6 +61,9 @@ def _task(**kw) -> ReconResultTask:
     return ReconResultTask(**defaults)
 
 
+_TENANT = "WBTHK01"
+
+
 # ─────────────────────── ReconResultTask — unique constraints ─────────────────
 
 
@@ -174,6 +177,7 @@ async def test_diff_fields_round_trip(session) -> None:
     await session.commit()
 
     diff = ReconResultDiff(
+        tenant_id=_TENANT,
         task_id=parent.id,
         diff_type="AMOUNT",
         wedap_biz_seq_no="DSB-20260611-0001",
@@ -206,7 +210,7 @@ async def test_diff_nullable_fields_default_none(session) -> None:
     session.add(parent)
     await session.commit()
 
-    diff = ReconResultDiff(task_id=parent.id, diff_type="MISSING")
+    diff = ReconResultDiff(tenant_id=_TENANT, task_id=parent.id, diff_type="MISSING")
     session.add(diff)
     await session.commit()
     await session.refresh(diff)
@@ -231,6 +235,7 @@ async def test_source_wedap_fields_round_trip(session) -> None:
     await session.commit()
 
     row = ReconResultSourceWedap(
+        tenant_id=_TENANT,
         task_id=parent.id,
         biz_type="DSB",
         biz_seq_no="DSB-20260611-0001",
@@ -265,7 +270,7 @@ async def test_source_wedap_nullable_defaults(session) -> None:
     session.add(parent)
     await session.commit()
 
-    row = ReconResultSourceWedap(task_id=parent.id, biz_seq_no="SEQ-001")
+    row = ReconResultSourceWedap(tenant_id=_TENANT, task_id=parent.id, biz_seq_no="SEQ-001")
     session.add(row)
     await session.commit()
     await session.refresh(row)
@@ -291,6 +296,7 @@ async def test_source_bank_fields_round_trip(session) -> None:
     await session.commit()
 
     row = ReconResultSourceBank(
+        tenant_id=_TENANT,
         task_id=parent.id,
         bank_seq_no="HSBC202606110001",
         txn_date="20260611",
@@ -325,7 +331,7 @@ async def test_source_bank_nullable_defaults(session) -> None:
     session.add(parent)
     await session.commit()
 
-    row = ReconResultSourceBank(task_id=parent.id, bank_seq_no="HSBC001")
+    row = ReconResultSourceBank(tenant_id=_TENANT, task_id=parent.id, bank_seq_no="HSBC001")
     session.add(row)
     await session.commit()
     await session.refresh(row)

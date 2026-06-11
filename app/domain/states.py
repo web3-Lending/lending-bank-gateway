@@ -86,6 +86,11 @@ def aggregate_order_status(legs: list[tuple[LegStatus, str]]) -> OrderStatus:
     # 整单业务语义仍为 FAILED，补偿性 REVERSAL 不改变失败结论。
     if LegStatus.FAILED in statuses:
         return OrderStatus.FAILED
+    # REVERSED leg 必须有对应 REVERSAL leg；否则数据畸形
+    if any(s == LegStatus.REVERSED for s in statuses) and not any(
+        s == LegStatus.REVERSAL for s in statuses
+    ):
+        raise ValueError("malformed legs: REVERSED without REVERSAL")
     reversal = sum(Decimal(a) for s, a in legs if s == LegStatus.REVERSAL)
     if reversal > 0:
         gross = sum(Decimal(a) for s, a in legs if s in (LegStatus.SUCCESS, LegStatus.REVERSED))

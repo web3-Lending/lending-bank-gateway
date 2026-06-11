@@ -170,3 +170,21 @@ def test_aggregate_reversal_without_source_leg_raises() -> None:
     """纯 REVERSAL 无任何 SUCCESS/REVERSED 源 leg → 畸形数据，必须 ValueError。"""
     with pytest.raises(ValueError, match="malformed legs"):
         aggregate_order_status([(LegStatus.REVERSAL, "100")])
+
+
+# ── REVERSED without REVERSAL 防御 ────────────────────────────────────────────
+
+
+def test_aggregate_reversed_without_reversal_raises() -> None:
+    """纯 REVERSED leg 无任何 REVERSAL leg → 畸形数据，必须 ValueError。
+
+    REVERSED 状态表示"已被冲正"，没有配套的 REVERSAL（冲正动作）leg 是无效数据。
+    """
+    with pytest.raises(ValueError, match="malformed legs: REVERSED without REVERSAL"):
+        aggregate_order_status([(LegStatus.REVERSED, "100")])
+
+
+def test_aggregate_success_and_reversed_without_reversal_raises() -> None:
+    """SUCCESS + REVERSED leg 但无 REVERSAL → 畸形数据，必须 ValueError。"""
+    with pytest.raises(ValueError, match="malformed legs: REVERSED without REVERSAL"):
+        aggregate_order_status([(LegStatus.SUCCESS, "50"), (LegStatus.REVERSED, "50")])

@@ -14,6 +14,12 @@ class IdempotencyConflict(Exception):
     """同 key 不同 payload —— 北向必须回 409。"""
 
 
+class IdempotencyInFlight(Exception):
+    """同 key 同 payload 但请求仍在处理中（first_response 为 None）——
+    语义：相同请求正在被处理，调用方应返回 PROCESSING / 查询状态，禁止重新执行业务逻辑。
+    """
+
+
 def _json_default(obj: Any) -> str:
     """JSON 序列化兜底。
 
@@ -45,6 +51,15 @@ async def check_or_register(
     path: str,
     payload: dict[str, Any],
 ) -> dict[str, Any] | None:
+    """幂等注册/查询。
+
+    返回语义（三态）：
+    - None：首次注册，调用方继续执行业务逻辑。
+    - dict：已完成的重放，调用方直接返回 first_response。
+    - raises IdempotencyInFlight：同 key 同 payload 但尚未记录响应，
+      请求仍在处理中，调用方应返回 PROCESSING/查询状态，禁止重新执行业务逻辑。
+    - raises IdempotencyConflict：同 key 不同 payload，北向必须回 409。
+    """
     h = payload_hash(payload)
     row = (
         await session.execute(
@@ -86,9 +101,11 @@ async def check_or_register(
                 raise
         else:
             return None
-    # 走到这里 row 非 None：比对 hash → 409 或返回 first_response
+    # 走到这里 row 非 None：比对 hash → 409 / in-flight / 重放
     if row.payload_hash != h:
         raise IdempotencyConflict(idempotency_key)
+    if row.first_response is None:
+        raise IdempotencyInFlight(idempotency_key)
     return row.first_response
 
 

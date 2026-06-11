@@ -1,4 +1,5 @@
-"""集成测试：在真实 MySQL 8.0 容器中验证两张表的唯一约束。
+"""集成测试：在真实 MySQL 8.0 容器中验证两张表的唯一约束、复合 FK 跨租户保护、
+以及 audit_log append-only 触发器。
 
 运行方式（需要 docker）：
     .venv/bin/pytest -m integration --no-cov -q
@@ -42,6 +43,20 @@ def mysql_engine():
                 f"@{mysql.get_container_host_ip()}:{mysql.get_exposed_port(3306)}"
                 f"/{mysql.dbname}"
             )
+            # root URL（用于 GLOBAL 变量设置，需要 SUPER 或 SYSTEM_VARIABLES_ADMIN 权限）
+            root_url = (
+                f"mysql+pymysql://root:test"
+                f"@{mysql.get_container_host_ip()}:{mysql.get_exposed_port(3306)}"
+                f"/{mysql.dbname}"
+            )
+            # binary logging 开启时创建 MySQL trigger 需要 log_bin_trust_function_creators=ON；
+            # testcontainer 的普通用户无 SYSTEM_VARIABLES_ADMIN，用 root 预先设置。
+            root_engine = _mysql_sync_engine(root_url)
+            with root_engine.connect() as conn:
+                conn.execute(sa.text("SET GLOBAL log_bin_trust_function_creators = 1"))
+                conn.commit()
+            root_engine.dispose()
+
             engine = _mysql_sync_engine(url)
             Base.metadata.create_all(engine)
             yield engine
@@ -141,6 +156,33 @@ def test_leg_uq_tenant_biz_step_mysql(db_session: Session) -> None:
     db_session.flush()
     # 不同 external_ref 同 step_seq=1 → 撞 uq_leg_tenant_biz_step
     db_session.add(BankTxnLeg(**{**leg_base, "external_ref": "HSBC202606110002"}))
+    with pytest.raises(IntegrityError):
+        db_session.flush()
+
+
+def test_leg_cross_tenant_order_ref_rejected_mysql(db_session: Session) -> None:
+    """MySQL：leg.tenant_id != order.tenant_id 时复合 FK fk_leg_order_tenant 拒绝插入。
+
+    场景：order 属于 TENANT-A，leg 用 TENANT-B 引用该 order → IntegrityError。
+    复合 FK: leg.(order_id, tenant_id) → order.(id, tenant_id)。
+    """
+    order_a = _new_order(tenant_id="TENANT-A", biz_seq_no="DSB-A-CROSS-001")
+    db_session.add(order_a)
+    db_session.flush()
+
+    cross_leg = BankTxnLeg(
+        tenant_id="TENANT-B",  # 与 order_a.tenant_id 不同
+        order_id=order_a.id,
+        biz_seq_no="DSB-B-CROSS-001",
+        external_system="WEDAP_BANK",
+        external_ref="HSBC-CROSS-MYSQL-0001",
+        step_type="DISBURSEMENT_COLLECTION",
+        step_seq=1,
+        amount=Decimal("50.0000"),
+        currency="USD",
+        status="PENDING",
+    )
+    db_session.add(cross_leg)
     with pytest.raises(IntegrityError):
         db_session.flush()
 
@@ -279,3 +321,31 @@ def test_inbox_uq_tenant_src_req_mysql(db_session: Session) -> None:
     db_session.add(CallbackInbox(**row))
     with pytest.raises(IntegrityError):
         db_session.flush()
+
+
+# ── audit_log append-only 触发器验证 ─────────────────────────────────────────
+
+
+def test_audit_log_update_rejected_by_trigger_mysql(mysql_engine: sa.Engine) -> None:
+    """MySQL：UPDATE audit_log 应被 BEFORE UPDATE 触发器拒绝（SIGNAL SQLSTATE '45000'）。
+
+    alembic 0005 创建触发器，本测试在 upgrade head 之后的 mysql_engine 上直接执行 raw SQL
+    验证触发器有效性。依赖 test_alembic_upgrade_head_and_on_update_mysql 已执行 upgrade head。
+    """
+    from sqlalchemy.exc import OperationalError
+
+    with mysql_engine.connect() as conn:
+        # 先插入一条合法的 audit_log
+        conn.execute(
+            sa.text(
+                "INSERT INTO audit_log (tenant_id, actor, action, entity, prev_hash, row_hash) "
+                "VALUES ('T-AUDIT', 'system', 'TEST', 'entity:1', :ph, :rh)"
+            ),
+            {"ph": "0" * 64, "rh": "1" * 64},
+        )
+        conn.commit()
+
+        # UPDATE 应被触发器拒绝
+        with pytest.raises((IntegrityError, OperationalError)):
+            conn.execute(sa.text("UPDATE audit_log SET actor='tamper' WHERE tenant_id='T-AUDIT'"))
+            conn.commit()

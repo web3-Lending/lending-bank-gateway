@@ -8,6 +8,7 @@ from app.core.db import build_engine, build_session_factory
 from app.models.base import Base
 from app.services.idempotency import (
     IdempotencyConflict,
+    IdempotencyInFlight,
     check_or_register,
     payload_hash,
     record_response,
@@ -70,6 +71,35 @@ async def test_replay_same_payload_returns_first_response(session) -> None:
         payload=PAYLOAD,
     )
     assert hit == {"txnStatus": "PROCESSING"}
+
+
+@pytest.mark.asyncio
+async def test_registered_but_no_response_raises_in_flight(session) -> None:
+    """已注册但 first_response 尚未写入（处理中）→ 应抛 IdempotencyInFlight。
+
+    语义：同一请求正在被处理，调用方应返回 PROCESSING/查询状态，禁止重新执行业务逻辑。
+    """
+    # 第一次注册（返回 None，正常执行业务逻辑中）
+    await check_or_register(
+        session,
+        tenant_id="t1",
+        business_scope="p2p_disburse",
+        idempotency_key="inflight_key",
+        method="POST",
+        path="/p",
+        payload=PAYLOAD,
+    )
+    # 此时 first_response 还未写入 → 重复请求应抛 IdempotencyInFlight
+    with pytest.raises(IdempotencyInFlight):
+        await check_or_register(
+            session,
+            tenant_id="t1",
+            business_scope="p2p_disburse",
+            idempotency_key="inflight_key",
+            method="POST",
+            path="/p",
+            payload=PAYLOAD,
+        )
 
 
 @pytest.mark.asyncio
@@ -223,9 +253,72 @@ async def test_concurrent_insert_integrity_error_falls_back_to_for_update() -> N
         payload=PAYLOAD,
     )
 
-    # 兜底路径：FOR UPDATE 查到对手行，payload_hash 一致 → 返回 first_response
+    # 兜底路径：FOR UPDATE 查到对手行，payload_hash 一致，first_response 非 None → 返回
     assert result == {"txnStatus": "OPPONENT"}
     assert execute_call_count == 2  # 第1次 SELECT（None）+ 第2次 FOR UPDATE 兜底
+
+
+@pytest.mark.asyncio
+async def test_concurrent_insert_fallback_opponent_inflight_raises() -> None:
+    """并发兜底路径：对手行 payload_hash 相同但 first_response 为 None → 抛 IdempotencyInFlight。
+
+    场景：两个相同请求并发提交，赢者已插入 row 但尚未写入 first_response；
+    败者 FOR UPDATE 查到该行，payload 一致但处理还未完成 → 应抛 IdempotencyInFlight。
+    """
+    from app.models.idempotency import IdempotencyRecord
+    from app.services.idempotency import payload_hash as _hash
+
+    h = _hash(PAYLOAD)
+    opponent_row = IdempotencyRecord(
+        tenant_id="t1",
+        business_scope="scope",
+        idempotency_key="concurrent_inflight_key",
+        method="POST",
+        path="/p",
+        payload_hash=h,
+    )
+    opponent_row.first_response = None  # 对手还未写 first_response
+
+    execute_call_count = 0
+
+    async def fake_execute(_stmt, *_a, **_kw):
+        nonlocal execute_call_count
+        execute_call_count += 1
+
+        class _Result:
+            def __init__(self, val):
+                self._val = val
+
+            def scalar_one_or_none(self):
+                return self._val
+
+        if execute_call_count == 1:
+            return _Result(None)
+        return _Result(opponent_row)
+
+    session = MagicMock()
+    session.execute = fake_execute
+    session.add = MagicMock()
+
+    nested_cm = MagicMock()
+    nested_cm.__aenter__ = AsyncMock(return_value=None)
+
+    async def nested_aexit(_self, exc_type, exc_val, exc_tb):
+        raise IntegrityError("unique constraint", {}, Exception("UNIQUE constraint failed"))
+
+    nested_cm.__aexit__ = nested_aexit
+    session.begin_nested = MagicMock(return_value=nested_cm)
+
+    with pytest.raises(IdempotencyInFlight):
+        await check_or_register(
+            session,
+            tenant_id="t1",
+            business_scope="scope",
+            idempotency_key="concurrent_inflight_key",
+            method="POST",
+            path="/p",
+            payload=PAYLOAD,
+        )
 
 
 @pytest.mark.asyncio

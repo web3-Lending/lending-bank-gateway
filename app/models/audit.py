@@ -7,7 +7,7 @@
 
 from typing import Any
 
-from sqlalchemy import JSON, BigInteger, Integer, String
+from sqlalchemy import JSON, BigInteger, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TenantMixin, TimestampMixin
@@ -19,10 +19,13 @@ _BIG_PK = BigInteger().with_variant(Integer, "sqlite")
 
 class AuditLog(Base, TenantMixin, TimestampMixin):
     """审计日志表（append-only：application 只 INSERT；
-    MySQL permission/trigger 禁止 UPDATE/DELETE，待部署时实施）。
+    MySQL BEFORE UPDATE/DELETE 触发器拒绝修改，migration 0005 创建）。
+
+    uq_audit_tenant_rowhash：(tenant_id, row_hash) 唯一——防止同一租户重复写入相同哈希行。
     """
 
     __tablename__ = "audit_log"
+    __table_args__ = (UniqueConstraint("tenant_id", "row_hash", name="uq_audit_tenant_rowhash"),)
 
     id: Mapped[int] = mapped_column(_BIG_PK, primary_key=True, autoincrement=True)
     actor: Mapped[str] = mapped_column(String(64), nullable=False)

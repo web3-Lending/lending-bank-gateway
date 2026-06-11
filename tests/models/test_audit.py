@@ -101,6 +101,7 @@ async def test_balance_snapshot_fields_round_trip(session) -> None:
     """BalanceSnapshot 所有字段写入后可正确读回，captured_at 保留 timezone aware。"""
     now = dt.datetime.now(tz=dt.UTC)
     snap = BalanceSnapshot(
+        tenant_id="WBTHK01",
         account_id="ACC-20260611-001",
         balance=Decimal("99999.9999"),
         currency="USD",
@@ -125,6 +126,7 @@ async def test_balance_snapshot_index_on_account_id(session) -> None:
     now = dt.datetime.now(tz=dt.UTC)
     for i in range(3):
         snap = BalanceSnapshot(
+            tenant_id="WBTHK01",
             account_id="ACC-SHARED",
             balance=Decimal(f"{i}.0000"),
             currency="HKD",
@@ -142,6 +144,7 @@ async def test_balance_snapshot_index_on_account_id(session) -> None:
 async def test_query_audit_fields_round_trip(session) -> None:
     """QueryAudit 所有字段写入后可正确读回（含 caller_service）。"""
     audit = QueryAudit(
+        tenant_id="WBTHK01",
         endpoint="/api/v1/txn/query",
         params_hash="sha256hash01234567890123456789012345678901234567890123456789012",
         trace_id="trace-20260611-001234567890123456789",
@@ -161,6 +164,7 @@ async def test_query_audit_fields_round_trip(session) -> None:
 async def test_query_audit_caller_service_nullable(session) -> None:
     """QueryAudit caller_service 默认为 None（nullable）。"""
     audit = QueryAudit(
+        tenant_id="WBTHK01",
         endpoint="/api/v1/health",
         params_hash="0" * 64,
         trace_id="trace-000",
@@ -170,3 +174,65 @@ async def test_query_audit_caller_service_nullable(session) -> None:
     await session.refresh(audit)
 
     assert audit.caller_service is None
+
+
+# ─────────────────────── AuditLog append-only unique constraint ───────────────
+
+
+@pytest.mark.asyncio
+async def test_audit_log_duplicate_row_hash_same_tenant_rejected(session) -> None:
+    """同 (tenant_id, row_hash) 重复插入应触发 IntegrityError (uq_audit_tenant_rowhash)。"""
+    from sqlalchemy.exc import IntegrityError
+
+    rh = "a" * 64
+    session.add(
+        AuditLog(
+            tenant_id="T1",
+            actor="system",
+            action="OP",
+            entity="e:1",
+            prev_hash="0" * 64,
+            row_hash=rh,
+        )
+    )
+    await session.commit()
+
+    session.add(
+        AuditLog(
+            tenant_id="T1",
+            actor="system",
+            action="OP2",
+            entity="e:2",
+            prev_hash=rh,
+            row_hash=rh,  # 同一 tenant + 同一 row_hash → 撞 uq_audit_tenant_rowhash
+        )
+    )
+    with pytest.raises(IntegrityError):
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_audit_log_same_row_hash_different_tenant_allowed(session) -> None:
+    """不同 tenant_id 允许相同 row_hash（唯一约束是 (tenant_id, row_hash) 复合）。"""
+    rh = "b" * 64
+    session.add(
+        AuditLog(
+            tenant_id="T1",
+            actor="system",
+            action="OP",
+            entity="e:1",
+            prev_hash="0" * 64,
+            row_hash=rh,
+        )
+    )
+    session.add(
+        AuditLog(
+            tenant_id="T2",  # 不同 tenant
+            actor="system",
+            action="OP",
+            entity="e:1",
+            prev_hash="0" * 64,
+            row_hash=rh,
+        )
+    )
+    await session.commit()  # should not raise

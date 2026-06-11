@@ -11,17 +11,18 @@ from decimal import Decimal
 from sqlalchemy import BigInteger, DateTime, Index, Integer, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, TimestampMixin
+from app.models.base import Base, TenantMixin, TimestampMixin
 
 # SQLite 的 autoincrement 只支持 INTEGER 类型；MySQL 生产环境需要 BIGINT。
 # with_variant 在 SQLite 测试中降级为 Integer，在 MySQL 中保持 BigInteger。
 _BIG_PK = BigInteger().with_variant(Integer, "sqlite")
 
 
-class QueryAudit(Base, TimestampMixin):
+class QueryAudit(Base, TenantMixin, TimestampMixin):
     """查询审计记录表。"""
 
     __tablename__ = "query_audit"
+    # ix_query_audit_tenant_id 由 TenantMixin(index=True) 自动生成，无需在此声明
 
     id: Mapped[int] = mapped_column(_BIG_PK, primary_key=True, autoincrement=True)
     endpoint: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -30,14 +31,17 @@ class QueryAudit(Base, TimestampMixin):
     caller_service: Mapped[str | None] = mapped_column(String(32))
 
 
-class BalanceSnapshot(Base, TimestampMixin):
+class BalanceSnapshot(Base, TenantMixin, TimestampMixin):
     """余额快照表。
 
     captured_at 必须带时区（timezone=True），确保跨时区对账时的时间语义正确。
     """
 
     __tablename__ = "balance_snapshot"
-    __table_args__ = (Index("ix_balance_snapshot_account_id", "account_id"),)
+    __table_args__ = (
+        Index("ix_balance_snapshot_account_id", "account_id"),
+        # ix_balance_snapshot_tenant_id 由 TenantMixin(index=True) 自动生成
+    )
 
     id: Mapped[int] = mapped_column(_BIG_PK, primary_key=True, autoincrement=True)
     account_id: Mapped[str] = mapped_column(String(64), nullable=False)

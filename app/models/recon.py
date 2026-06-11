@@ -60,7 +60,7 @@ class ReconResultTask(Base, TenantMixin, TimestampMixin):
     archive_path: Mapped[str | None] = mapped_column(String(256))
 
 
-class ReconResultDiff(Base, TimestampMixin):
+class ReconResultDiff(Base, TenantMixin, TimestampMixin):
     """差异明细表。"""
 
     __tablename__ = "recon_result_diff"
@@ -68,6 +68,7 @@ class ReconResultDiff(Base, TimestampMixin):
         Index("ix_recon_diff_task_id", "task_id"),
         Index("ix_recon_diff_wedap_biz_seq_no", "wedap_biz_seq_no"),
         Index("ix_recon_diff_bank_seq_no", "bank_seq_no"),
+        # ix_recon_result_diff_tenant_id 由 TenantMixin(index=True) 自动生成，无需在此重复声明
     )
 
     id: Mapped[int] = mapped_column(_BIG_PK, primary_key=True, autoincrement=True)
@@ -82,7 +83,7 @@ class ReconResultDiff(Base, TimestampMixin):
     bank_status: Mapped[str | None] = mapped_column(String(16))
 
 
-class ReconResultSourceWedap(Base, TimestampMixin):
+class ReconResultSourceWedap(Base, TenantMixin, TimestampMixin):
     """Wedap 侧对账源数据表。"""
 
     __tablename__ = "recon_result_source_wedap"
@@ -90,6 +91,7 @@ class ReconResultSourceWedap(Base, TimestampMixin):
         Index("ix_recon_src_wedap_task_id", "task_id"),
         Index("ix_recon_src_wedap_biz_seq_no", "biz_seq_no"),
         Index("ix_recon_src_wedap_bank_biz_seq_no", "bank_biz_seq_no"),
+        # ix_recon_result_source_wedap_tenant_id 由 TenantMixin(index=True) 自动生成
     )
 
     id: Mapped[int] = mapped_column(_BIG_PK, primary_key=True, autoincrement=True)
@@ -105,13 +107,14 @@ class ReconResultSourceWedap(Base, TimestampMixin):
     error_msg: Mapped[str | None] = mapped_column(String(256))
 
 
-class ReconResultSourceBank(Base, TimestampMixin):
+class ReconResultSourceBank(Base, TenantMixin, TimestampMixin):
     """银行侧对账源数据表。"""
 
     __tablename__ = "recon_result_source_bank"
     __table_args__ = (
         Index("ix_recon_src_bank_task_id", "task_id"),
         Index("ix_recon_src_bank_bank_seq_no", "bank_seq_no"),
+        # ix_recon_result_source_bank_tenant_id 由 TenantMixin(index=True) 自动生成
     )
 
     id: Mapped[int] = mapped_column(_BIG_PK, primary_key=True, autoincrement=True)

@@ -21,8 +21,11 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # 导入所有模型以确保 Base.metadata 注册完整
+import app.models.audit  # noqa: F401, E402
 import app.models.callback  # noqa: F401, E402
 import app.models.idempotency  # noqa: F401, E402
+import app.models.query_audit  # noqa: F401, E402
+import app.models.recon  # noqa: F401, E402
 import app.models.txn  # noqa: F401, E402
 from app.models.base import Base  # noqa: E402
 

@@ -16,6 +16,9 @@ callback_inbox 补默认值（T7 residual）：
   - status 列补 server_default='RECEIVED'
 
 MySQL 专属：新表 updated_at 补 ON UPDATE CURRENT_TIMESTAMP（对称 downgrade）。
+
+M2 fix：recon_result_diff / recon_result_source_wedap / recon_result_source_bank /
+         query_audit / balance_snapshot 补 tenant_id 列 + ix_*_tenant_id 索引。
 """
 
 from typing import Sequence, Union
@@ -112,6 +115,7 @@ def upgrade() -> None:
         sa.Column("diff_amount", sa.Numeric(precision=21, scale=4), nullable=True),
         sa.Column("wedap_status", sa.String(length=16), nullable=True),
         sa.Column("bank_status", sa.String(length=16), nullable=True),
+        sa.Column("tenant_id", sa.String(length=36), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -134,6 +138,7 @@ def upgrade() -> None:
         unique=False,
     )
     op.create_index("ix_recon_diff_bank_seq_no", "recon_result_diff", ["bank_seq_no"], unique=False)
+    op.create_index("ix_recon_diff_tenant_id", "recon_result_diff", ["tenant_id"], unique=False)
 
     # ── recon_result_source_wedap ────────────────────────────────────────────
     op.create_table(
@@ -154,6 +159,7 @@ def upgrade() -> None:
         sa.Column("payee_account", sa.String(length=64), nullable=True),
         sa.Column("status", sa.String(length=16), nullable=True),
         sa.Column("error_msg", sa.String(length=256), nullable=True),
+        sa.Column("tenant_id", sa.String(length=36), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -183,6 +189,12 @@ def upgrade() -> None:
         ["bank_biz_seq_no"],
         unique=False,
     )
+    op.create_index(
+        "ix_recon_src_wedap_tenant_id",
+        "recon_result_source_wedap",
+        ["tenant_id"],
+        unique=False,
+    )
 
     # ── recon_result_source_bank ─────────────────────────────────────────────
     op.create_table(
@@ -203,6 +215,7 @@ def upgrade() -> None:
         sa.Column("status", sa.String(length=16), nullable=True),
         sa.Column("file_name", sa.String(length=128), nullable=True),
         sa.Column("line_no", sa.Integer(), nullable=True),
+        sa.Column("tenant_id", sa.String(length=36), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -226,6 +239,12 @@ def upgrade() -> None:
         ["bank_seq_no"],
         unique=False,
     )
+    op.create_index(
+        "ix_recon_src_bank_tenant_id",
+        "recon_result_source_bank",
+        ["tenant_id"],
+        unique=False,
+    )
 
     # ── query_audit ──────────────────────────────────────────────────────────
     op.create_table(
@@ -240,6 +259,7 @@ def upgrade() -> None:
         sa.Column("params_hash", sa.String(length=64), nullable=False),
         sa.Column("trace_id", sa.String(length=64), nullable=False),
         sa.Column("caller_service", sa.String(length=32), nullable=True),
+        sa.Column("tenant_id", sa.String(length=36), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -254,6 +274,7 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id"),
     )
+    op.create_index("ix_query_audit_tenant_id", "query_audit", ["tenant_id"], unique=False)
 
     # ── balance_snapshot ─────────────────────────────────────────────────────
     op.create_table(
@@ -269,6 +290,7 @@ def upgrade() -> None:
         sa.Column("currency", sa.String(length=3), nullable=False),
         sa.Column("source_endpoint", sa.String(length=128), nullable=False),
         sa.Column("captured_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("tenant_id", sa.String(length=36), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -285,6 +307,9 @@ def upgrade() -> None:
     )
     op.create_index(
         "ix_balance_snapshot_account_id", "balance_snapshot", ["account_id"], unique=False
+    )
+    op.create_index(
+        "ix_balance_snapshot_tenant_id", "balance_snapshot", ["tenant_id"], unique=False
     )
 
     # ── audit_log ────────────────────────────────────────────────────────────
@@ -359,16 +384,21 @@ def downgrade() -> None:
     # ── 删除新增 7 张表（逆序）──────────────────────────────────────────────
     op.drop_index("ix_audit_log_tenant_id", table_name="audit_log")
     op.drop_table("audit_log")
+    op.drop_index("ix_balance_snapshot_tenant_id", table_name="balance_snapshot")
     op.drop_index("ix_balance_snapshot_account_id", table_name="balance_snapshot")
     op.drop_table("balance_snapshot")
+    op.drop_index("ix_query_audit_tenant_id", table_name="query_audit")
     op.drop_table("query_audit")
+    op.drop_index("ix_recon_src_bank_tenant_id", table_name="recon_result_source_bank")
     op.drop_index("ix_recon_src_bank_bank_seq_no", table_name="recon_result_source_bank")
     op.drop_index("ix_recon_src_bank_task_id", table_name="recon_result_source_bank")
     op.drop_table("recon_result_source_bank")
+    op.drop_index("ix_recon_src_wedap_tenant_id", table_name="recon_result_source_wedap")
     op.drop_index("ix_recon_src_wedap_bank_biz_seq_no", table_name="recon_result_source_wedap")
     op.drop_index("ix_recon_src_wedap_biz_seq_no", table_name="recon_result_source_wedap")
     op.drop_index("ix_recon_src_wedap_task_id", table_name="recon_result_source_wedap")
     op.drop_table("recon_result_source_wedap")
+    op.drop_index("ix_recon_diff_tenant_id", table_name="recon_result_diff")
     op.drop_index("ix_recon_diff_bank_seq_no", table_name="recon_result_diff")
     op.drop_index("ix_recon_diff_wedap_biz_seq_no", table_name="recon_result_diff")
     op.drop_index("ix_recon_diff_task_id", table_name="recon_result_diff")

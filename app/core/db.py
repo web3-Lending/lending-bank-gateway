@@ -33,6 +33,13 @@ def build_engine(
             with dbapi_conn.cursor() as cur:  # 规范11: DB session 钉 +00:00
                 cur.execute("SET time_zone = '+00:00'")
 
+    if db_url.startswith("sqlite"):  # pragma: no branch
+        # SQLite 默认关闭外键约束；启用后复合 FK（leg→order 跨租户保护）才生效。
+        # 注：aiosqlite 在异步引擎下通过 sync_engine 事件注入 PRAGMA。
+        @event.listens_for(engine.sync_engine, "connect")
+        def _enable_fk(dbapi_conn, _record):  # type: ignore[no-untyped-def]
+            dbapi_conn.execute("PRAGMA foreign_keys=ON")
+
     return engine
 
 
