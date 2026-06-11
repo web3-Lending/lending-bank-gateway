@@ -7,8 +7,25 @@ from sqlalchemy.ext.asyncio import (
 )
 
 
-def build_engine(db_url: str) -> AsyncEngine:
-    engine = create_async_engine(db_url, pool_pre_ping=True, pool_recycle=3600)
+def _pool_kwargs(db_url: str, pool_size: int, max_overflow: int) -> dict[str, int]:
+    """返回适合该 db_url 的连接池参数。
+
+    sqlite 使用 StaticPool/NullPool 体系，不支持 pool_size / max_overflow；
+    其它方言（MySQL 等）透传这两个参数。
+    """
+    if db_url.startswith("sqlite"):
+        return {}
+    return {"pool_size": pool_size, "max_overflow": max_overflow}
+
+
+def build_engine(
+    db_url: str,
+    *,
+    pool_size: int = 5,
+    max_overflow: int = 10,
+) -> AsyncEngine:
+    kwargs = _pool_kwargs(db_url, pool_size, max_overflow)
+    engine = create_async_engine(db_url, pool_pre_ping=True, pool_recycle=3600, **kwargs)
     if db_url.startswith("mysql"):  # pragma: no cover - 仅真 MySQL 路径
 
         @event.listens_for(engine.sync_engine, "connect")
@@ -20,4 +37,9 @@ def build_engine(db_url: str) -> AsyncEngine:
 
 
 def build_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+    """构造异步 session 工厂。
+
+    调用方必须 ``async with factory() as session`` 使用；
+    裸调 factory() 不关闭会泄漏连接。
+    """
     return async_sessionmaker(engine, expire_on_commit=False)
