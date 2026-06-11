@@ -17,7 +17,7 @@ import asyncio
 import logging
 from decimal import Decimal
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select
@@ -268,7 +268,14 @@ def test_after_ingest_wires_legs_and_advances_order() -> None:
         "txnStatus": "SUCCESS",
     }
 
-    with TestClient(app) as client:
+    async def _noop_forever(*_args: object, **_kwargs: object) -> None:
+        await asyncio.sleep(9999)
+
+    with (
+        patch("app.workers.outbox_dispatcher.run_forever", side_effect=_noop_forever),
+        patch("app.workers.recon_worker.run_forever", side_effect=_noop_forever),
+        TestClient(app) as client,
+    ):
         r = client.post("/api/v1/callbacks/wedap/transactions", json=body, headers=headers)
 
     assert r.status_code == 200
@@ -404,7 +411,14 @@ def test_sync_failure_leaves_inbox_received_and_no_outbox() -> None:
         "txnStatus": "SUCCESS",
     }
 
-    with TestClient(app) as client:
+    async def _noop_forever(*_args: object, **_kwargs: object) -> None:
+        await asyncio.sleep(9999)
+
+    with (
+        patch("app.workers.outbox_dispatcher.run_forever", side_effect=_noop_forever),
+        patch("app.workers.recon_worker.run_forever", side_effect=_noop_forever),
+        TestClient(app) as client,
+    ):
         r = client.post("/api/v1/callbacks/wedap/transactions", json=body, headers=headers)
 
     # 响应仍 200（after_ingest 失败补偿）

@@ -6,8 +6,8 @@ lending 体系与 wedap 资金系统之间的**统一资金网关**服务（ADR-
 
 - **北向（inbound）**：接收 lending-lifecycel / lending-core 的资金指令，通过标准化 envelope（消息信封 v0.2）转发至 wedap
 - **南向（outbound）**：wedap 回调经 inbox-outbox 幂等入库，再通过对账摄取接口供 lending-recon 消费
-- **order-leg 供数**：`/fiat-vault/transactions` 提供自有资金流水，recon 消费时无需穿越 wedap
-- **对账摄取**：`/recon/inflows` `/recon/outflows` 分别提供聚合数据，兼容 recon 的 envelope 消费协议
+- **order-leg 供数**：`GET /api/v1/fiat-vault/transactions` 提供自有资金流水（BankTxnLeg），lending-recon 通过跨库 collector 直接读 gateway 库（Plan 3），无需穿越 wedap
+- **对账数据消费**：lending-recon 消费 gateway 数据的方式为 `GET /api/v1/fiat-vault/transactions`；不存在 `/recon/inflows` 或 `/recon/outflows` 端点
 
 ## 端口
 
@@ -66,6 +66,14 @@ curl http://localhost:8050/healthz
 ```
 
 > **注意**：必须先跑 `alembic upgrade head` 再启动服务；服务不会自动执行迁移。
+
+### Worker（后台任务）
+
+**outbox dispatcher** 与 **recon worker** 随 API 进程 lifespan 一并启动，无需独立部署：
+
+- `GW_WORKERS_ENABLED=true`（默认）：进程启动时自动以 `asyncio.create_task` 起两个后台任务
+- 多副本部署时：outbox 可能被多个副本同时投递，由下游幂等机制容忍双投递；recon worker 通过原子 claim（`UPDATE ... WHERE status='NOTIFIED'`）防止并发重复摄取
+- 单副本或调试时设 `GW_WORKERS_ENABLED=false` 可完全关闭后台任务
 
 ### 环境变量
 

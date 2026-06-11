@@ -18,7 +18,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.api.deps import require_headers
 from app.clients.wedap import WedapError
@@ -73,9 +73,12 @@ async def _audited_passthrough(
 
 
 @router.get("/api/v1/deposit/balances/total")
-async def deposit_balance_total(request: Request, userId: str) -> dict[str, Any]:
+async def deposit_balance_total(
+    request: Request,
+    userId: str,
+    hdr: dict[str, str] = Depends(require_headers),
+) -> dict[str, Any]:
     """余额汇总查询：透传 + 审计 + 余额快照（BalanceSnapshot）。"""
-    hdr = require_headers(request)
     wedap = request.app.state.wedap
     data = await _audited_passthrough(
         request,
@@ -121,9 +124,12 @@ async def deposit_balance_total(request: Request, userId: str) -> dict[str, Any]
 
 
 @router.get("/api/v1/deposit/accounts")
-async def deposit_accounts(request: Request, userId: str) -> dict[str, Any]:
+async def deposit_accounts(
+    request: Request,
+    userId: str,
+    hdr: dict[str, str] = Depends(require_headers),
+) -> dict[str, Any]:
     """账户列表查询：透传 + 审计（无快照）。"""
-    hdr = require_headers(request)
     wedap = request.app.state.wedap
     data = await _audited_passthrough(
         request,
@@ -140,12 +146,14 @@ async def deposit_accounts(request: Request, userId: str) -> dict[str, Any]:
 
 
 @router.get("/api/v1/users/info")
-async def users_info(request: Request) -> dict[str, Any]:
+async def users_info(
+    request: Request,
+    hdr: dict[str, str] = Depends(require_headers),
+) -> dict[str, Any]:
     """用户信息查询：原样透传所有 query params + 审计。
 
     params 原样透传 wedap（契约 C）；参数白名单收紧候选项见 spec §11 协调清单。
     """
-    hdr = require_headers(request)
     params = dict(request.query_params)
     wedap = request.app.state.wedap
     data = await _audited_passthrough(

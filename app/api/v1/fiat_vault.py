@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import or_, select
 
 from app.api.deps import require_headers
@@ -14,9 +14,13 @@ _MAX_LIMIT = 1000
 
 @router.get("/transactions")
 async def vault_transactions(
-    request: Request, accountNo: str, dateFrom: str, dateTo: str, limit: int = 500
+    request: Request,
+    accountNo: str,
+    dateFrom: str,
+    dateTo: str,
+    limit: int = 500,
+    hdr: dict[str, str] = Depends(require_headers),
 ) -> dict[str, object]:
-    hdr = require_headers(request)
     if not (dateFrom.isdigit() and len(dateFrom) == 8 and dateTo.isdigit() and len(dateTo) == 8):
         raise HTTPException(
             400, detail={"code": "GW_400_VALIDATION", "message": "dateFrom/dateTo must be yyyyMMdd"}

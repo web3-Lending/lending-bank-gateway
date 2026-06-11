@@ -1,4 +1,7 @@
+import asyncio
 import logging
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
@@ -16,6 +19,7 @@ from app.api.v1.fiat_vault import router as fiat_vault_router
 from app.api.v1.health import router as health_router
 from app.api.v1.loans import router as loans_router
 from app.api.v1.recon_notify import router as recon_notify_router
+from app.clients.s3 import S3FileClient
 from app.clients.wedap import WedapClient
 from app.core.config import get_settings
 from app.core.context import IdentifierMiddleware, current_ids
@@ -101,13 +105,60 @@ async def _after_ingest(
             )
 
 
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """FastAPI lifespan：startup 时按 workers_enabled 起后台 asyncio task；shutdown 时 cancel。"""
+    settings = get_settings()
+    tasks: list[asyncio.Task[None]] = []
+
+    if settings.workers_enabled:
+        from app.workers import outbox_dispatcher, recon_worker
+
+        tasks.append(
+            asyncio.create_task(
+                outbox_dispatcher.run_forever(
+                    app.state.session_factory,
+                    targets=app.state.outbox_targets,
+                    max_attempts=settings.outbox_max_attempts,
+                    interval_seconds=settings.outbox_interval_seconds,
+                ),
+                name="outbox-dispatcher",
+            )
+        )
+        tasks.append(
+            asyncio.create_task(
+                recon_worker.run_forever(
+                    app.state.session_factory,
+                    s3=S3FileClient(endpoint_url=settings.s3_endpoint_url),
+                    archive_dir=settings.archive_dir,
+                    interval_seconds=settings.recon_interval_seconds,
+                ),
+                name="recon-worker",
+            )
+        )
+        logger.info(
+            "worker tasks started: outbox_interval=%.1fs recon_interval=%.1fs",
+            settings.outbox_interval_seconds,
+            settings.recon_interval_seconds,
+        )
+
+    yield
+
+    if tasks:  # pragma: no cover
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        logger.info("worker tasks cancelled on shutdown")
+
+
 def create_app() -> FastAPI:
-    app = FastAPI(title="lending-bank-gateway", version="0.1.0")
     settings = get_settings()
     if settings.env not in ("local", "test") and not settings.s2s_secret:
         raise RuntimeError(
             "GW_S2S_SECRET 必须在非 local/test 环境配置（fail-fast，资金网关禁 fail-open）"
         )
+
+    app = FastAPI(title="lending-bank-gateway", version="0.1.0", lifespan=_lifespan)
 
     # 解析 caller 白名单：空串 = 不启用
     allowed_callers: set[str] | None = (

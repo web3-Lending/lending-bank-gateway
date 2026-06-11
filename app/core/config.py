@@ -27,6 +27,16 @@ class Settings(BaseSettings):
     outbox_max_attempts: int = 8
     db_pool_size: int = 5
     db_max_overflow: int = 10
+    workers_enabled: bool = True
+    """是否在进程内启动后台 worker（GW_WORKERS_ENABLED）。
+    设为 False 可在多副本中禁用 worker，或在单元测试中关闭后台任务。
+    """
+    outbox_interval_seconds: float = 5.0
+    """outbox dispatcher 每轮投递间隔秒数（GW_OUTBOX_INTERVAL_SECONDS）。"""
+    recon_interval_seconds: float = 30.0
+    """recon worker 每轮摄取间隔秒数（GW_RECON_INTERVAL_SECONDS）。"""
+    archive_dir: str = "/srv/archive"
+    """对账文件本地归档目录（GW_ARCHIVE_DIR）。"""
 
 
 @lru_cache

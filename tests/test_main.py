@@ -1,5 +1,9 @@
+import asyncio
+from unittest.mock import patch
+
 import pytest
 from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from app.clients.wedap import WedapClient
 from app.core.config import get_settings
@@ -56,4 +60,81 @@ def test_create_app_test_env_without_secret_ok(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.delenv("GW_S2S_SECRET", raising=False)
     result = create_app()
     assert isinstance(result, FastAPI)
+    get_settings.cache_clear()
+
+
+# ── lifespan worker 接线测试（C-1）────────────────────────────────────────────────
+
+
+def test_lifespan_workers_disabled_no_tasks_started(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GW_WORKERS_ENABLED=false → lifespan 不启动任何后台 task。
+
+    用 TestClient with 语境触发 lifespan；patch run_forever 为可观测 stub，
+    断言 startup 期间未被调度。
+    """
+    get_settings.cache_clear()
+    monkeypatch.setenv("GW_WORKERS_ENABLED", "false")
+
+    outbox_called = False
+    recon_called = False
+
+    async def fake_outbox_forever(*_args: object, **_kwargs: object) -> None:
+        nonlocal outbox_called
+        outbox_called = True
+        await asyncio.sleep(0)
+
+    async def fake_recon_forever(*_args: object, **_kwargs: object) -> None:
+        nonlocal recon_called
+        recon_called = True
+        await asyncio.sleep(0)
+
+    with (
+        patch("app.workers.outbox_dispatcher.run_forever", side_effect=fake_outbox_forever),
+        patch("app.workers.recon_worker.run_forever", side_effect=fake_recon_forever),
+    ):
+        with TestClient(create_app()):
+            assert not outbox_called
+            assert not recon_called
+
+    get_settings.cache_clear()
+
+
+def test_lifespan_workers_enabled_tasks_started_and_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GW_WORKERS_ENABLED=true → lifespan startup 时两个 task 被调度，shutdown 时被 cancel。
+
+    stub run_forever 在被 cancel 前挂起（await asyncio.sleep 大值），
+    断言 startup 后 stub 已被调用（task 已创建）；TestClient __exit__ 触发 shutdown cancel。
+    """
+    get_settings.cache_clear()
+    monkeypatch.setenv("GW_WORKERS_ENABLED", "true")
+
+    outbox_started = False
+    recon_started = False
+
+    async def fake_outbox_forever(*_args: object, **_kwargs: object) -> None:
+        nonlocal outbox_started
+        outbox_started = True
+        await asyncio.sleep(9999)  # 挂起直到被 cancel
+
+    async def fake_recon_forever(*_args: object, **_kwargs: object) -> None:
+        nonlocal recon_started
+        recon_started = True
+        await asyncio.sleep(9999)
+
+    with (
+        patch("app.workers.outbox_dispatcher.run_forever", side_effect=fake_outbox_forever),
+        patch("app.workers.recon_worker.run_forever", side_effect=fake_recon_forever),
+    ):
+        with TestClient(create_app()):
+            # lifespan startup 完成，两个 task 已 create_task（coroutine 已被调度）
+            # 给 event loop 一个机会执行已 scheduled 的 tasks
+            pass
+        # TestClient __exit__ 完成 → shutdown → tasks cancelled → 不抛异常
+
+    # stub 被调用即证明 task 被创建并开始运行
+    assert outbox_started
+    assert recon_started
+
     get_settings.cache_clear()
