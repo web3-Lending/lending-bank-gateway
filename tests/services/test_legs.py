@@ -107,13 +107,15 @@ async def test_resync_is_idempotent_and_reversal_appends(factory) -> None:
 
 
 @pytest.mark.asyncio
-async def test_unknown_order_is_noop(factory) -> None:
-    await sync_legs_for(
-        factory,
-        wedap=_wedap([STEP]),
-        tenant_id="OCBC",
-        biz_seq_no="DSB-20260611-0000000000404",
-    )
+async def test_unknown_order_raises_legs_sync_incomplete(factory) -> None:
+    """未知 biz_seq_no → 抛 LegsSyncIncomplete，零 leg 落库（不封存为已处理）。"""
+    with pytest.raises(LegsSyncIncomplete, match="unknown order"):
+        await sync_legs_for(
+            factory,
+            wedap=_wedap([STEP]),
+            tenant_id="OCBC",
+            biz_seq_no="DSB-20260611-0000000000404",
+        )
     async with factory() as s:
         legs = (await s.execute(select(BankTxnLeg))).scalars().all()
         assert legs == []
@@ -444,6 +446,90 @@ def test_sync_failure_leaves_inbox_received_and_no_outbox() -> None:
         # inbox 留 RECEIVED（未推进）
         assert inbox_row.status == "RECEIVED"
         # outbox 零行（enqueue 被中断）
+        assert len(outbox_rows) == 0
+
+    asyncio.run(_verify())
+
+
+# ---------------------------------------------------------------------------
+# P1-2（终审）：未知 bizSeqNo 回调 → inbox 留 RECEIVED + outbox 零行
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_biz_seq_no_callback_leaves_inbox_received_no_outbox() -> None:
+    """未知 bizSeqNo 回调 → LegsSyncIncomplete 中断转发：
+    - 响应 200 received=True
+    - inbox.status == RECEIVED（未封存为已处理）
+    - inbox.error 非空（留痕）
+    - outbox 零行（不向 lifecycle 转发）
+    """
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+    from app.models.base import Base
+    from app.models.callback import CallbackInbox, CallbackOutbox
+
+    UNKNOWN_BIZ = "DSB-20260611-0000000000404"
+
+    app = create_app()
+
+    async def _setup() -> None:
+        async with app.state.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        # 故意不预插入 order，模拟未知/乱序回调
+
+    asyncio.run(_setup())
+
+    # wedap 返回正常 step（order 不存在时 sync_legs_for 应抛 LegsSyncIncomplete）
+    mock_wedap = AsyncMock()
+    mock_wedap.get_composite_steps.return_value = [STEP]
+    app.state.wedap = mock_wedap
+
+    headers = {
+        "X-Caller-Service": "lifecycle",
+        "X-Tenant-Id": "OCBC",
+        "X-Request-Id": "cb-unknown-biz-001",
+    }
+    body = {
+        "bizSeqNo": UNKNOWN_BIZ,
+        "type": "LOAN_DISBURSEMENT",
+        "txnStatus": "SUCCESS",
+    }
+
+    async def _noop_forever(*_args: object, **_kwargs: object) -> None:
+        await asyncio.sleep(9999)
+
+    with (
+        patch("app.workers.outbox_dispatcher.run_forever", side_effect=_noop_forever),
+        patch("app.workers.recon_worker.run_forever", side_effect=_noop_forever),
+        TestClient(app) as client,
+    ):
+        r = client.post("/api/v1/callbacks/wedap/transactions", json=body, headers=headers)
+
+    assert r.status_code == 200
+    assert r.json()["data"]["received"] is True
+
+    async def _verify() -> None:
+        f = app.state.session_factory
+        async with f() as s:
+            inbox_row = (
+                await s.execute(
+                    select(CallbackInbox).where(
+                        CallbackInbox.tenant_id == "OCBC",
+                        CallbackInbox.request_id == "cb-unknown-biz-001",
+                    )
+                )
+            ).scalar_one()
+            outbox_rows = (
+                (await s.execute(select(CallbackOutbox).where(CallbackOutbox.tenant_id == "OCBC")))
+                .scalars()
+                .all()
+            )
+        # 未知 order 不得封存为 PROCESSED
+        assert inbox_row.status == "RECEIVED"
+        # error 字段必须留痕（LegsSyncIncomplete 消息）
+        assert inbox_row.error is not None and inbox_row.error != ""
+        # outbox 零行：不向 lifecycle 转发
         assert len(outbox_rows) == 0
 
     asyncio.run(_verify())

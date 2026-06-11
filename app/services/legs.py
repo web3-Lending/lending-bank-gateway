@@ -51,9 +51,10 @@ async def sync_legs_for(
     并发安全：order 行和 legs 行均加 FOR UPDATE 行锁（with_for_update），串行化并发
     sync 调用，防止两次并发同步各自聚合后写入不一致状态。SQLite 忽略该子句，单测不受影响。
 
-    失败语义：聚合 ValueError / IllegalTransition 时抛出 LegsSyncIncomplete（不静默吞）。
-    调用方 _after_ingest 捕获后不执行 outbox enqueue，inbox 行留 RECEIVED，
-    由重放机制驱动最终收敛。
+    失败语义：
+    - order 不存在（未知 tenant/biz_seq_no、乱序回调）→ 抛出 LegsSyncIncomplete，
+      _after_ingest 中断不 enqueue outbox，inbox 行留 RECEIVED 待重放或 admin 重放补偿。
+    - 聚合 ValueError / IllegalTransition → 同上，抛 LegsSyncIncomplete。
 
     注意：sync_legs_for 与 inbox status 推进为两事务（至少一次语义），崩溃窗口由重放再
     驱动收敛。
@@ -73,8 +74,7 @@ async def sync_legs_for(
                 )
             ).scalar_one_or_none()
             if order is None:
-                logger.warning("sync_legs: no order %s/%s", tenant_id, biz_seq_no)
-                return
+                raise LegsSyncIncomplete(f"unknown order {tenant_id}/{biz_seq_no}")
             # FOR UPDATE：锁定所有关联 leg 行，防并发 upsert 互相覆盖
             existing = {
                 leg.step_seq: leg
