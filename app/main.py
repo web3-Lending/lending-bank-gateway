@@ -1,4 +1,5 @@
 import logging
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
@@ -65,6 +66,18 @@ async def _generic_exception_handler(request: Request, exc: Exception) -> JSONRe
     )
 
 
+async def _after_ingest(request: Request, *, tenant_id: str, body: dict[str, Any]) -> None:
+    """T16 接线：leg 同步 + 父单聚合。T17 outbox 转发追加到此函数。"""
+    from app.services.legs import sync_legs_for
+
+    await sync_legs_for(
+        request.app.state.session_factory,
+        wedap=request.app.state.wedap,
+        tenant_id=tenant_id,
+        biz_seq_no=str(body.get("bizSeqNo", "")),
+    )
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="lending-bank-gateway", version="0.1.0")
     settings = get_settings()
@@ -102,7 +115,7 @@ def create_app() -> FastAPI:
     )
     app.state.engine = engine
     app.state.session_factory = build_session_factory(engine)
-    app.state.callback_after_ingest = callbacks._noop_after_ingest
+    app.state.callback_after_ingest = _after_ingest
     app.include_router(health_router)
     app.include_router(loans_router)
     app.include_router(bank_funds_router)
