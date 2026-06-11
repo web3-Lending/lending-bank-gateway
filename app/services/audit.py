@@ -22,6 +22,8 @@ async def write_audit(
     """append-only 审计写入（per-tenant hash chain）。必须在调用方事务内执行。
 
     actor 必须来自认证上下文（svc:<caller>），禁止客户端伪造（规范 13）。
+    链完整性依赖串行写入；高并发可能分叉，验证工具需容忍并以叶节点反向追溯；
+    v2 可加 SELECT FOR UPDATE
     """
     last = (
         await session.execute(

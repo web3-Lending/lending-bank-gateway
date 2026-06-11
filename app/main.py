@@ -6,6 +6,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.api.v1 import callbacks
 from app.api.v1.bank_funds import router as bank_funds_router
 from app.api.v1.composite import router as composite_router
 from app.api.v1.health import router as health_router
@@ -91,10 +92,12 @@ def create_app() -> FastAPI:
     )
     app.state.engine = engine
     app.state.session_factory = build_session_factory(engine)
+    app.state.callback_after_ingest = callbacks._noop_after_ingest
     app.include_router(health_router)
     app.include_router(loans_router)
     app.include_router(bank_funds_router)
     app.include_router(composite_router)
+    app.include_router(callbacks.router)
     return app
 
 
