@@ -52,12 +52,13 @@ def mysql_engine():
 
 @pytest.fixture()
 def db_session(mysql_engine: sa.Engine):
-    """每个测试独立 Session；测试结束后无论成败都关闭（不回滚，每用例独立数据）。"""
+    """每个测试独立 Session；测试结束后先 rollback 再 close，防测试间数据污染。"""
     from sqlalchemy.orm import sessionmaker
 
     factory = sessionmaker(bind=mysql_engine, expire_on_commit=False)
     session = factory()
     yield session
+    session.rollback()
     session.close()
 
 
@@ -199,3 +200,69 @@ async def test_utc_pin_async(mysql_async_url: str) -> None:
         assert tz_value == "+00:00", f"expected '+00:00', got {tz_value!r}"
     finally:
         await async_engine.dispose()
+
+
+# ── 迁移执行 + ON UPDATE CURRENT_TIMESTAMP 验证 ──────────────────────────────
+
+
+def test_alembic_upgrade_head_and_on_update_mysql(mysql_engine: sa.Engine) -> None:
+    """验证 0002 迁移可在 MySQL 上执行，且 bank_txn_order.updated_at 有 ON UPDATE 行为。
+
+    流程：
+    1. drop_all 后用 alembic command.upgrade("head") 跑完整迁移链（进程内，复用
+       mysql_engine 连接，不 subprocess —— 规避 testcontainer test 用户认证限制）。
+    2. 插入一条 bank_txn_order，记录 updated_at 初始值。
+    3. sleep(1) 后 raw SQL UPDATE status；重查 updated_at 验证自动更新。
+    """
+    import time
+    from decimal import Decimal
+
+    from alembic.config import Config
+
+    from alembic import command
+    from app.models.base import Base
+
+    # 1. drop_all → alembic upgrade head（进程内，复用 mysql_engine 连接）
+    Base.metadata.drop_all(mysql_engine)
+
+    worktree = "/home/ubuntu/lending/lending-bank-gateway/.worktrees/v1-cutover-core"
+    alembic_cfg = Config(f"{worktree}/alembic.ini")
+    alembic_cfg.set_main_option("script_location", f"{worktree}/alembic")
+
+    # 直接传入同步连接，跳过 env.py 的 URL 读取路径
+    with mysql_engine.connect() as conn:
+        alembic_cfg.attributes["connection"] = conn
+        command.upgrade(alembic_cfg, "head")
+
+    # 2. 插入一条记录，捕获初始 updated_at
+    with mysql_engine.connect() as conn:
+        conn.execute(
+            sa.text(
+                "INSERT INTO bank_txn_order "
+                "(tenant_id, biz_seq_no, business_action, biz_type, amount, currency,"
+                " caller_service, status) "
+                "VALUES ('T1','SEQ-ON-UPDATE-001','DISBURSE','DSB',:amt,'USD','svc','ACCEPTED')"
+            ),
+            {"amt": Decimal("100.0000")},
+        )
+        conn.commit()
+
+        before = conn.execute(
+            sa.text("SELECT updated_at FROM bank_txn_order WHERE biz_seq_no='SEQ-ON-UPDATE-001'")
+        ).scalar_one()
+
+        # 等 1 秒确保时间戳可区分（MySQL DATETIME 精度为秒）
+        time.sleep(1)
+
+        conn.execute(
+            sa.text(
+                "UPDATE bank_txn_order SET status='SUBMITTED' WHERE biz_seq_no='SEQ-ON-UPDATE-001'"
+            )
+        )
+        conn.commit()
+
+        after = conn.execute(
+            sa.text("SELECT updated_at FROM bank_txn_order WHERE biz_seq_no='SEQ-ON-UPDATE-001'")
+        ).scalar_one()
+
+    assert after > before, f"ON UPDATE CURRENT_TIMESTAMP 未生效：before={before!r}, after={after!r}"

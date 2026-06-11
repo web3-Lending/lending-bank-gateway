@@ -22,7 +22,7 @@ class BankTxnOrder(Base, TenantMixin, TimestampMixin):
     amount: Mapped[Decimal] = mapped_column(Numeric(21, 4), nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
     caller_service: Mapped[str] = mapped_column(String(32), nullable=False)
-    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
     request_id: Mapped[str | None] = mapped_column(String(64))
     submitted_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     acked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))

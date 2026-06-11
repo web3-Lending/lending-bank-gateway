@@ -21,6 +21,7 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # 导入所有模型以确保 Base.metadata 注册完整
+import app.models.idempotency  # noqa: F401, E402
 import app.models.txn  # noqa: F401, E402
 from app.models.base import Base  # noqa: E402
 
@@ -57,7 +58,22 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    """在线模式：建立真实数据库连接并执行迁移。"""
+    """在线模式：建立真实数据库连接并执行迁移。
+
+    支持通过 config.attributes["connection"] 注入已有连接（测试用途），
+    避免重新建连接带来的认证限制。
+    """
+    # 测试注入路径：直接使用已有连接，跳过 URL 解析
+    injected = config.attributes.get("connection", None)
+    if injected is not None:
+        context.configure(
+            connection=injected,
+            target_metadata=target_metadata,
+        )
+        with context.begin_transaction():
+            context.run_migrations()
+        return
+
     cfg = config.get_section(config.config_ini_section, {})
     cfg["sqlalchemy.url"] = _get_url()
 
