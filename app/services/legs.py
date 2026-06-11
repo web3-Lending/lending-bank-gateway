@@ -14,6 +14,16 @@ from app.domain.states import (
 )
 from app.models.txn import BankTxnLeg, BankTxnOrder
 
+
+class LegsSyncIncomplete(Exception):
+    """legs 同步过程中聚合或状态转移失败，摄取链必须让 inbox 留 RECEIVED 等重放收敛。
+
+    抛出此异常意味着本次 sync_legs_for 执行未能完成聚合/转移，但已落库的 leg 行仍保留。
+    调用方（_after_ingest）捕获后应中断后续 outbox enqueue，让 inbox 行留 RECEIVED，
+    由重放机制驱动最终收敛。
+    """
+
+
 logger = logging.getLogger(__name__)
 
 # 完全终态：不允许任何覆盖（REVERSED/FAILED/REVERSAL 不可改）。
@@ -37,8 +47,13 @@ async def sync_legs_for(
     """拉 steps → upsert leg（external_ref/金额不可变，status 可推进）→ 聚合父单。
 
     upsert key: (tenant, biz_seq, step_seq)。
-    防御：聚合 ValueError / IllegalTransition 不上抛（log+留待下次回调/重放收敛），
-    保证回调摄取不被单笔脏数据阻塞。
+
+    并发安全：order 行和 legs 行均加 FOR UPDATE 行锁（with_for_update），串行化并发
+    sync 调用，防止两次并发同步各自聚合后写入不一致状态。SQLite 忽略该子句，单测不受影响。
+
+    失败语义：聚合 ValueError / IllegalTransition 时抛出 LegsSyncIncomplete（不静默吞）。
+    调用方 _after_ingest 捕获后不执行 outbox enqueue，inbox 行留 RECEIVED，
+    由重放机制驱动最终收敛。
 
     注意：sync_legs_for 与 inbox status 推进为两事务（至少一次语义），崩溃窗口由重放再
     驱动收敛。
@@ -46,25 +61,31 @@ async def sync_legs_for(
     steps = await wedap.get_composite_steps(tenant_id=tenant_id, biz_seq_no=biz_seq_no)
     async with factory() as session:
         async with session.begin():
+            # FOR UPDATE：并发 sync 串行化，防两个 goroutine 各自聚合写入冲突
             order = (
                 await session.execute(
-                    select(BankTxnOrder).where(
+                    select(BankTxnOrder)
+                    .where(
                         BankTxnOrder.tenant_id == tenant_id,
                         BankTxnOrder.biz_seq_no == biz_seq_no,
                     )
+                    .with_for_update()
                 )
             ).scalar_one_or_none()
             if order is None:
                 logger.warning("sync_legs: no order %s/%s", tenant_id, biz_seq_no)
                 return
+            # FOR UPDATE：锁定所有关联 leg 行，防并发 upsert 互相覆盖
             existing = {
                 leg.step_seq: leg
                 for leg in (
                     await session.execute(
-                        select(BankTxnLeg).where(
+                        select(BankTxnLeg)
+                        .where(
                             BankTxnLeg.tenant_id == tenant_id,
                             BankTxnLeg.biz_seq_no == biz_seq_no,
                         )
+                        .with_for_update()
                     )
                 ).scalars()
             }
@@ -135,9 +156,12 @@ async def sync_legs_for(
                 if new_status != OrderStatus(order.status):
                     assert_transition(OrderStatus(order.status), new_status)
                     order.status = new_status
-            except (ValueError, IllegalTransition):
+            except (ValueError, IllegalTransition) as exc:
                 logger.exception(
                     "sync_legs aggregate/transition rejected %s/%s",
                     tenant_id,
                     biz_seq_no,
                 )
+                raise LegsSyncIncomplete(
+                    f"sync_legs aggregate/transition failed for {tenant_id}/{biz_seq_no}"
+                ) from exc

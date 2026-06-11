@@ -5,11 +5,12 @@
 - 再同步幂等（status 可更新）+ REVERSAL 追加 + 父单推进 REVERSED
 - 未知 biz_seq_no → noop（不落 leg）
 - 空 steps → 不动 leg、order 状态不变
-- aggregate 抛 ValueError → 不崩、order 状态不变、logger.error 产生
-- IllegalTransition（order 已 FAILED 又来 SUCCESS legs）→ 不崩、order 状态不变、logger.error 产生
+- aggregate 抛 ValueError → 抛 LegsSyncIncomplete、order 状态不变、logger.error 产生
+- IllegalTransition（order 已 FAILED 又来 SUCCESS legs）→ 抛 LegsSyncIncomplete、order 状态不变
 - callbacks 端点 after_ingest 接线端到端：POST 回调 → legs 落库 → order 推进 → inbox PROCESSED
 - external_ref 漂移：再同步时 sysRefNo 变化 → logger.warning 产生，external_ref 不被修改
 - 终态 leg 防倒退：SUCCESS leg 再同步为 PENDING → 拒绝写入 + logger.warning
+- 失败不可封存：aggregate ValueError → inbox 留 RECEIVED + outbox 零行 + 响应 200
 """
 
 import asyncio
@@ -25,7 +26,7 @@ from app.core.db import build_engine, build_session_factory
 from app.domain.states import OrderStatus
 from app.models.base import Base
 from app.models.txn import BankTxnLeg, BankTxnOrder
-from app.services.legs import sync_legs_for
+from app.services.legs import LegsSyncIncomplete, sync_legs_for
 
 BIZ = "DSB-20260611-0001234567890"
 STEP = {
@@ -135,35 +136,36 @@ async def test_empty_steps_no_change(factory) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 补充测试：aggregate 抛 ValueError → 不崩、order 状态不变、logger.error 产生
+# P2 修复：aggregate 抛 ValueError → 抛 LegsSyncIncomplete，order 状态不变
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_aggregate_value_error_is_defended(factory, caplog) -> None:
-    """aggregate_order_status 抛 ValueError（畸形 leg 组合）→ sync 不崩、order 状态不变。"""
+async def test_aggregate_value_error_raises_legs_sync_incomplete(factory, caplog) -> None:
+    """aggregate_order_status 抛 ValueError（畸形 leg 组合）→ sync 抛 LegsSyncIncomplete。"""
     # 构造畸形数据：只有 REVERSED leg 没有 REVERSAL leg → aggregate 抛 ValueError
     reversed_step = {**STEP, "status": "REVERSED"}
     with caplog.at_level(logging.ERROR, logger="app.services.legs"):
-        await sync_legs_for(
-            factory, wedap=_wedap([reversed_step]), tenant_id="OCBC", biz_seq_no=BIZ
-        )
+        with pytest.raises(LegsSyncIncomplete):
+            await sync_legs_for(
+                factory, wedap=_wedap([reversed_step]), tenant_id="OCBC", biz_seq_no=BIZ
+            )
     async with factory() as s:
         order = (await s.execute(select(BankTxnOrder))).scalar_one()
-    # order 状态不应被推进（异常被防御）
+    # order 状态不应被推进（异常被抛出前事务已回滚）
     assert order.status == "SUBMITTED"
     # 必须有 logger.exception 产生
     assert any("sync_legs aggregate/transition rejected" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
-# 补充测试：IllegalTransition → 不崩、order 状态不变、logger.error 产生
+# P2 修复：IllegalTransition → 抛 LegsSyncIncomplete，order 状态不变
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_illegal_transition_is_defended(factory, caplog) -> None:
-    """order 已 FAILED，又来全 SUCCESS legs → IllegalTransition，sync 不崩、order 状态不变。"""
+async def test_illegal_transition_raises_legs_sync_incomplete(factory, caplog) -> None:
+    """order 已 FAILED，又来全 SUCCESS legs → IllegalTransition → 抛 LegsSyncIncomplete。"""
     # 先把 order 推到 FAILED
     async with factory() as s:
         async with s.begin():
@@ -177,7 +179,8 @@ async def test_illegal_transition_is_defended(factory, caplog) -> None:
         {**STEP, "stepSeq": 2, "sysRefNo": "R2", "stepType": "DISBURSEMENT_DISTRIBUTION"},
     ]
     with caplog.at_level(logging.ERROR, logger="app.services.legs"):
-        await sync_legs_for(factory, wedap=_wedap(steps), tenant_id="OCBC", biz_seq_no=BIZ)
+        with pytest.raises(LegsSyncIncomplete):
+            await sync_legs_for(factory, wedap=_wedap(steps), tenant_id="OCBC", biz_seq_no=BIZ)
     async with factory() as s:
         order = (await s.execute(select(BankTxnOrder))).scalar_one()
     assert order.status == "FAILED"
@@ -344,3 +347,89 @@ async def test_terminal_leg_status_not_overwritten(factory, caplog) -> None:
 
     # 必须产生终态防倒退告警
     assert any("terminal leg status overwrite rejected" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# P2：失败不可封存 — aggregate ValueError → inbox 留 RECEIVED + outbox 零行 + 响应 200
+# ---------------------------------------------------------------------------
+
+
+def test_sync_failure_leaves_inbox_received_and_no_outbox() -> None:
+    """sync_legs_for 抛 LegsSyncIncomplete → _after_ingest 中断 outbox enqueue，
+    inbox 行留 RECEIVED（status 不推进 PROCESSED），outbox 零行，响应仍 200。
+    """
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+    from app.models.base import Base
+    from app.models.callback import CallbackInbox, CallbackOutbox
+
+    app = create_app()
+
+    async def _setup() -> None:
+        async with app.state.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        # 预插入 order（SUBMITTED）
+        f = app.state.session_factory
+        async with f() as s:
+            async with s.begin():
+                s.add(
+                    BankTxnOrder(
+                        tenant_id="OCBC",
+                        biz_seq_no=BIZ,
+                        business_action="DISBURSE",
+                        biz_type="DSB",
+                        amount=Decimal("120.0000"),
+                        currency="USD",
+                        caller_service="lifecycle",
+                        status="SUBMITTED",
+                    )
+                )
+
+    asyncio.run(_setup())
+
+    # wedap 返回畸形数据：只有 REVERSED leg，没有配对 REVERSAL → aggregate 抛 ValueError
+    mock_wedap = AsyncMock()
+    mock_wedap.get_composite_steps.return_value = [{**STEP, "status": "REVERSED"}]
+    app.state.wedap = mock_wedap
+
+    headers = {
+        "X-Caller-Service": "lifecycle",
+        "X-Tenant-Id": "OCBC",
+        "X-Request-Id": "cb-fail-001",
+    }
+    body = {
+        "bizSeqNo": BIZ,
+        "type": "LOAN_DISBURSEMENT",
+        "txnStatus": "SUCCESS",
+    }
+
+    with TestClient(app) as client:
+        r = client.post("/api/v1/callbacks/wedap/transactions", json=body, headers=headers)
+
+    # 响应仍 200（after_ingest 失败补偿）
+    assert r.status_code == 200
+    assert r.json()["data"]["received"] is True
+
+    async def _verify() -> None:
+        f = app.state.session_factory
+        async with f() as s:
+            inbox_row = (
+                await s.execute(
+                    select(CallbackInbox).where(
+                        CallbackInbox.tenant_id == "OCBC",
+                        CallbackInbox.request_id == "cb-fail-001",
+                    )
+                )
+            ).scalar_one()
+            outbox_rows = (
+                (await s.execute(select(CallbackOutbox).where(CallbackOutbox.tenant_id == "OCBC")))
+                .scalars()
+                .all()
+            )
+        # inbox 留 RECEIVED（未推进）
+        assert inbox_row.status == "RECEIVED"
+        # outbox 零行（enqueue 被中断）
+        assert len(outbox_rows) == 0
+
+    asyncio.run(_verify())

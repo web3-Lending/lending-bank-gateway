@@ -37,10 +37,16 @@ class CallbackOutbox(Base, TenantMixin, TimestampMixin):
 
     status+next_retry_at 复合索引：dispatcher 按 (status, next_retry_at) 扫表，
     复合索引比单列索引更高效（覆盖两列过滤条件）。
+
+    dedup_key 幂等键：(tenant_id, target, dedup_key) 三元组唯一约束防重入队。
+    NULL 时 MySQL/SQLite 唯一约束不生效——可接受，手工 enqueue 无 dedup 需求。
     """
 
     __tablename__ = "callback_outbox"
-    __table_args__ = (Index("ix_callback_outbox_status_retry", "status", "next_retry_at"),)
+    __table_args__ = (
+        Index("ix_callback_outbox_status_retry", "status", "next_retry_at"),
+        UniqueConstraint("tenant_id", "target", "dedup_key", name="uq_outbox_dedup"),
+    )
 
     id: Mapped[int] = mapped_column(_BIG_PK, primary_key=True, autoincrement=True)
     target: Mapped[str] = mapped_column(String(32), nullable=False)  # lifecycle / customers
@@ -50,3 +56,4 @@ class CallbackOutbox(Base, TenantMixin, TimestampMixin):
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     next_retry_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
+    dedup_key: Mapped[str | None] = mapped_column(String(160))

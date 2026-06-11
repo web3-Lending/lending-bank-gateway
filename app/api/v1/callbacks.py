@@ -80,7 +80,9 @@ async def _set_inbox_status(
             row.error = error
 
 
-async def _noop_after_ingest(request: Request, *, tenant_id: str, body: dict[str, Any]) -> None:
+async def _noop_after_ingest(
+    request: Request, *, tenant_id: str, body: dict[str, Any], request_id: str
+) -> None:
     """T16/T17 接线点：leg 同步 + outbox 转发。本任务为空实现。"""
 
 
@@ -126,7 +128,12 @@ async def wedap_transaction_callback(request: Request, body: dict[str, Any]) -> 
     if not dedup:
         # --- 正常路径：after_ingest 失败补偿 ---
         try:
-            await after_ingest(request, tenant_id=hdr["tenant_id"], body=body)
+            await after_ingest(
+                request,
+                tenant_id=hdr["tenant_id"],
+                body=body,
+                request_id=hdr["request_id"],
+            )
             # after_ingest 成功 → 推进 status=PROCESSED
             await _set_inbox_status(
                 factory, hdr["tenant_id"], hdr["request_id"], status="PROCESSED", error=None
@@ -153,7 +160,12 @@ async def wedap_transaction_callback(request: Request, body: dict[str, Any]) -> 
         if existing is not None and existing.status == "RECEIVED":
             # 上次 after_ingest 未完成 → 重放再驱动
             try:
-                await after_ingest(request, tenant_id=hdr["tenant_id"], body=body)
+                await after_ingest(
+                    request,
+                    tenant_id=hdr["tenant_id"],
+                    body=body,
+                    request_id=hdr["request_id"],
+                )
                 await _set_inbox_status(
                     factory, hdr["tenant_id"], hdr["request_id"], status="PROCESSED", error=None
                 )

@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models.callback import CallbackOutbox
@@ -26,12 +27,60 @@ async def enqueue_forward(
     tenant_id: str,
     target: str,
     payload: dict[str, Any],
+    dedup_key: str | None = None,
 ) -> CallbackOutbox:
-    """在当前 session（调用方负责事务）插入一条 PENDING outbox 行并返回。"""
-    row = CallbackOutbox(tenant_id=tenant_id, target=target, payload=payload)
-    session.add(row)
-    await session.flush()
-    return row
+    """在当前 session（调用方负责事务）插入一条 PENDING outbox 行并返回。
+
+    dedup_key 非 None 时先查 (tenant_id, target, dedup_key) 是否已存在：
+    - 已存在 → 返回既有行，不重插（幂等）
+    - 不存在 → 正常插入；若并发竞态触发 IntegrityError，begin_nested 捕获后查回既有行
+    dedup_key 为 None 时退化为无幂等保证的普通插入（向后兼容）。
+    """
+    if dedup_key is not None:
+        # 先查是否已存在（乐观路径，无锁）
+        existing = (
+            await session.execute(
+                select(CallbackOutbox).where(
+                    CallbackOutbox.tenant_id == tenant_id,
+                    CallbackOutbox.target == target,
+                    CallbackOutbox.dedup_key == dedup_key,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            return existing
+
+        # 尝试插入；并发竞态下唯一约束可能 IntegrityError
+        try:
+            async with session.begin_nested():
+                row = CallbackOutbox(
+                    tenant_id=tenant_id,
+                    target=target,
+                    payload=payload,
+                    dedup_key=dedup_key,
+                )
+                session.add(row)
+                await session.flush()
+            return row
+        except (
+            IntegrityError
+        ):  # pragma: no cover - 并发竞态：两线程同时通过乐观查询后触发，单线程测试不可达
+            # 并发插入被约束拒绝，查回既有行
+            existing = (
+                await session.execute(
+                    select(CallbackOutbox).where(
+                        CallbackOutbox.tenant_id == tenant_id,
+                        CallbackOutbox.target == target,
+                        CallbackOutbox.dedup_key == dedup_key,
+                    )
+                )
+            ).scalar_one()
+            return existing
+    else:
+        row = CallbackOutbox(tenant_id=tenant_id, target=target, payload=payload)
+        session.add(row)
+        await session.flush()
+        return row
 
 
 async def dispatch_once(
@@ -63,13 +112,16 @@ async def dispatch_once(
             for r in rows
             if r.next_retry_at is None or r.next_retry_at.replace(tzinfo=dt.UTC) <= now
         ]
-        snapshot = [(r.id, r.tenant_id, r.target, r.payload) for r in due]
+        snapshot = [(r.id, r.tenant_id, r.target, r.payload, r.dedup_key) for r in due]
 
     # 2. 逐条外呼（事务外）+ 独立事务更新状态
     handled = 0
-    for oid, tenant_id, target, payload in snapshot:
+    for oid, tenant_id, target, payload, dedup_key in snapshot:
         url = targets.get(target)
         ok_flag, error = False, None
+
+        # X-Request-Id 用 dedup_key（下游幂等键跨重放稳定），无 dedup_key 时降级到 outbox-{id}
+        request_id = dedup_key if dedup_key is not None else f"outbox-{oid}"
 
         if url is None:
             error = f"no url for target {target}"
@@ -83,7 +135,7 @@ async def dispatch_once(
                             "X-Caller-Service": "lending-bank-gateway",
                             "X-Tenant-Id": tenant_id,
                             "X-Trace-Id": f"outbox-{oid}",
-                            "X-Request-Id": f"outbox-{oid}",
+                            "X-Request-Id": request_id,
                         },
                     )
                 ok_flag = resp.status_code < 300

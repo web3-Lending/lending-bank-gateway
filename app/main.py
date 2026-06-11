@@ -70,8 +70,14 @@ async def _generic_exception_handler(request: Request, exc: Exception) -> JSONRe
     )
 
 
-async def _after_ingest(request: Request, *, tenant_id: str, body: dict[str, Any]) -> None:
-    """T16 接线：leg 同步 + 父单聚合。T17 outbox 转发：独立事务 enqueue。"""
+async def _after_ingest(
+    request: Request, *, tenant_id: str, body: dict[str, Any], request_id: str
+) -> None:
+    """T16 接线：leg 同步 + 父单聚合。T17 outbox 转发：独立事务 enqueue。
+
+    request_id 作为 outbox dedup_key（fwd-{request_id}），确保同一 inbox 请求
+    即使重放也只产生一条 outbox 行（下游幂等键跨重放稳定）。
+    """
     from app.services.legs import sync_legs_for
 
     await sync_legs_for(
@@ -89,6 +95,7 @@ async def _after_ingest(request: Request, *, tenant_id: str, body: dict[str, Any
                 tenant_id=tenant_id,
                 target="lifecycle",
                 payload=body,
+                dedup_key=f"fwd-{request_id}",
             )
 
 

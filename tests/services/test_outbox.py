@@ -1,4 +1,4 @@
-"""outbox 服务单元测试：投递、退避、DEAD、重放。"""
+"""outbox 服务单元测试：投递、退避、DEAD、重放、dedup_key 幂等。"""
 
 import httpx
 import pytest
@@ -137,7 +137,7 @@ async def test_replay_non_dead_returns_false(factory) -> None:
 @pytest.mark.asyncio
 @respx.mock
 async def test_dispatch_sends_correct_headers(factory) -> None:
-    """转发请求必须携带 X-Caller-Service、X-Tenant-Id、X-Trace-Id、X-Request-Id 头（S2S 规范）。"""
+    """转发请求：无 dedup_key 时 X-Request-Id = outbox-{id}（向后兼容）。"""
     route = respx.post("http://lifecycle/cb").mock(return_value=httpx.Response(200))
     oid = await _enqueue(factory)
     await dispatch_once(factory, targets=TARGETS, max_attempts=3)
@@ -147,3 +147,112 @@ async def test_dispatch_sends_correct_headers(factory) -> None:
     assert req.headers.get("X-Tenant-Id") == "OCBC"
     assert req.headers.get("X-Trace-Id") == f"outbox-{oid}"
     assert req.headers.get("X-Request-Id") == f"outbox-{oid}"
+
+
+# ---------------------------------------------------------------------------
+# P1：dedup_key 幂等测试
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dedup_key_same_enqueue_returns_existing_row(factory) -> None:
+    """同 dedup_key 重复 enqueue 只产生一行，第二次返回既有行。"""
+    async with factory() as s:
+        async with s.begin():
+            row1 = await enqueue_forward(
+                s,
+                tenant_id="OCBC",
+                target="lifecycle",
+                payload={"bizSeqNo": "B1"},
+                dedup_key="fwd-req-001",
+            )
+            id1 = row1.id
+
+    async with factory() as s:
+        async with s.begin():
+            row2 = await enqueue_forward(
+                s,
+                tenant_id="OCBC",
+                target="lifecycle",
+                payload={"bizSeqNo": "B1"},
+                dedup_key="fwd-req-001",
+            )
+            id2 = row2.id
+
+    # 同一行（id 相同），数据库只有 1 条
+    assert id1 == id2
+    from sqlalchemy import select
+
+    async with factory() as s:
+        rows = (await s.execute(select(CallbackOutbox))).scalars().all()
+    assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_different_dedup_keys_produce_separate_rows(factory) -> None:
+    """不同 dedup_key 各产生独立行。"""
+    async with factory() as s:
+        async with s.begin():
+            r1 = await enqueue_forward(
+                s,
+                tenant_id="OCBC",
+                target="lifecycle",
+                payload={"bizSeqNo": "B1"},
+                dedup_key="fwd-req-001",
+            )
+            r2 = await enqueue_forward(
+                s,
+                tenant_id="OCBC",
+                target="lifecycle",
+                payload={"bizSeqNo": "B2"},
+                dedup_key="fwd-req-002",
+            )
+    assert r1.id != r2.id
+    from sqlalchemy import select
+
+    async with factory() as s:
+        rows = (await s.execute(select(CallbackOutbox))).scalars().all()
+    assert len(rows) == 2
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_dispatch_uses_dedup_key_as_request_id(factory) -> None:
+    """有 dedup_key 时 X-Request-Id 使用 dedup_key，跨重放保持稳定（下游幂等键）。"""
+    route = respx.post("http://lifecycle/cb").mock(return_value=httpx.Response(200))
+    async with factory() as s:
+        async with s.begin():
+            await enqueue_forward(
+                s,
+                tenant_id="OCBC",
+                target="lifecycle",
+                payload={"bizSeqNo": "B1"},
+                dedup_key="fwd-cb-req-abc",
+            )
+    await dispatch_once(factory, targets=TARGETS, max_attempts=3)
+    assert route.called
+    req = route.calls.last.request
+    # dedup_key 作为 X-Request-Id，下游重放时幂等键稳定
+    assert req.headers.get("X-Request-Id") == "fwd-cb-req-abc"
+
+
+@pytest.mark.asyncio
+async def test_none_dedup_key_no_dedup_check(factory) -> None:
+    """dedup_key=None 时每次 enqueue 产生新行（无幂等保证，向后兼容）。"""
+    async with factory() as s:
+        async with s.begin():
+            r1 = await enqueue_forward(
+                s,
+                tenant_id="OCBC",
+                target="lifecycle",
+                payload={"bizSeqNo": "B1"},
+                dedup_key=None,
+            )
+            r2 = await enqueue_forward(
+                s,
+                tenant_id="OCBC",
+                target="lifecycle",
+                payload={"bizSeqNo": "B1"},
+                dedup_key=None,
+            )
+    assert r1.id != r2.id
