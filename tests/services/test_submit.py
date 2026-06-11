@@ -193,3 +193,47 @@ async def test_submit_writes_audit_log(factory) -> None:
         assert row.action == "ORDER_SUBMITTED"
         assert row.actor == "svc:lifecycle"
         assert row.entity == f"bank_txn_order:{_req().biz_seq_no}"
+
+
+def _make_http_status_error(status_code: int) -> httpx.HTTPStatusError:
+    """构造带 response 的 HTTPStatusError（mock httpx 场景）。"""
+    response = httpx.Response(status_code=status_code)
+    return httpx.HTTPStatusError(
+        "upstream error", request=httpx.Request("POST", "http://x"), response=response
+    )
+
+
+@pytest.mark.asyncio
+async def test_http_5xx_sets_result_unknown_with_idempotency(factory) -> None:
+    """wedap 返回 5xx → RESULT_UNKNOWN，幂等 first_response 已落库。"""
+    wedap = AsyncMock()
+    wedap.submit_disbursement.side_effect = _make_http_status_error(503)
+    result = await submit_order(factory, wedap_call=wedap.submit_disbursement, req=_req())
+    assert result["txnStatus"] == "RESULT_UNKNOWN"
+    assert result["bizSeqNo"] == _req().biz_seq_no
+    async with factory() as s:
+        order = (await s.execute(select(BankTxnOrder))).scalar_one()
+        assert order.status == OrderStatus.RESULT_UNKNOWN
+    # 幂等重放返回相同 first_response（验证 record_response 已落库）
+    wedap2 = AsyncMock()
+    replay = await submit_order(factory, wedap_call=wedap2.submit_disbursement, req=_req())
+    assert replay["txnStatus"] == "RESULT_UNKNOWN"
+    assert wedap2.submit_disbursement.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_http_4xx_sets_failed_with_error_code_and_idempotency(factory) -> None:
+    """wedap 返回 4xx → FAILED + errorCode=HTTP_422，幂等 first_response 已落库。"""
+    wedap = AsyncMock()
+    wedap.submit_disbursement.side_effect = _make_http_status_error(422)
+    result = await submit_order(factory, wedap_call=wedap.submit_disbursement, req=_req())
+    assert result["txnStatus"] == "FAILED"
+    assert result["errorCode"] == "HTTP_422"
+    async with factory() as s:
+        order = (await s.execute(select(BankTxnOrder))).scalar_one()
+        assert order.status == OrderStatus.FAILED
+    # 幂等重放返回相同 first_response（验证 record_response 已落库）
+    wedap2 = AsyncMock()
+    replay = await submit_order(factory, wedap_call=wedap2.submit_disbursement, req=_req())
+    assert replay["txnStatus"] == "FAILED"
+    assert wedap2.submit_disbursement.await_count == 0

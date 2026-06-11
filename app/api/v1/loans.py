@@ -6,7 +6,12 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app.api.deps import assert_idempotency_key_matches, parse_amount, require_headers
+from app.api.deps import (
+    assert_idempotency_key_matches,
+    parse_amount,
+    require_headers,
+    validate_detail_consistency,
+)
 from app.core.envelope import ok
 from app.services.idempotency import IdempotencyConflict
 from app.services.submit import SubmitRequest, submit_order
@@ -100,6 +105,14 @@ async def p2p_disbursement(
 ) -> dict[str, Any]:
     assert_idempotency_key_matches(request, body.bizSeqNo)
     amount = parse_amount(body.disbursementInfo.txnAmount)
+    payload = body.model_dump(mode="json")
+    validate_detail_consistency(
+        payload,
+        total=amount,
+        currency=body.disbursementInfo.currencyCode,
+        detail_key="lenders",
+        amount_field="lendAmount",
+    )
     return await _submit(
         request,
         ids=ids,
@@ -110,7 +123,7 @@ async def p2p_disbursement(
         wedap_method="submit_disbursement",
         amount=amount,
         currency=body.disbursementInfo.currencyCode,
-        wedap_payload=body.model_dump(mode="json"),
+        wedap_payload=payload,
     )
 
 
@@ -122,6 +135,15 @@ async def p2p_repayment(
 ) -> dict[str, Any]:
     assert_idempotency_key_matches(request, body.bizSeqNo)
     amount = parse_amount(body.repaymentInfo.txnAmount)
+    payload = body.model_dump(mode="json")
+    # repayment 的 lenders 明细：body 无 lenders 键时跳过校验（契约 C 透传原则）
+    validate_detail_consistency(
+        payload,
+        total=amount,
+        currency=body.repaymentInfo.currencyCode,
+        detail_key="lenders",
+        amount_field="shareAmount",
+    )
     return await _submit(
         request,
         ids=ids,
@@ -132,5 +154,5 @@ async def p2p_repayment(
         wedap_method="submit_repayment",
         amount=amount,
         currency=body.repaymentInfo.currencyCode,
-        wedap_payload=body.model_dump(mode="json"),
+        wedap_payload=payload,
     )

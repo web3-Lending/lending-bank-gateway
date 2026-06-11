@@ -73,6 +73,13 @@ def create_app() -> FastAPI:
             "GW_S2S_SECRET 必须在非 local/test 环境配置（fail-fast，资金网关禁 fail-open）"
         )
 
+    # 解析 caller 白名单：空串 = 不启用
+    allowed_callers: set[str] | None = (
+        {c.strip() for c in settings.s2s_callers.split(",") if c.strip()}
+        if settings.s2s_callers.strip()
+        else None
+    )
+
     # 同时注册 Starlette 基类（路由 miss 404）和 FastAPI 子类（显式 raise HTTPException）
     app.add_exception_handler(StarletteHTTPException, _http_exception_handler)  # type: ignore[arg-type]
     app.add_exception_handler(HTTPException, _http_exception_handler)  # type: ignore[arg-type]
@@ -82,7 +89,10 @@ def create_app() -> FastAPI:
     # starlette add_middleware 是栈式：后 add 先执行
     # 执行顺序：IdentifierMiddleware → S2SMiddleware → handler
     app.add_middleware(
-        S2SMiddleware, secret=settings.s2s_secret, exempt_paths={"/healthz", "/readyz"}
+        S2SMiddleware,
+        secret=settings.s2s_secret,
+        exempt_paths={"/healthz", "/readyz"},
+        allowed_callers=allowed_callers,
     )
     app.add_middleware(IdentifierMiddleware)
     engine = build_engine(

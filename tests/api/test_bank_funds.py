@@ -118,9 +118,16 @@ def test_distribute_idempotent_replay_no_extra_call(client: TestClient) -> None:
 
 
 def test_collect_same_key_different_payload_409(client: TestClient) -> None:
-    """同 Idempotency-Key 不同 payload → 409 GW_409_IDEMPOTENCY。"""
+    """同 Idempotency-Key 不同 payload → 409 GW_409_IDEMPOTENCY。
+    mutated 保持明细一致性（userList sum == totalAmount）以确保明细校验先通过，
+    再由幂等层检测到 payload hash 变化触发 409。
+    """
     client.post("/api/v1/bank-funds/collect-from-users", json=COLLECT_BODY, headers=HEADERS)
-    mutated = {**COLLECT_BODY, "totalAmount": "999.0000"}
+    mutated = {
+        **COLLECT_BODY,
+        "totalAmount": "999.0000",
+        "userList": [{"userId": "U1", "amount": "999.0000"}],
+    }
     r = client.post("/api/v1/bank-funds/collect-from-users", json=mutated, headers=HEADERS)
     assert r.status_code == 409
     assert r.json()["error"]["code"] == "GW_409_IDEMPOTENCY"
@@ -139,3 +146,19 @@ def test_collect_no_idempotency_key_header_passes(client: TestClient) -> None:
     h = {k: v for k, v in HEADERS.items() if k != "Idempotency-Key"}
     r = client.post("/api/v1/bank-funds/collect-from-users", json=COLLECT_BODY, headers=h)
     assert r.status_code == 200
+
+
+def test_distribute_same_key_different_payload_409(client: TestClient) -> None:
+    """distribute 同 Idempotency-Key 不同 payload → 409 GW_409_IDEMPOTENCY。
+    覆盖 bank_funds._submit 内的 IdempotencyConflict 分支。
+    """
+    h = {**HEADERS, "Idempotency-Key": DISTRIBUTE_BODY["bizSeqNo"], "X-Request-Id": "req-dst2"}
+    client.post("/api/v1/bank-funds/distribute-to-users", json=DISTRIBUTE_BODY, headers=h)
+    mutated = {
+        **DISTRIBUTE_BODY,
+        "totalAmount": "999.0000",
+        "userList": [{"userId": "U2", "amount": "999.0000"}],
+    }
+    r = client.post("/api/v1/bank-funds/distribute-to-users", json=mutated, headers=h)
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "GW_409_IDEMPOTENCY"

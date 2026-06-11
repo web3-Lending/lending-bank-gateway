@@ -8,7 +8,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from app.api.deps import assert_idempotency_key_matches, parse_amount, require_headers
+from app.api.deps import (
+    assert_idempotency_key_matches,
+    parse_amount,
+    require_headers,
+    validate_detail_consistency,
+)
 from app.clients.wedap import WedapError
 from app.core.envelope import ok
 from app.models.txn import BankTxnOrder
@@ -86,6 +91,14 @@ async def collect_from_users(
 ) -> dict[str, Any]:
     assert_idempotency_key_matches(request, body.bizSeqNo)
     amount = parse_amount(body.totalAmount)
+    payload = body.model_dump(mode="json")
+    validate_detail_consistency(
+        payload,
+        total=amount,
+        currency=body.currencyCode,
+        detail_key="userList",
+        amount_field="amount",
+    )
     return await _submit(
         request,
         ids=ids,
@@ -96,7 +109,7 @@ async def collect_from_users(
         wedap_method="collect_from_users",
         amount=amount,
         currency=body.currencyCode,
-        wedap_payload=body.model_dump(mode="json"),
+        wedap_payload=payload,
     )
 
 
@@ -108,6 +121,14 @@ async def distribute_to_users(
 ) -> dict[str, Any]:
     assert_idempotency_key_matches(request, body.bizSeqNo)
     amount = parse_amount(body.totalAmount)
+    payload = body.model_dump(mode="json")
+    validate_detail_consistency(
+        payload,
+        total=amount,
+        currency=body.currencyCode,
+        detail_key="userList",
+        amount_field="amount",
+    )
     return await _submit(
         request,
         ids=ids,
@@ -118,7 +139,7 @@ async def distribute_to_users(
         wedap_method="distribute_to_users",
         amount=amount,
         currency=body.currencyCode,
-        wedap_payload=body.model_dump(mode="json"),
+        wedap_payload=payload,
     )
 
 

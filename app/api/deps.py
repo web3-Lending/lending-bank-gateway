@@ -1,4 +1,4 @@
-"""FastAPI 依赖：header 校验 + 金额解析。"""
+"""FastAPI 依赖：header 校验 + 金额解析 + 明细一致性前置校验。"""
 
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -58,3 +58,74 @@ def parse_amount(raw: Any) -> Decimal:
             },
         )
     return value
+
+
+def validate_detail_consistency(
+    body: dict[str, Any],
+    *,
+    total: Decimal,
+    currency: str,
+    detail_key: str,
+    amount_field: str,
+) -> None:
+    """明细列表一致性前置校验（契约 C 透传原则：gateway 只校验不剪裁）。
+
+    - detail_key 不在 body 中 → 跳过（非强制明细场景）
+    - 空列表 → 400 GW_400_VALIDATION "empty {detail_key}"
+    - 各项含 amount_field 时 sum(Decimal) != total → 400 "detail amount sum mismatch"
+    - 各项含 currencyCode 且 != 顶层 currency → 400 "detail currency mismatch"
+    - 明细项无 amount_field 字段 → 跳过 sum 校验（wedap 自动分配场景合法）
+    """
+    if detail_key not in body:
+        return
+
+    items: list[Any] = body[detail_key]
+    if not items:
+        raise HTTPException(
+            400,
+            detail={
+                "code": "GW_400_VALIDATION",
+                "message": f"empty {detail_key}",
+            },
+        )
+
+    # currency mismatch 校验（先于 sum，尽早拦截）
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_currency = item.get("currencyCode")
+        if item_currency is not None and item_currency != currency:
+            raise HTTPException(
+                400,
+                detail={
+                    "code": "GW_400_VALIDATION",
+                    "message": "detail currency mismatch",
+                },
+            )
+
+    # sum 校验：只有所有项都含 amount_field 时才校验（部分缺失=wedap 自动分配，跳过）
+    amounts: list[Decimal] = []
+    has_amount = True
+    for item in items:
+        if not isinstance(item, dict) or amount_field not in item:
+            has_amount = False
+            break
+        try:
+            amounts.append(Decimal(str(item[amount_field])))
+        except (InvalidOperation, ValueError, TypeError) as exc:
+            raise HTTPException(
+                400,
+                detail={
+                    "code": "GW_400_VALIDATION",
+                    "message": f"invalid {amount_field} in {detail_key} item",
+                },
+            ) from exc
+
+    if has_amount and sum(amounts) != total:
+        raise HTTPException(
+            400,
+            detail={
+                "code": "GW_400_VALIDATION",
+                "message": "detail amount sum mismatch",
+            },
+        )

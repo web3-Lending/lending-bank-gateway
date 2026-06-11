@@ -82,3 +82,51 @@ def test_missing_caller_logs_warning(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.WARNING, logger="app.core.s2s"):
         TestClient(_app("sec")).post("/api/v1/x")
     assert any("s2s auth failed" in r.message for r in caplog.records)
+
+
+# ── caller 白名单测试 ──────────────────────────────────────────────────────────
+
+
+def _app_with_callers(secret: str | None, callers: set[str] | None) -> FastAPI:
+    app = FastAPI()
+    app.add_middleware(
+        S2SMiddleware,
+        secret=secret,
+        exempt_paths={"/healthz"},
+        allowed_callers=callers,
+    )
+    app.add_middleware(IdentifierMiddleware)
+
+    @app.post("/api/v1/x")
+    async def x() -> dict:  # type: ignore[misc]
+        return {"ok": True}
+
+    return app
+
+
+def test_caller_whitelist_unknown_caller_rejected() -> None:
+    """白名单启用时，caller 不在白名单 → 401 GW_401_S2S。"""
+    r = TestClient(_app_with_callers("sec", {"lending-lifecycel"})).post(
+        "/api/v1/x",
+        headers={"X-Caller-Service": "unknown-svc", "X-S2S-Token": "sec"},
+    )
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "GW_401_S2S"
+
+
+def test_caller_whitelist_known_caller_passes() -> None:
+    """白名单启用时，caller 在白名单内 → 200。"""
+    r = TestClient(_app_with_callers("sec", {"lending-lifecycel", "lending-risk"})).post(
+        "/api/v1/x",
+        headers={"X-Caller-Service": "lending-lifecycel", "X-S2S-Token": "sec"},
+    )
+    assert r.status_code == 200
+
+
+def test_caller_whitelist_none_disables_check() -> None:
+    """白名单为 None（空=不启用）时，任意 caller 通过 token 校验即放行。"""
+    r = TestClient(_app_with_callers("sec", None)).post(
+        "/api/v1/x",
+        headers={"X-Caller-Service": "any-service", "X-S2S-Token": "sec"},
+    )
+    assert r.status_code == 200

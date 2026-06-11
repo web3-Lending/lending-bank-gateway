@@ -97,7 +97,9 @@ async def submit_order(
         # 崩溃重放/并发重放：事务1 已 commit 但 record_response 未写，禁止重复执行业务
         return {"txnStatus": "PROCESSING", "bizSeqNo": req.biz_seq_no, "inFlight": True}
 
-    # 外呼（事务外）：成功→SUBMITTED；超时/传输错误→RESULT_UNKNOWN；WedapError→FAILED
+    # 外呼（事务外）：成功→SUBMITTED；超时/传输错误→RESULT_UNKNOWN；
+    # HTTPStatusError 5xx→RESULT_UNKNOWN（上游不可用结果未知）；
+    # HTTPStatusError 4xx→FAILED（请求被拒未执行）；WedapError→FAILED
     try:
         data = await wedap_call(
             tenant_id=req.tenant_id,
@@ -112,6 +114,20 @@ async def submit_order(
     except (httpx.TimeoutException, httpx.TransportError):
         new_status = OrderStatus.RESULT_UNKNOWN
         response = {"txnStatus": "RESULT_UNKNOWN", "bizSeqNo": req.biz_seq_no}
+    except httpx.HTTPStatusError as exc:
+        status_code = exc.response.status_code
+        if status_code >= 500:
+            # 5xx：上游不可用，结果未知，保持可收敛幂等状态
+            new_status = OrderStatus.RESULT_UNKNOWN
+            response = {"txnStatus": "RESULT_UNKNOWN", "bizSeqNo": req.biz_seq_no}
+        else:
+            # 4xx：请求被上游拒绝，未执行，视为失败
+            new_status = OrderStatus.FAILED
+            response = {
+                "txnStatus": "FAILED",
+                "bizSeqNo": req.biz_seq_no,
+                "errorCode": f"HTTP_{status_code}",
+            }
     except WedapError as exc:
         new_status = OrderStatus.FAILED
         response = {"txnStatus": "FAILED", "bizSeqNo": req.biz_seq_no, "errorCode": exc.code}
