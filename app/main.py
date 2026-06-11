@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.v1.bank_funds import router as bank_funds_router
+from app.api.v1.composite import router as composite_router
 from app.api.v1.health import router as health_router
 from app.api.v1.loans import router as loans_router
 from app.core.config import get_settings
@@ -93,6 +94,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(loans_router)
     app.include_router(bank_funds_router)
+    app.include_router(composite_router)
     return app
 
 
