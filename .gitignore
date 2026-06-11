@@ -3,6 +3,7 @@
 __pycache__/
 *.pyc
 .coverage
+*.py,cover
 .gstack/
 .context/
 .env
