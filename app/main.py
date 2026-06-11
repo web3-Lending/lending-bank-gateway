@@ -13,6 +13,7 @@ from app.api.v1.bank_funds import router as bank_funds_router
 from app.api.v1.composite import router as composite_router
 from app.api.v1.health import router as health_router
 from app.api.v1.loans import router as loans_router
+from app.api.v1.recon_notify import router as recon_notify_router
 from app.clients.wedap import WedapClient
 from app.core.config import get_settings
 from app.core.context import IdentifierMiddleware, current_ids
@@ -143,6 +144,7 @@ def create_app() -> FastAPI:
     app.include_router(composite_router)
     app.include_router(callbacks.router)
     app.include_router(admin_ops_router)
+    app.include_router(recon_notify_router)
     return app
 
 

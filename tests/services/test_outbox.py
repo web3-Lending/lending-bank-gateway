@@ -137,11 +137,13 @@ async def test_replay_non_dead_returns_false(factory) -> None:
 @pytest.mark.asyncio
 @respx.mock
 async def test_dispatch_sends_correct_headers(factory) -> None:
-    """转发请求必须携带 X-Caller-Service、X-Tenant-Id 头（S2S 规范）。"""
+    """转发请求必须携带 X-Caller-Service、X-Tenant-Id、X-Trace-Id、X-Request-Id 头（S2S 规范）。"""
     route = respx.post("http://lifecycle/cb").mock(return_value=httpx.Response(200))
-    await _enqueue(factory)
+    oid = await _enqueue(factory)
     await dispatch_once(factory, targets=TARGETS, max_attempts=3)
     assert route.called
     req = route.calls.last.request
     assert req.headers.get("X-Caller-Service") == "lending-bank-gateway"
     assert req.headers.get("X-Tenant-Id") == "OCBC"
+    assert req.headers.get("X-Trace-Id") == f"outbox-{oid}"
+    assert req.headers.get("X-Request-Id") == f"outbox-{oid}"
