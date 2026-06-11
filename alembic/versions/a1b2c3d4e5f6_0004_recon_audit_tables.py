@@ -30,6 +30,7 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 # 新表中包含 TimestampMixin（updated_at）的表名列表
+# audit_log append-only 不参与 ON UPDATE
 _ON_UPDATE_TABLES = (
     "recon_result_task",
     "recon_result_diff",
@@ -37,7 +38,6 @@ _ON_UPDATE_TABLES = (
     "recon_result_source_bank",
     "query_audit",
     "balance_snapshot",
-    "audit_log",
 )
 
 _MYSQL_UPGRADE_TMPL = (
@@ -296,6 +296,7 @@ def upgrade() -> None:
             autoincrement=True,
             nullable=False,
         ),
+        sa.Column("tenant_id", sa.String(length=36), nullable=False),
         sa.Column("actor", sa.String(length=64), nullable=False),
         sa.Column("action", sa.String(length=48), nullable=False),
         sa.Column("entity", sa.String(length=64), nullable=False),
@@ -316,6 +317,7 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id"),
     )
+    op.create_index("ix_audit_log_tenant_id", "audit_log", ["tenant_id"], unique=False)
 
     # ── callback_outbox 索引升级（T7 residual）───────────────────────────────
     # 删除旧单列索引，创建复合索引 (status, next_retry_at)
@@ -355,6 +357,7 @@ def downgrade() -> None:
     op.create_index("ix_callback_outbox_status", "callback_outbox", ["status"], unique=False)
 
     # ── 删除新增 7 张表（逆序）──────────────────────────────────────────────
+    op.drop_index("ix_audit_log_tenant_id", table_name="audit_log")
     op.drop_table("audit_log")
     op.drop_index("ix_balance_snapshot_account_id", table_name="balance_snapshot")
     op.drop_table("balance_snapshot")

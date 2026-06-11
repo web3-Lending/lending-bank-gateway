@@ -34,8 +34,9 @@ async def session():
 
 @pytest.mark.asyncio
 async def test_audit_log_fields_round_trip(session) -> None:
-    """AuditLog 所有字段写入后可正确读回。"""
+    """AuditLog 所有字段写入后可正确读回（含 tenant_id）。"""
     log = AuditLog(
+        tenant_id="tenant-uuid-0001",
         actor="admin@wbt.com",
         action="APPROVE_LOAN",
         entity="loan:1234",
@@ -47,6 +48,7 @@ async def test_audit_log_fields_round_trip(session) -> None:
     await session.commit()
     await session.refresh(log)
 
+    assert log.tenant_id == "tenant-uuid-0001"
     assert log.actor == "admin@wbt.com"
     assert log.action == "APPROVE_LOAN"
     assert log.entity == "loan:1234"
@@ -59,6 +61,7 @@ async def test_audit_log_fields_round_trip(session) -> None:
 async def test_audit_log_payload_nullable(session) -> None:
     """AuditLog payload 默认为 None（nullable）。"""
     log = AuditLog(
+        tenant_id="tenant-uuid-0001",
         actor="system",
         action="HEARTBEAT",
         entity="system:health",
@@ -71,6 +74,23 @@ async def test_audit_log_payload_nullable(session) -> None:
     await session.refresh(log)
 
     assert log.payload is None
+
+
+@pytest.mark.asyncio
+async def test_audit_log_tenant_id_required(session) -> None:
+    """AuditLog tenant_id 为 NOT NULL——不传时 commit 抛 IntegrityError。"""
+    from sqlalchemy.exc import IntegrityError
+
+    log = AuditLog(
+        actor="system",
+        action="HEARTBEAT",
+        entity="system:health",
+        prev_hash="0" * 64,
+        row_hash="1" * 64,
+    )
+    session.add(log)
+    with pytest.raises(IntegrityError):
+        await session.commit()
 
 
 # ─────────────────────── BalanceSnapshot ─────────────────────────────────────

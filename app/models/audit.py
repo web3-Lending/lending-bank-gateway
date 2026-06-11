@@ -10,14 +10,14 @@ from typing import Any
 from sqlalchemy import JSON, BigInteger, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, TimestampMixin
+from app.models.base import Base, TenantMixin, TimestampMixin
 
 # SQLite 的 autoincrement 只支持 INTEGER 类型；MySQL 生产环境需要 BIGINT。
 # with_variant 在 SQLite 测试中降级为 Integer，在 MySQL 中保持 BigInteger。
 _BIG_PK = BigInteger().with_variant(Integer, "sqlite")
 
 
-class AuditLog(Base, TimestampMixin):
+class AuditLog(Base, TenantMixin, TimestampMixin):
     """审计日志表（append-only：application 只 INSERT；
     MySQL permission/trigger 禁止 UPDATE/DELETE，待部署时实施）。
     """
