@@ -33,7 +33,7 @@ BODY = {
 def client() -> TestClient:
     app = create_app()
     # 建表（sqlite :memory: engine 已在 create_app 内创建，需在使用前 create_all）
-    asyncio.get_event_loop().run_until_complete(_create_tables(app.state.engine))
+    asyncio.run(_create_tables(app.state.engine))
     wedap = AsyncMock()
     wedap.submit_disbursement.return_value = {"txnStatus": "PROCESSING"}
     wedap.submit_repayment.return_value = {"txnStatus": "PROCESSING"}

@@ -37,7 +37,7 @@ async def _create_tables(engine) -> None:  # type: ignore[no-untyped-def]
 @pytest.fixture()
 def client() -> TestClient:
     app = create_app()
-    asyncio.get_event_loop().run_until_complete(_create_tables(app.state.engine))
+    asyncio.run(_create_tables(app.state.engine))
     wedap = AsyncMock()
     wedap.collect_from_users.return_value = {"txnStatus": "PROCESSING"}
     wedap.distribute_to_users.return_value = {"txnStatus": "PROCESSING"}
