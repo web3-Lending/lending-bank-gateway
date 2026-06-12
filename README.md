@@ -13,8 +13,10 @@ lending 体系与 wedap 资金系统之间的**统一资金网关**服务（ADR-
 
 | 环境 | 地址 |
 |------|------|
-| 本地开发 | `http://localhost:8050` |
+| 本地开发 | `http://localhost:8022` |
 | 健康检查 | `GET /healthz` |
+
+> 端口规划（2026-06-12 拍板）：现阶段固定 **8022**；待调用方迁移完成、baffle（8021）退役后，gateway 接管 **8021** 作为最终端口（届时调用方无需再改地址）。
 
 ## 本地开发
 
@@ -62,8 +64,8 @@ docker run --rm --env-file deploy/env.local \
 docker compose -f deploy/docker-compose.yml up -d
 
 # 确认健康（readyz 含 DB 探测）
-curl http://localhost:8050/healthz
-curl http://localhost:8050/readyz
+curl http://localhost:8022/healthz
+curl http://localhost:8022/readyz
 ```
 
 ### 部署前置（2026-06-12 本地验收实测踩坑）
