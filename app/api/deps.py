@@ -70,13 +70,13 @@ def validate_detail_consistency(
 ) -> None:
     """明细列表一致性前置校验（契约 C 透传原则：gateway 只校验不剪裁）。
 
-    - detail_key 不在 body 中 → 跳过（非强制明细场景）
+    - detail_key 不在 body 中，或值为 None → 跳过（非强制明细场景；None 视同字段缺省）
     - 空列表 → 400 GW_400_VALIDATION "empty {detail_key}"
     - 各项含 amount_field 时 sum(Decimal) != total → 400 "detail amount sum mismatch"
     - 各项含 currencyCode 且 != 顶层 currency → 400 "detail currency mismatch"
     - 明细项无 amount_field 字段 → 跳过 sum 校验（wedap 自动分配场景合法）
     """
-    if detail_key not in body:
+    if detail_key not in body or body[detail_key] is None:
         return
 
     items: list[Any] = body[detail_key]
