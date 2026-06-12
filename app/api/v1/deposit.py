@@ -51,6 +51,14 @@ async def _audited_passthrough(
             502,
             detail={"code": "GW_502_UPSTREAM", "message": "wedap unreachable"},
         ) from exc
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            502,
+            detail={
+                "code": "GW_502_UPSTREAM",
+                "message": f"wedap http {exc.response.status_code}",
+            },
+        ) from exc
     except WedapError as exc:
         raise HTTPException(
             502,

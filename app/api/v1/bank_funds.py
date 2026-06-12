@@ -173,6 +173,8 @@ async def query_status(
         )
     except (httpx.TimeoutException, httpx.TransportError):
         wedap_data = {"unavailable": True, "reason": "timeout"}
+    except httpx.HTTPStatusError:
+        wedap_data = {"unavailable": True, "reason": "http_error"}
     except WedapError:
         wedap_data = {"unavailable": True, "reason": "wedap_error"}
 
