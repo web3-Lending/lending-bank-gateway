@@ -101,8 +101,9 @@ class WedapClient:
         request_id: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
+        """归集资金。南向路径以 wedap-adapter 实测为准（2026-06-12 verify）。"""
         return await self._post(
-            "/api/v1/bank-funds/collect-from-users",
+            "/api/v1/bank-funds/user-collections",
             tenant_id=tenant_id,
             request_id=request_id,
             payload=payload,
@@ -115,12 +116,20 @@ class WedapClient:
         request_id: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
+        """分发资金。南向路径以 wedap-adapter 实测为准（2026-06-12 verify）。"""
         return await self._post(
-            "/api/v1/bank-funds/distribute-to-users",
+            "/api/v1/bank-funds/user-distributions",
             tenant_id=tenant_id,
             request_id=request_id,
             payload=payload,
         )
+
+    # biz_type → wedap 状态查询路径映射（wedap 无统一 /bank-funds/status 接口）
+    _STATUS_PATH_TMPL: dict[str, str] = {
+        "DSB": "/api/v1/loans/p2p-disbursements/{biz}/status",
+        "RPY": "/api/v1/loans/p2p-repayments/{biz}/status",
+        "DST": "/api/v1/bank-funds/user-distributions/{biz}",
+    }
 
     async def query_funds_status(
         self,
@@ -128,12 +137,24 @@ class WedapClient:
         tenant_id: str,
         request_id: str,
         biz_seq_no: str,
+        biz_type: str,
     ) -> dict[str, Any]:
+        """按业务类型路由到对应的 wedap 状态查询接口。
+
+        wedap 无统一 /bank-funds/status；路径因 biz_type 而异（dev 实调验证，2026-06-12）：
+          - DSB → GET /api/v1/loans/p2p-disbursements/{bizSeqNo}/status
+          - RPY → GET /api/v1/loans/p2p-repayments/{bizSeqNo}/status
+          - DST → GET /api/v1/bank-funds/user-distributions/{bizSeqNo}
+        不支持的 biz_type（如 CLT）raise WedapError("UNSUPPORTED", ...)，调用方走降级路径。
+        """
+        tmpl = self._STATUS_PATH_TMPL.get(biz_type)
+        if tmpl is None:
+            raise WedapError("UNSUPPORTED", f"no status api for {biz_type}")
+        path = tmpl.format(biz=biz_seq_no)
         return await self._get(
-            "/api/v1/bank-funds/status",
+            path,
             tenant_id=tenant_id,
             request_id=request_id,
-            params={"bizSeqNo": biz_seq_no},
         )
 
     async def get_composite_steps(

@@ -155,7 +155,7 @@ async def test_submit_repayment_missing_data_returns_empty() -> None:
 
 @respx.mock
 async def test_collect_from_users_happy_path() -> None:
-    route = respx.post(f"{BASE}/api/v1/bank-funds/collect-from-users").mock(
+    route = respx.post(f"{BASE}/api/v1/bank-funds/user-collections").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -176,7 +176,7 @@ async def test_collect_from_users_happy_path() -> None:
 
 @respx.mock
 async def test_collect_from_users_non_200_code_raises() -> None:
-    respx.post(f"{BASE}/api/v1/bank-funds/collect-from-users").mock(
+    respx.post(f"{BASE}/api/v1/bank-funds/user-collections").mock(
         return_value=httpx.Response(200, json={"code": "500", "msg": "SYSTEM_ERROR"})
     )
     with pytest.raises(WedapError):
@@ -185,7 +185,7 @@ async def test_collect_from_users_non_200_code_raises() -> None:
 
 @respx.mock
 async def test_collect_from_users_missing_data_returns_empty() -> None:
-    respx.post(f"{BASE}/api/v1/bank-funds/collect-from-users").mock(
+    respx.post(f"{BASE}/api/v1/bank-funds/user-collections").mock(
         return_value=httpx.Response(200, json={"code": "200", "msg": "SUCCESS"})
     )
     resp = await _client().collect_from_users(tenant_id="OCBC", request_id="r", payload={})
@@ -199,7 +199,7 @@ async def test_collect_from_users_missing_data_returns_empty() -> None:
 
 @respx.mock
 async def test_distribute_to_users_happy_path() -> None:
-    route = respx.post(f"{BASE}/api/v1/bank-funds/distribute-to-users").mock(
+    route = respx.post(f"{BASE}/api/v1/bank-funds/user-distributions").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -220,7 +220,7 @@ async def test_distribute_to_users_happy_path() -> None:
 
 @respx.mock
 async def test_distribute_to_users_non_200_code_raises() -> None:
-    respx.post(f"{BASE}/api/v1/bank-funds/distribute-to-users").mock(
+    respx.post(f"{BASE}/api/v1/bank-funds/user-distributions").mock(
         return_value=httpx.Response(200, json={"code": "404", "msg": "NOT_FOUND"})
     )
     with pytest.raises(WedapError):
@@ -229,7 +229,7 @@ async def test_distribute_to_users_non_200_code_raises() -> None:
 
 @respx.mock
 async def test_distribute_to_users_missing_data_returns_empty() -> None:
-    respx.post(f"{BASE}/api/v1/bank-funds/distribute-to-users").mock(
+    respx.post(f"{BASE}/api/v1/bank-funds/user-distributions").mock(
         return_value=httpx.Response(200, json={"code": "200", "msg": "SUCCESS"})
     )
     resp = await _client().distribute_to_users(tenant_id="OCBC", request_id="r", payload={})
@@ -237,47 +237,97 @@ async def test_distribute_to_users_missing_data_returns_empty() -> None:
 
 
 # ---------------------------------------------------------------------------
-# query_funds_status
+# query_funds_status（biz_type 感知，wedap 无统一状态接口）
 # ---------------------------------------------------------------------------
 
 
 @respx.mock
-async def test_query_funds_status_happy_path() -> None:
-    route = respx.get(f"{BASE}/api/v1/bank-funds/status").mock(
+async def test_query_funds_status_dsb_routes_to_disbursement_status() -> None:
+    """DSB → GET /api/v1/loans/p2p-disbursements/{biz}/status。"""
+    biz = "DSB-20260612-0001"
+    route = respx.get(f"{BASE}/api/v1/loans/p2p-disbursements/{biz}/status").mock(
         return_value=httpx.Response(
             200,
             json={
                 "code": "200",
                 "msg": "SUCCESS",
-                "data": {"status": "SUCCESS", "bizSeqNo": "COL-001"},
+                "data": {"txnStatus": "SUCCESS", "bizSeqNo": biz},
             },
         )
     )
     resp = await _client().query_funds_status(
-        tenant_id="OCBC", request_id="qry-001", biz_seq_no="COL-001"
+        tenant_id="OCBC", request_id="qry-dsb-001", biz_seq_no=biz, biz_type="DSB"
     )
-    assert resp["status"] == "SUCCESS"
+    assert resp["txnStatus"] == "SUCCESS"
     req = route.calls.last.request
     assert req.headers["X-Tenant-Id"] == "OCBC"
-    assert req.headers["X-Request-Id"] == "qry-001"
-    assert "bizSeqNo=COL-001" in str(req.url)
+    assert req.headers["X-Request-Id"] == "qry-dsb-001"
 
 
 @respx.mock
-async def test_query_funds_status_non_200_code_raises() -> None:
-    respx.get(f"{BASE}/api/v1/bank-funds/status").mock(
-        return_value=httpx.Response(200, json={"code": "500", "msg": "SYSTEM_ERROR"})
+async def test_query_funds_status_rpy_routes_to_repayment_status() -> None:
+    """RPY → GET /api/v1/loans/p2p-repayments/{biz}/status。"""
+    biz = "RPY-20260612-0001"
+    route = respx.get(f"{BASE}/api/v1/loans/p2p-repayments/{biz}/status").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "code": "200",
+                "msg": "SUCCESS",
+                "data": {"txnStatus": "PROCESSING", "bizSeqNo": biz},
+            },
+        )
     )
-    with pytest.raises(WedapError):
-        await _client().query_funds_status(tenant_id="OCBC", request_id="r", biz_seq_no="X")
+    resp = await _client().query_funds_status(
+        tenant_id="OCBC", request_id="qry-rpy-001", biz_seq_no=biz, biz_type="RPY"
+    )
+    assert resp["txnStatus"] == "PROCESSING"
+    req = route.calls.last.request
+    assert req.headers["X-Tenant-Id"] == "OCBC"
 
 
 @respx.mock
-async def test_query_funds_status_missing_data_returns_empty() -> None:
-    respx.get(f"{BASE}/api/v1/bank-funds/status").mock(
+async def test_query_funds_status_dst_routes_to_user_distributions() -> None:
+    """DST → GET /api/v1/bank-funds/user-distributions/{biz}。"""
+    biz = "DST-20260612-0001"
+    route = respx.get(f"{BASE}/api/v1/bank-funds/user-distributions/{biz}").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "code": "200",
+                "msg": "SUCCESS",
+                "data": {"txnStatus": "SUCCESS", "bizSeqNo": biz},
+            },
+        )
+    )
+    resp = await _client().query_funds_status(
+        tenant_id="OCBC", request_id="qry-dst-001", biz_seq_no=biz, biz_type="DST"
+    )
+    assert resp["txnStatus"] == "SUCCESS"
+    req = route.calls.last.request
+    assert req.headers["X-Tenant-Id"] == "OCBC"
+
+
+async def test_query_funds_status_unsupported_biz_type_raises() -> None:
+    """CLT 等无状态接口的类型 → WedapError(UNSUPPORTED)。"""
+    with pytest.raises(WedapError) as exc_info:
+        await _client().query_funds_status(
+            tenant_id="OCBC", request_id="r", biz_seq_no="CLT-001", biz_type="CLT"
+        )
+    assert exc_info.value.code == "UNSUPPORTED"
+    assert "CLT" in str(exc_info.value)
+
+
+@respx.mock
+async def test_query_funds_status_dsb_missing_data_returns_empty() -> None:
+    """wedap 返回 code=200 但 data 为空 → 返回 {}。"""
+    biz = "DSB-20260612-0002"
+    respx.get(f"{BASE}/api/v1/loans/p2p-disbursements/{biz}/status").mock(
         return_value=httpx.Response(200, json={"code": "200", "msg": "SUCCESS"})
     )
-    resp = await _client().query_funds_status(tenant_id="OCBC", request_id="r", biz_seq_no="X")
+    resp = await _client().query_funds_status(
+        tenant_id="OCBC", request_id="r", biz_seq_no=biz, biz_type="DSB"
+    )
     assert resp == {}
 
 
