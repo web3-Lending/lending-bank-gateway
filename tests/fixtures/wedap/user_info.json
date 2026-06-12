@@ -1,0 +1,12 @@
+{
+  "code": "200", "msg": "SUCCESS",
+  "data": {
+    "userId": "U-0001",
+    "custId": "CUST-20260611-0001",
+    "name": "Test User",
+    "email": "test@example.com",
+    "kycStatus": "VERIFIED",
+    "tenantId": "OCBC"
+  },
+  "timestamp": 1781164800000
+}

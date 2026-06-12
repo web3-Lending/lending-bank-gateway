@@ -1,0 +1,40 @@
+import uuid
+from contextvars import ContextVar
+from dataclasses import dataclass
+
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.requests import Request
+from starlette.responses import Response
+
+
+@dataclass(frozen=True)
+class RequestIds:
+    trace_id: str
+    request_id: str | None
+    tenant_id: str | None
+    biz_seq_no: str | None
+
+
+_DEFAULT_IDS = RequestIds("trc-none", None, None, None)
+_ids: ContextVar[RequestIds] = ContextVar("ids", default=_DEFAULT_IDS)
+
+
+def current_ids() -> RequestIds:
+    return _ids.get()
+
+
+class IdentifierMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        ids = RequestIds(
+            trace_id=request.headers.get("X-Trace-Id") or f"trc-{uuid.uuid4().hex}",
+            request_id=request.headers.get("X-Request-Id"),
+            tenant_id=request.headers.get("X-Tenant-Id"),
+            biz_seq_no=request.headers.get("X-Biz-Seq-No"),
+        )
+        token = _ids.set(ids)
+        try:
+            response = await call_next(request)
+        finally:
+            _ids.reset(token)
+        response.headers["X-Trace-Id"] = ids.trace_id
+        return response

@@ -1,0 +1,10 @@
+{
+  "code": "200", "msg": "SUCCESS",
+  "data": {
+    "txnStatus": "PROCESSING", "txnStatusDesc": "ACCEPTED",
+    "sysTime": "1781164800000",
+    "bizSeqNo": "RPY-20260611-0009876543210",
+    "requestId": "req-rpy-0001"
+  },
+  "timestamp": 1781164800000
+}

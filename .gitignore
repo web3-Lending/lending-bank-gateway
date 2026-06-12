@@ -3,5 +3,9 @@
 __pycache__/
 *.pyc
 .coverage
+*.py,cover
 .gstack/
 .context/
+.env
+*.egg-info/
+.claude-session.lock

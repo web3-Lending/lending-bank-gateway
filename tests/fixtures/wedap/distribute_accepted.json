@@ -1,0 +1,10 @@
+{
+  "code": "200", "msg": "SUCCESS",
+  "data": {
+    "txnStatus": "PROCESSING", "txnStatusDesc": "ACCEPTED",
+    "sysTime": "1781164800000",
+    "bizSeqNo": "DIS-20260611-0002222222222",
+    "requestId": "req-dis-0001"
+  },
+  "timestamp": 1781164800000
+}
