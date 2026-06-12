@@ -144,3 +144,69 @@ def test_disbursement_no_idempotency_key_header_passes(client: TestClient) -> No
     h = {k: v for k, v in HEADERS.items() if k != "Idempotency-Key"}
     r = client.post("/api/v1/loans/p2p-disbursements", json=BODY, headers=h)
     assert r.status_code == 200
+
+
+# ── 缺省 lenders（wedap 真形态 body）修复验证 ─────────────────────────────────────
+
+
+def test_disbursement_without_lenders_passes_validation(client: TestClient) -> None:
+    """wedap 真契约：p2p-disbursements 不含 lenders 字段 → 校验跳过，200 受理。
+    修复前：default_factory=list 物化 [] → validate_detail_consistency 误判 empty → 400。
+    """
+    body = {
+        "bizSeqNo": "DSB-20260611-0002000000001",
+        "channelId": "LEN",
+        "transType": "DISBURSEMENT",
+        "disbursementInfo": {
+            "txnAmount": "100.0000",
+            "currencyCode": "USD",
+            "userId": "U1",
+            "userName": "u",
+        },
+        # 不传 lenders
+    }
+    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-no-lend"}
+    r = client.post("/api/v1/loans/p2p-disbursements", json=body, headers=h)
+    assert r.status_code == 200, r.json()
+
+
+def test_disbursement_without_lenders_payload_excludes_key(client: TestClient) -> None:
+    """缺 lenders 时，透传给 wedap 的 payload 不含 lenders 键（契约 C：不注入伪字段）。"""
+    body = {
+        "bizSeqNo": "DSB-20260611-0002000000002",
+        "channelId": "LEN",
+        "transType": "DISBURSEMENT",
+        "disbursementInfo": {
+            "txnAmount": "100.0000",
+            "currencyCode": "USD",
+            "userId": "U1",
+            "userName": "u",
+        },
+    }
+    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-lend-excl"}
+    client.post("/api/v1/loans/p2p-disbursements", json=body, headers=h)
+    wedap_mock = client.app.state.wedap  # type: ignore[union-attr]
+    submit_req = wedap_mock.submit_disbursement.call_args
+    all_args = str(submit_req)
+    assert "lenders" not in all_args, f"wedap payload 不应含 lenders，实际参数：{all_args}"
+
+
+def test_disbursement_explicit_empty_lenders_400(client: TestClient) -> None:
+    """显式传入 lenders=[] → 仍触发 400（空列表不合法）。"""
+    body = {
+        "bizSeqNo": "DSB-20260611-0002000000003",
+        "channelId": "LEN",
+        "transType": "DISBURSEMENT",
+        "disbursementInfo": {
+            "txnAmount": "100.0000",
+            "currencyCode": "USD",
+            "userId": "U1",
+            "userName": "u",
+        },
+        "lenders": [],
+    }
+    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-empty-lend"}
+    r = client.post("/api/v1/loans/p2p-disbursements", json=body, headers=h)
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "GW_400_VALIDATION"
+    assert "empty lenders" in r.json()["error"]["message"]

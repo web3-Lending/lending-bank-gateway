@@ -4,7 +4,7 @@ from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from app.api.deps import (
     assert_idempotency_key_matches,
@@ -39,7 +39,8 @@ class P2PDisbursementRequest(BaseModel):
     channelId: str = ""
     transType: str = ""
     disbursementInfo: DisbursementInfo
-    lenders: list[dict[str, Any]] = Field(default_factory=list)
+    lenders: list[dict[str, Any]] | None = None
+    """显式 null 视同缺省，契约 C 下 wedap 可选字段缺省=null 语义等价。"""
 
 
 class P2PRepaymentRequest(BaseModel):
@@ -105,7 +106,7 @@ async def p2p_disbursement(
 ) -> dict[str, Any]:
     assert_idempotency_key_matches(request, body.bizSeqNo)
     amount = parse_amount(body.disbursementInfo.txnAmount)
-    payload = body.model_dump(mode="json")
+    payload = body.model_dump(mode="json", exclude_none=True)
     validate_detail_consistency(
         payload,
         total=amount,
@@ -135,7 +136,7 @@ async def p2p_repayment(
 ) -> dict[str, Any]:
     assert_idempotency_key_matches(request, body.bizSeqNo)
     amount = parse_amount(body.repaymentInfo.txnAmount)
-    payload = body.model_dump(mode="json")
+    payload = body.model_dump(mode="json", exclude_none=True)
     # repayment 的 lenders 明细：body 无 lenders 键时跳过校验（契约 C 透传原则）
     validate_detail_consistency(
         payload,

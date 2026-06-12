@@ -5,7 +5,7 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from sqlalchemy import select
 
 from app.api.deps import (
@@ -30,7 +30,8 @@ class BankFundsRequest(BaseModel):
     bizSeqNo: str
     totalAmount: str
     currencyCode: str
-    userList: list[dict[str, Any]] = Field(default_factory=list)
+    userList: list[dict[str, Any]] | None = None
+    """显式 null 视同缺省，契约 C 下 wedap 可选字段缺省=null 语义等价。"""
 
 
 # ── 内部提交 helper ────────────────────────────────────────────────────────────
@@ -91,7 +92,7 @@ async def collect_from_users(
 ) -> dict[str, Any]:
     assert_idempotency_key_matches(request, body.bizSeqNo)
     amount = parse_amount(body.totalAmount)
-    payload = body.model_dump(mode="json")
+    payload = body.model_dump(mode="json", exclude_none=True)
     validate_detail_consistency(
         payload,
         total=amount,
@@ -121,7 +122,7 @@ async def distribute_to_users(
 ) -> dict[str, Any]:
     assert_idempotency_key_matches(request, body.bizSeqNo)
     amount = parse_amount(body.totalAmount)
-    payload = body.model_dump(mode="json")
+    payload = body.model_dump(mode="json", exclude_none=True)
     validate_detail_consistency(
         payload,
         total=amount,

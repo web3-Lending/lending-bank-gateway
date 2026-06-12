@@ -162,3 +162,65 @@ def test_distribute_same_key_different_payload_409(client: TestClient) -> None:
     r = client.post("/api/v1/bank-funds/distribute-to-users", json=mutated, headers=h)
     assert r.status_code == 409
     assert r.json()["error"]["code"] == "GW_409_IDEMPOTENCY"
+
+
+# ── 缺省 userList（wedap 真形态 body）修复验证 ───────────────────────────────────
+
+
+def test_collect_without_userlist_passes_validation(client: TestClient) -> None:
+    """wedap 真契约：user-collections 不含 userList 字段 → 校验跳过，200 受理。
+    修复前：default_factory=list 物化 [] → validate_detail_consistency 误判 empty → 400。
+    """
+    body = {
+        "bizSeqNo": "CLT-20260611-0002000000001",
+        "totalAmount": "500.0000",
+        "currencyCode": "USD",
+        # 不传 userList
+    }
+    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-no-ul"}
+    r = client.post("/api/v1/bank-funds/collect-from-users", json=body, headers=h)
+    assert r.status_code == 200, r.json()
+
+
+def test_collect_without_userlist_payload_excludes_key(client: TestClient) -> None:
+    """缺 userList 时，透传给 wedap 的 payload 不含 userList 键（契约 C：不注入伪字段）。"""
+    body = {
+        "bizSeqNo": "CLT-20260611-0002000000002",
+        "totalAmount": "300.0000",
+        "currencyCode": "USD",
+    }
+    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-excl"}
+    client.post("/api/v1/bank-funds/collect-from-users", json=body, headers=h)
+    wedap_mock = client.app.state.wedap  # type: ignore[union-attr]
+    # 取 submit_order 实际使用的 payload（通过 SubmitRequest.wedap_payload）
+    call_args_str = str(wedap_mock.collect_from_users.call_args)
+    assert "userList" not in call_args_str, (
+        f"wedap payload 不应含 userList，实际参数：{call_args_str}"
+    )
+
+
+def test_collect_explicit_empty_userlist_400(client: TestClient) -> None:
+    """显式传入 userList=[] → 仍触发 400（空列表不合法）。"""
+    body = {
+        "bizSeqNo": "CLT-20260611-0002000000003",
+        "totalAmount": "500.0000",
+        "currencyCode": "USD",
+        "userList": [],
+    }
+    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-empty-ul"}
+    r = client.post("/api/v1/bank-funds/collect-from-users", json=body, headers=h)
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "GW_400_VALIDATION"
+    assert "empty userList" in r.json()["error"]["message"]
+
+
+def test_distribute_without_userlist_passes_validation(client: TestClient) -> None:
+    """distribute-to-users 缺 userList → 同样跳过校验，200 受理。"""
+    body = {
+        "bizSeqNo": "DST-20260611-0002000000004",
+        "totalAmount": "200.0000",
+        "currencyCode": "USD",
+    }
+    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-dst-no-ul"}
+    r = client.post("/api/v1/bank-funds/distribute-to-users", json=body, headers=h)
+    assert r.status_code == 200, r.json()

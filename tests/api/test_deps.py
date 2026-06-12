@@ -156,3 +156,28 @@ def test_invalid_amount_field_value_raises_400() -> None:
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail["code"] == "GW_400_VALIDATION"
     assert "invalid lendAmount" in exc_info.value.detail["message"]
+
+
+def test_none_detail_value_passes() -> None:
+    """detail_key 存在但值为 None → 等同缺省，跳过校验。
+    修复前：body[detail_key] 取到 None，直接走 if not items → 400 empty。
+    修复后：None 视同缺省，早期 return。
+    """
+    validate_detail_consistency(
+        {"lenders": None},
+        total=Decimal("100.0000"),
+        currency="USD",
+        detail_key="lenders",
+        amount_field="lendAmount",
+    )
+
+
+def test_none_userlist_value_passes() -> None:
+    """userList=None → 同样跳过校验（bank_funds 场景）。"""
+    validate_detail_consistency(
+        {"userList": None},
+        total=Decimal("500.0000"),
+        currency="USD",
+        detail_key="userList",
+        amount_field="amount",
+    )
