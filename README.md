@@ -61,9 +61,16 @@ docker run --rm --env-file deploy/env.local \
 # 4. 启动服务
 docker compose -f deploy/docker-compose.yml up -d
 
-# 确认健康
+# 确认健康（readyz 含 DB 探测）
 curl http://localhost:8050/healthz
+curl http://localhost:8050/readyz
 ```
+
+### 部署前置（2026-06-12 本地验收实测踩坑）
+
+1. **MySQL 触发器权限**：迁移 0005 创建 audit_log append-only 触发器，目标库须先 `SET GLOBAL log_bin_trust_function_creators=1`（或迁移用户有 SUPER），否则 0005 半应用失败（残留 `uq_audit_tenant_rowhash` 需手工 DROP 后重跑）。
+2. **MySQL 用户认证插件**：asyncmy 对 MySQL 8 默认 `caching_sha2_password` 存在连接挂起问题，应用账号须 `ALTER USER ... IDENTIFIED WITH mysql_native_password BY ...`。
+3. **compose 变量优先级**：`docker-compose.yml` 的 `${DB_HOST}` 等插值变量按 *宿主 shell 环境 > deploy/.env 文件* 解析（`env_file: env.local` 只进容器、不参与插值）。宿主 shell 已导出同名变量（如 dev-hw 工具链的 `DB_HOST`）会静默覆盖——部署命令前显式内联：`DB_USER=... DB_HOST=... docker compose up -d`。
 
 > **注意**：必须先跑 `alembic upgrade head` 再启动服务；服务不会自动执行迁移。
 
