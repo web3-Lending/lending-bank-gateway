@@ -68,9 +68,9 @@ async def test_replay_repayment_fixture() -> None:
 @pytest.mark.asyncio
 @respx.mock
 async def test_replay_collect_fixture() -> None:
-    """collect_accepted.json：collect-from-users 路径解包正确。"""
+    """collect_accepted.json：user-collections 路径解包正确（wedap 真路径 2026-06-12 verify）。"""
     body = _fix("collect_accepted.json")
-    respx.post(f"{_BASE}/api/v1/bank-funds/collect-from-users").mock(
+    respx.post(f"{_BASE}/api/v1/bank-funds/user-collections").mock(
         return_value=httpx.Response(200, json=body)
     )
     data = await _client().collect_from_users(tenant_id=_TENANT, request_id=_REQ_ID, payload={})
@@ -81,9 +81,9 @@ async def test_replay_collect_fixture() -> None:
 @pytest.mark.asyncio
 @respx.mock
 async def test_replay_distribute_fixture() -> None:
-    """distribute_accepted.json：distribute-to-users 路径解包正确。"""
+    """distribute_accepted.json：user-distributions 路径解包正确（2026-06-12 verify）。"""
     body = _fix("distribute_accepted.json")
-    respx.post(f"{_BASE}/api/v1/bank-funds/distribute-to-users").mock(
+    respx.post(f"{_BASE}/api/v1/bank-funds/user-distributions").mock(
         return_value=httpx.Response(200, json=body)
     )
     data = await _client().distribute_to_users(tenant_id=_TENANT, request_id=_REQ_ID, payload={})
@@ -93,15 +93,17 @@ async def test_replay_distribute_fixture() -> None:
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_replay_funds_status_fixture() -> None:
-    """funds_status.json：query_funds_status 解包 txnStatus=SUCCESS。"""
+async def test_replay_funds_status_fixture_dsb() -> None:
+    """funds_status.json：DSB→/api/v1/loans/p2p-disbursements/{biz}/status，txnStatus=SUCCESS。"""
     body = _fix("funds_status.json")
-    respx.get(f"{_BASE}/api/v1/bank-funds/status").mock(return_value=httpx.Response(200, json=body))
+    biz = "DSB-20260611-0001234567890"
+    respx.get(f"{_BASE}/api/v1/loans/p2p-disbursements/{biz}/status").mock(
+        return_value=httpx.Response(200, json=body)
+    )
     data = await _client().query_funds_status(
-        tenant_id=_TENANT, request_id=_REQ_ID, biz_seq_no="COL-20260611-0001111111111"
+        tenant_id=_TENANT, request_id=_REQ_ID, biz_seq_no=biz, biz_type="DSB"
     )
     assert data["txnStatus"] == "SUCCESS"
-    assert data["bizSeqNo"] == "COL-20260611-0001111111111"
 
 
 # ---------------------------------------------------------------------------

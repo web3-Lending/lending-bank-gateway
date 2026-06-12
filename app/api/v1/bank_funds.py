@@ -170,13 +170,15 @@ async def query_status(
             tenant_id=ids["tenant_id"],
             request_id=ids["request_id"],
             biz_seq_no=biz_seq_no,
+            biz_type=row.biz_type,
         )
     except (httpx.TimeoutException, httpx.TransportError):
         wedap_data = {"unavailable": True, "reason": "timeout"}
     except httpx.HTTPStatusError:
         wedap_data = {"unavailable": True, "reason": "http_error"}
-    except WedapError:
-        wedap_data = {"unavailable": True, "reason": "wedap_error"}
+    except WedapError as exc:
+        reason = "no_status_api" if exc.code == "UNSUPPORTED" else "wedap_error"
+        wedap_data = {"unavailable": True, "reason": reason}
 
     result: dict[str, Any] = {
         "bizSeqNo": row.biz_seq_no,

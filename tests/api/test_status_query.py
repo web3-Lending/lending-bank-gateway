@@ -78,6 +78,9 @@ def test_status_after_submit_returns_order_and_wedap(client: TestClient) -> None
     assert data["orderStatus"] == "SUBMITTED"
     assert data["bizSeqNo"] == COLLECT_BODY["bizSeqNo"]
     assert data["wedap"]["txnStatus"] == "SUBMITTED"
+    # 验证 biz_type 从 order 取出并传给 query_funds_status
+    call_kwargs = client.app.state.wedap.query_funds_status.call_args  # type: ignore[union-attr]
+    assert call_kwargs.kwargs["biz_type"] == "CLT"
 
 
 # ── Test 2：未知 bizSeqNo → 404 GW_404_ORDER ─────────────────────────────────
@@ -167,6 +170,29 @@ def test_status_wedap_error_degrades_gracefully(client: TestClient) -> None:
     )
     assert r.status_code == 200
     assert r.json()["data"]["wedap"]["unavailable"] is True
+
+
+# ── Test 4d：wedap UNSUPPORTED（如 CLT 无状态接口）→ 200 + reason=no_status_api ─
+
+
+def test_status_wedap_unsupported_biz_type_degrades_with_no_status_api(
+    client: TestClient,
+) -> None:
+    """wedap query_funds_status WedapError(UNSUPPORTED) → HTTP 200 + reason=no_status_api。"""
+    client.post("/api/v1/bank-funds/collect-from-users", json=COLLECT_BODY, headers=HEADERS)
+    client.app.state.wedap.query_funds_status.side_effect = WedapError(  # type: ignore[union-attr]
+        "UNSUPPORTED", "no status api for CLT"
+    )
+
+    r = client.get(
+        STATUS_URL,
+        params={"bizSeqNo": COLLECT_BODY["bizSeqNo"]},
+        headers=HEADERS,
+    )
+    assert r.status_code == 200
+    wedap = r.json()["data"]["wedap"]
+    assert wedap["unavailable"] is True
+    assert wedap["reason"] == "no_status_api"
 
 
 # ── Test 5：composite steps 透传 ─────────────────────────────────────────────
