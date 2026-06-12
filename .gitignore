@@ -9,3 +9,4 @@ __pycache__/
 .env
 *.egg-info/
 .claude-session.lock
+deploy/env.local
