@@ -42,6 +42,14 @@ async def composite_steps(
             tenant_id=ids["tenant_id"],
             biz_seq_no=biz_seq_no,
         )
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "GW_502_UPSTREAM",
+                "message": f"wedap http {exc.response.status_code}",
+            },
+        ) from exc
     except (httpx.TimeoutException, httpx.TransportError, WedapError) as exc:
         raise HTTPException(
             status_code=502,

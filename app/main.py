@@ -32,12 +32,25 @@ from app.workers.supervisor import supervised
 logger = logging.getLogger(__name__)
 
 
+def _resolve_trace_id(request: Request) -> str:
+    """解析当前请求的 trace_id。
+
+    优先从 contextvar 获取；若 IdentifierMiddleware 尚未运行（如 ServerErrorMiddleware
+    在外层捕获异常时 contextvar 已 reset），则回退到请求头 X-Trace-Id；
+    仍无则返回 "trc-none"。
+    """
+    trace_id = current_ids().trace_id
+    if trace_id == "trc-none":
+        trace_id = request.headers.get("X-Trace-Id") or "trc-none"
+    return trace_id
+
+
 async def _http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
     """统一处理 FastAPI HTTPException 与 Starlette 路由 miss 404。
 
     两者均继承 StarletteHTTPException，注册同一个 handler。
     """
-    trace_id = current_ids().trace_id
+    trace_id = _resolve_trace_id(request)
     detail = exc.detail
     if isinstance(detail, dict):
         code = detail.get("code", f"GW_{exc.status_code}")
@@ -54,7 +67,7 @@ async def _http_exception_handler(request: Request, exc: StarletteHTTPException)
 async def _validation_exception_handler(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
-    trace_id = current_ids().trace_id
+    trace_id = _resolve_trace_id(request)
     # exc.errors() 的 ctx 字段可能含不可序列化对象，用 jsonable_encoder 净化
     errors = jsonable_encoder(exc.errors())
     return JSONResponse(
@@ -69,7 +82,7 @@ async def _validation_exception_handler(
 
 
 async def _generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    trace_id = current_ids().trace_id
+    trace_id = _resolve_trace_id(request)
     logger.exception("unhandled exception trace_id=%s", trace_id)
     return JSONResponse(
         err("GW_500_INTERNAL", "internal error", trace_id=trace_id),
