@@ -5,7 +5,7 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 
 from app.api.deps import (
@@ -27,10 +27,21 @@ router = APIRouter(prefix="/api/v1/bank-funds", tags=["bank-funds"])
 
 
 class BankFundsRequest(BaseModel):
+    # 归集（collect）沿用本 schema：切扁平 txnAmount 需 lending 先改 body，本轮不切（FU Q2）。
     bizSeqNo: str
     totalAmount: str
     currencyCode: str
     userList: list[dict[str, Any]] | None = None
+    """显式 null 视同缺省，契约 C 下 wedap 可选字段缺省=null 语义等价。"""
+
+
+class DistributeRequest(BaseModel):
+    # 分发薄透传：wedap body = 顶层 currencyCode + recipients[].distributeAmount（无 totalAmount）。
+    # recipients 各项的 userId/custAccountNo/bankAccountNo/vaultId 等经 extra=allow 原样透传。
+    model_config = ConfigDict(extra="allow")
+    bizSeqNo: str
+    currencyCode: str
+    recipients: list[dict[str, Any]] | None = None
     """显式 null 视同缺省，契约 C 下 wedap 可选字段缺省=null 语义等价。"""
 
 
@@ -116,19 +127,25 @@ async def collect_from_users(
 
 @router.post("/distribute-to-users")
 async def distribute_to_users(
-    body: BankFundsRequest,
+    body: DistributeRequest,
     request: Request,
     ids: dict[str, str] = Depends(require_headers),
 ) -> dict[str, Any]:
     assert_idempotency_key_matches(request, body.bizSeqNo)
-    amount = parse_amount(body.totalAmount)
     payload = body.model_dump(mode="json", exclude_none=True)
+    # 分发 wedap 契约无顶层总额：本地账本/幂等金额 = Σ recipients[].distributeAmount。
+    # recipients 经 pydantic 校验为 list[dict]（非 dict 项解析期即 422），故只判明细键是否存在。
+    recipients = body.recipients or []
+    amount = sum(
+        (parse_amount(str(r["distributeAmount"])) for r in recipients if "distributeAmount" in r),
+        Decimal("0"),
+    )
     validate_detail_consistency(
         payload,
         total=amount,
         currency=body.currencyCode,
-        detail_key="userList",
-        amount_field="amount",
+        detail_key="recipients",
+        amount_field="distributeAmount",
     )
     return await _submit(
         request,

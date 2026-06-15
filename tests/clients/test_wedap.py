@@ -349,7 +349,7 @@ async def test_get_deposit_balance_total_happy_path() -> None:
         )
     )
     resp = await _client().get_deposit_balance_total(
-        tenant_id="OCBC", request_id="bal-001", user_id="U001"
+        tenant_id="OCBC", request_id="bal-001", params={"userId": "U001"}
     )
     assert resp["totalBalance"] == "1000.0000"
     req = route.calls.last.request
@@ -364,7 +364,9 @@ async def test_get_deposit_balance_total_non_200_code_raises() -> None:
         return_value=httpx.Response(200, json={"code": "404", "msg": "USER_NOT_FOUND"})
     )
     with pytest.raises(WedapError):
-        await _client().get_deposit_balance_total(tenant_id="OCBC", request_id="r", user_id="U999")
+        await _client().get_deposit_balance_total(
+            tenant_id="OCBC", request_id="r", params={"userId": "U999"}
+        )
 
 
 @respx.mock
@@ -373,7 +375,7 @@ async def test_get_deposit_balance_total_missing_data_returns_empty() -> None:
         return_value=httpx.Response(200, json={"code": "200", "msg": "SUCCESS"})
     )
     resp = await _client().get_deposit_balance_total(
-        tenant_id="OCBC", request_id="r", user_id="U001"
+        tenant_id="OCBC", request_id="r", params={"userId": "U001"}
     )
     assert resp == {}
 
@@ -396,7 +398,7 @@ async def test_get_deposit_accounts_happy_path() -> None:
         )
     )
     resp = await _client().get_deposit_accounts(
-        tenant_id="OCBC", request_id="acc-001", user_id="U001"
+        tenant_id="OCBC", request_id="acc-001", params={"userId": "U001"}
     )
     assert "accounts" in resp
     req = route.calls.last.request
@@ -411,7 +413,9 @@ async def test_get_deposit_accounts_non_200_code_raises() -> None:
         return_value=httpx.Response(200, json={"code": "500", "msg": "SYSTEM_ERROR"})
     )
     with pytest.raises(WedapError):
-        await _client().get_deposit_accounts(tenant_id="OCBC", request_id="r", user_id="U999")
+        await _client().get_deposit_accounts(
+            tenant_id="OCBC", request_id="r", params={"userId": "U999"}
+        )
 
 
 @respx.mock
@@ -419,7 +423,9 @@ async def test_get_deposit_accounts_missing_data_returns_empty() -> None:
     respx.get(f"{BASE}/api/v1/deposit/accounts").mock(
         return_value=httpx.Response(200, json={"code": "200", "msg": "SUCCESS"})
     )
-    resp = await _client().get_deposit_accounts(tenant_id="OCBC", request_id="r", user_id="U001")
+    resp = await _client().get_deposit_accounts(
+        tenant_id="OCBC", request_id="r", params={"userId": "U001"}
+    )
     assert resp == {}
 
 

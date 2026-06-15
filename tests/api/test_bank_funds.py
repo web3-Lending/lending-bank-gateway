@@ -22,10 +22,10 @@ COLLECT_BODY = {
     "userList": [{"userId": "U1", "amount": "500.0000"}],
 }
 DISTRIBUTE_BODY = {
+    # 分发 wedap 真契约：顶层 currencyCode + recipients[].distributeAmount（无 totalAmount）。
     "bizSeqNo": "DST-20260611-0001234567890",
-    "totalAmount": "200.0000",
     "currencyCode": "USD",
-    "userList": [{"userId": "U2", "amount": "200.0000"}],
+    "recipients": [{"userId": "U2", "distributeAmount": "200.0000", "currencyCode": "USD"}],
 }
 
 
@@ -156,8 +156,7 @@ def test_distribute_same_key_different_payload_409(client: TestClient) -> None:
     client.post("/api/v1/bank-funds/distribute-to-users", json=DISTRIBUTE_BODY, headers=h)
     mutated = {
         **DISTRIBUTE_BODY,
-        "totalAmount": "999.0000",
-        "userList": [{"userId": "U2", "amount": "999.0000"}],
+        "recipients": [{"userId": "U2", "distributeAmount": "999.0000", "currencyCode": "USD"}],
     }
     r = client.post("/api/v1/bank-funds/distribute-to-users", json=mutated, headers=h)
     assert r.status_code == 409
@@ -214,13 +213,78 @@ def test_collect_explicit_empty_userlist_400(client: TestClient) -> None:
     assert "empty userList" in r.json()["error"]["message"]
 
 
-def test_distribute_without_userlist_passes_validation(client: TestClient) -> None:
-    """distribute-to-users 缺 userList → 同样跳过校验，200 受理。"""
+def test_distribute_without_recipients_passes_validation(client: TestClient) -> None:
+    """distribute-to-users 缺 recipients → 跳过明细校验（金额 Σ=0），200 受理（契约 C 薄透传）。"""
     body = {
         "bizSeqNo": "DST-20260611-0002000000004",
-        "totalAmount": "200.0000",
         "currencyCode": "USD",
     }
-    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-dst-no-ul"}
+    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-dst-no-rcp"}
+    r = client.post("/api/v1/bank-funds/distribute-to-users", json=body, headers=h)
+    assert r.status_code == 200, r.json()
+
+
+def test_distribute_amount_summed_and_recipients_passthrough(client: TestClient) -> None:
+    """分发金额 = Σ recipients[].distributeAmount；recipients+bankAccountNo 经 extra=allow 透传。"""
+    body = {
+        "bizSeqNo": "DST-20260611-0002000000010",
+        "currencyCode": "USD",
+        "recipients": [
+            {
+                "userId": "U1",
+                "distributeAmount": "60.0000",
+                "currencyCode": "USD",
+                "bankAccountNo": "ACC1",
+            },
+            {
+                "userId": "U2",
+                "distributeAmount": "40.0000",
+                "currencyCode": "USD",
+                "bankAccountNo": "ACC2",
+            },
+        ],
+    }
+    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-sum"}
+    r = client.post("/api/v1/bank-funds/distribute-to-users", json=body, headers=h)
+    assert r.status_code == 200, r.json()
+    call_str = str(client.app.state.wedap.distribute_to_users.call_args)  # type: ignore[union-attr]
+    assert "recipients" in call_str
+    assert "bankAccountNo" in call_str and "ACC1" in call_str
+
+
+def test_distribute_recipient_currency_mismatch_400(client: TestClient) -> None:
+    """recipient.currencyCode 与顶层 currencyCode 不一致 → 400 GW_400_VALIDATION。"""
+    body = {
+        "bizSeqNo": "DST-20260611-0002000000011",
+        "currencyCode": "USD",
+        "recipients": [{"userId": "U1", "distributeAmount": "100.0000", "currencyCode": "EUR"}],
+    }
+    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-cur"}
+    r = client.post("/api/v1/bank-funds/distribute-to-users", json=body, headers=h)
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "GW_400_VALIDATION"
+
+
+def test_distribute_empty_recipients_400(client: TestClient) -> None:
+    """显式 recipients=[] → 400 empty recipients。"""
+    body = {
+        "bizSeqNo": "DST-20260611-0002000000012",
+        "currencyCode": "USD",
+        "recipients": [],
+    }
+    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-empty-rcp"}
+    r = client.post("/api/v1/bank-funds/distribute-to-users", json=body, headers=h)
+    assert r.status_code == 400
+    assert "empty recipients" in r.json()["error"]["message"]
+
+
+def test_distribute_recipient_without_amount_skips_sum(client: TestClient) -> None:
+    """recipient 缺 distributeAmount（wedap 自动分配场景）→ sum 校验跳过，金额 Σ=0，200 受理。"""
+    body = {
+        "bizSeqNo": "DST-20260611-0002000000013",
+        "currencyCode": "USD",
+        "recipients": [{"userId": "U1", "currencyCode": "USD"}],
+    }
+    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-no-amt"}
     r = client.post("/api/v1/bank-funds/distribute-to-users", json=body, headers=h)
     assert r.status_code == 200, r.json()

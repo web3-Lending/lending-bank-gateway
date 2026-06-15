@@ -189,7 +189,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/BankFundsRequest"
+                "$ref": "#/components/schemas/DistributeRequest"
               }
             }
           },
@@ -524,38 +524,17 @@
           "deposit"
         ],
         "summary": "Deposit Balance Total",
-        "description": "余额汇总查询：透传 + 审计 + 余额快照（BalanceSnapshot）。",
+        "description": "余额汇总查询：原样透传所有 query params + 审计 + 余额快照。\n\n契约 C 薄透传：不再只挑 userId，按 users/info 同款全透传，wedap 必填的\nbizSeqNo/channelId 及四标识由调用方携带即原样转发，gateway 不剪裁。",
         "operationId": "deposit_balance_total_api_v1_deposit_balances_total_get",
-        "parameters": [
-          {
-            "name": "userId",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Userid"
-            }
-          }
-        ],
         "responses": {
           "200": {
             "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
                   "additionalProperties": true,
+                  "type": "object",
                   "title": "Response Deposit Balance Total Api V1 Deposit Balances Total Get"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -569,38 +548,17 @@
           "deposit"
         ],
         "summary": "Deposit Accounts",
-        "description": "账户列表查询：透传 + 审计（无快照）。",
+        "description": "账户列表查询：原样透传所有 query params（含 wedap 必填 bizSeqNo/channelId）+ 审计。",
         "operationId": "deposit_accounts_api_v1_deposit_accounts_get",
-        "parameters": [
-          {
-            "name": "userId",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Userid"
-            }
-          }
-        ],
         "responses": {
           "200": {
             "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
                   "additionalProperties": true,
+                  "type": "object",
                   "title": "Response Deposit Accounts Api V1 Deposit Accounts Get"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -694,12 +652,47 @@
             "default": ""
           }
         },
+        "additionalProperties": true,
         "type": "object",
         "required": [
           "txnAmount",
           "currencyCode"
         ],
         "title": "DisbursementInfo"
+      },
+      "DistributeRequest": {
+        "properties": {
+          "bizSeqNo": {
+            "type": "string",
+            "title": "Bizseqno"
+          },
+          "currencyCode": {
+            "type": "string",
+            "title": "Currencycode"
+          },
+          "recipients": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recipients"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "bizSeqNo",
+          "currencyCode"
+        ],
+        "title": "DistributeRequest"
       },
       "HTTPValidationError": {
         "properties": {
@@ -749,6 +742,7 @@
             "title": "Lenders"
           }
         },
+        "additionalProperties": true,
         "type": "object",
         "required": [
           "bizSeqNo",
@@ -766,6 +760,7 @@
             "$ref": "#/components/schemas/RepaymentInfo"
           }
         },
+        "additionalProperties": true,
         "type": "object",
         "required": [
           "bizSeqNo",
@@ -784,6 +779,7 @@
             "title": "Currencycode"
           }
         },
+        "additionalProperties": true,
         "type": "object",
         "required": [
           "txnAmount",

@@ -4,7 +4,7 @@ from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from app.api.deps import (
     assert_idempotency_key_matches,
@@ -23,6 +23,8 @@ router = APIRouter(prefix="/api/v1/loans", tags=["loans"])
 
 
 class DisbursementInfo(BaseModel):
+    # 契约 C 薄透传：最少键取金额/币种，余下 wedap 字段经 extra=allow 透传。
+    model_config = ConfigDict(extra="allow")
     txnAmount: str
     currencyCode: str
     userId: str = ""
@@ -30,11 +32,15 @@ class DisbursementInfo(BaseModel):
 
 
 class RepaymentInfo(BaseModel):
+    # wedap 必填字段（principalAmount/interestAmount/userId 等）嵌在此层，
+    # 嵌套层须同样 extra=allow（只给顶层不够），否则被 pydantic 静默丢。
+    model_config = ConfigDict(extra="allow")
     txnAmount: str
     currencyCode: str
 
 
 class P2PDisbursementRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
     bizSeqNo: str
     channelId: str = ""
     transType: str = ""
@@ -44,6 +50,8 @@ class P2PDisbursementRequest(BaseModel):
 
 
 class P2PRepaymentRequest(BaseModel):
+    # 顶层 extra=allow 透传 lenders[] 等字段（不显式声明 lenders，靠 extra 捕获并进 model_dump）。
+    model_config = ConfigDict(extra="allow")
     bizSeqNo: str
     repaymentInfo: RepaymentInfo
 
@@ -137,13 +145,14 @@ async def p2p_repayment(
     assert_idempotency_key_matches(request, body.bizSeqNo)
     amount = parse_amount(body.repaymentInfo.txnAmount)
     payload = body.model_dump(mode="json", exclude_none=True)
-    # repayment 的 lenders 明细：body 无 lenders 键时跳过校验（契约 C 透传原则）
+    # lenders 明细金额字段用 wedap 真实的 txnAmount（lending 按占比拆分，sum==总额成立）；
+    # 原 shareAmount 是 lending/wedap 都没有的字段，会让 sum 校验永远跳过（形同虚设）。
     validate_detail_consistency(
         payload,
         total=amount,
         currency=body.repaymentInfo.currencyCode,
         detail_key="lenders",
-        amount_field="shareAmount",
+        amount_field="txnAmount",
     )
     return await _submit(
         request,

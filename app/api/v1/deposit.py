@@ -83,20 +83,24 @@ async def _audited_passthrough(
 @router.get("/api/v1/deposit/balances/total")
 async def deposit_balance_total(
     request: Request,
-    userId: str,
     hdr: dict[str, str] = Depends(require_headers),
 ) -> dict[str, Any]:
-    """余额汇总查询：透传 + 审计 + 余额快照（BalanceSnapshot）。"""
+    """余额汇总查询：原样透传所有 query params + 审计 + 余额快照。
+
+    契约 C 薄透传：不再只挑 userId，按 users/info 同款全透传，wedap 必填的
+    bizSeqNo/channelId 及四标识由调用方携带即原样转发，gateway 不剪裁。
+    """
+    params = dict(request.query_params)
     wedap = request.app.state.wedap
     data = await _audited_passthrough(
         request,
         endpoint="deposit/balances/total",
-        params={"userId": userId},
+        params=params,
         hdr=hdr,
         call=lambda: wedap.get_deposit_balance_total(
             tenant_id=hdr["tenant_id"],
             request_id=hdr["request_id"],
-            user_id=userId,
+            params=params,
         ),
     )
     now = dt.datetime.now(dt.UTC)
@@ -134,20 +138,20 @@ async def deposit_balance_total(
 @router.get("/api/v1/deposit/accounts")
 async def deposit_accounts(
     request: Request,
-    userId: str,
     hdr: dict[str, str] = Depends(require_headers),
 ) -> dict[str, Any]:
-    """账户列表查询：透传 + 审计（无快照）。"""
+    """账户列表查询：原样透传所有 query params（含 wedap 必填 bizSeqNo/channelId）+ 审计。"""
+    params = dict(request.query_params)
     wedap = request.app.state.wedap
     data = await _audited_passthrough(
         request,
         endpoint="deposit/accounts",
-        params={"userId": userId},
+        params=params,
         hdr=hdr,
         call=lambda: wedap.get_deposit_accounts(
             tenant_id=hdr["tenant_id"],
             request_id=hdr["request_id"],
-            user_id=userId,
+            params=params,
         ),
     )
     return ok(data, trace_id=hdr["trace_id"])
