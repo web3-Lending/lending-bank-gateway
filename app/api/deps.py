@@ -49,6 +49,18 @@ def parse_amount(raw: Any) -> Decimal:
             400,
             detail={"code": "GW_400_VALIDATION", "message": f"bad amount: {raw!r}"},
         ) from exc
+    # 非有限值（NaN/sNaN/Infinity）是合法 Decimal 但金额非法：
+    # NaN 会让下面的 `value <= 0` 比较抛 InvalidOperation（→ 未捕获 500）；
+    # Infinity 能通过 `<= 0` 检查被当正数放行，最终在 Numeric(21,4) 落库时炸 500。
+    # 统一在此显式拒为 400，避免脏金额穿透成 500。
+    if not value.is_finite():
+        raise HTTPException(
+            400,
+            detail={
+                "code": "GW_400_VALIDATION",
+                "message": f"amount must be finite: {raw!r}",
+            },
+        )
     if value <= 0:
         raise HTTPException(
             400,

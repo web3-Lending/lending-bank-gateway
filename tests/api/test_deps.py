@@ -5,7 +5,42 @@ from decimal import Decimal
 import pytest
 from fastapi import HTTPException
 
-from app.api.deps import validate_detail_consistency
+from app.api.deps import parse_amount, validate_detail_consistency
+
+# ── parse_amount: 脏金额护栏（QA-M finding：NaN/Infinity 不得穿透成 500）──────────
+
+
+@pytest.mark.parametrize("raw", ["NaN", "sNaN", "Infinity", "-Infinity", "inf", "nan"])
+def test_parse_amount_rejects_non_finite_400(raw: str) -> None:
+    """NaN/sNaN/Infinity 是合法 Decimal 但金额非法 → 必须 400，而非穿透成 500。
+
+    回归 QA-M：旧实现下 NaN 会让 `value <= 0` 抛 InvalidOperation（未捕获 → 500），
+    Infinity 通过 `<= 0` 被当正数放行，最终在 Numeric(21,4) 落库炸 500。
+    """
+    with pytest.raises(HTTPException) as exc_info:
+        parse_amount(raw)
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail["code"] == "GW_400_VALIDATION"  # type: ignore[index]
+
+
+def test_parse_amount_accepts_positive_finite() -> None:
+    """正有限值正常返回 Decimal。"""
+    assert parse_amount("100.0000") == Decimal("100.0000")
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "-0.0001"])
+def test_parse_amount_rejects_non_positive_400(raw: str) -> None:
+    """0 与负数 → 400（既有正数护栏，确保未被新分支回归）。"""
+    with pytest.raises(HTTPException) as exc_info:
+        parse_amount(raw)
+    assert exc_info.value.status_code == 400
+
+
+def test_parse_amount_rejects_unparseable_400() -> None:
+    """无法解析为 Decimal → 400 bad amount。"""
+    with pytest.raises(HTTPException) as exc_info:
+        parse_amount("not-a-number")
+    assert exc_info.value.status_code == 400
 
 
 def test_no_detail_key_passes() -> None:
