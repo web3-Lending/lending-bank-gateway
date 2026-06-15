@@ -288,3 +288,16 @@ def test_distribute_recipient_without_amount_skips_sum(client: TestClient) -> No
     h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-no-amt"}
     r = client.post("/api/v1/bank-funds/distribute-to-users", json=body, headers=h)
     assert r.status_code == 200, r.json()
+
+
+def test_distribute_recipient_null_amount_skipped(client: TestClient) -> None:
+    """recipient distributeAmount=null 与缺省键一致：跳过求和（wedap 自动分配），200 受理。
+    回归 review Finding 2：原 str(None) 会误炸 400 "bad amount: None"。"""
+    body = {
+        "bizSeqNo": "DST-20260611-0002000000014",
+        "currencyCode": "USD",
+        "recipients": [{"userId": "U1", "distributeAmount": None, "currencyCode": "USD"}],
+    }
+    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-null-amt"}
+    r = client.post("/api/v1/bank-funds/distribute-to-users", json=body, headers=h)
+    assert r.status_code == 200, r.json()

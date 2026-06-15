@@ -63,7 +63,7 @@ def parse_amount(raw: Any) -> Decimal:
 def validate_detail_consistency(
     body: dict[str, Any],
     *,
-    total: Decimal,
+    total: Decimal | None,
     currency: str,
     detail_key: str,
     amount_field: str,
@@ -72,9 +72,11 @@ def validate_detail_consistency(
 
     - detail_key 不在 body 中，或值为 None → 跳过（非强制明细场景；None 视同字段缺省）
     - 空列表 → 400 GW_400_VALIDATION "empty {detail_key}"
-    - 各项含 amount_field 时 sum(Decimal) != total → 400 "detail amount sum mismatch"
     - 各项含 currencyCode 且 != 顶层 currency → 400 "detail currency mismatch"
+    - total 非 None 且各项都含 amount_field 时 sum != total → 400 "detail amount sum mismatch"
     - 明细项无 amount_field 字段 → 跳过 sum 校验（wedap 自动分配场景合法）
+    - total=None → 无独立顶层总额（如 distribute 金额即取自明细 Σ），整段 sum 校验跳过，
+      只保留「非空 + 币种一致」两项；避免对「明细自身求和再与自身比」的同义重复护栏
     """
     if detail_key not in body or body[detail_key] is None:
         return
@@ -102,6 +104,10 @@ def validate_detail_consistency(
                     "message": "detail currency mismatch",
                 },
             )
+
+    # total=None：无独立顶层总额（distribute 金额取自明细 Σ），sum 校验是同义重复，整段跳过
+    if total is None:
+        return
 
     # sum 校验：只有所有项都含 amount_field 时才校验（部分缺失=wedap 自动分配，跳过）
     amounts: list[Decimal] = []

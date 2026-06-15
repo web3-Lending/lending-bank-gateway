@@ -134,15 +134,20 @@ async def distribute_to_users(
     assert_idempotency_key_matches(request, body.bizSeqNo)
     payload = body.model_dump(mode="json", exclude_none=True)
     # 分发 wedap 契约无顶层总额：本地账本/幂等金额 = Σ recipients[].distributeAmount。
-    # recipients 经 pydantic 校验为 list[dict]（非 dict 项解析期即 422），故只判明细键是否存在。
+    # distributeAmount 缺省/null 一致视为「wedap 自动分配」跳过求和（避免 str(None) 误炸 400）。
     recipients = body.recipients or []
     amount = sum(
-        (parse_amount(str(r["distributeAmount"])) for r in recipients if "distributeAmount" in r),
+        (
+            parse_amount(str(r["distributeAmount"]))
+            for r in recipients
+            if r.get("distributeAmount") is not None
+        ),
         Decimal("0"),
     )
+    # total=None：分发无独立顶层总额，validate 仅做「非空 + 币种一致」，不做同义重复的 sum 校验
     validate_detail_consistency(
         payload,
-        total=amount,
+        total=None,
         currency=body.currencyCode,
         detail_key="recipients",
         amount_field="distributeAmount",
