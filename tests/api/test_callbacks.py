@@ -459,3 +459,45 @@ def test_after_ingest_enqueues_outbox_row(client: TestClient) -> None:
     rows = asyncio.run(_query_outbox(client.app.state.engine))  # type: ignore[union-attr]
     assert len(rows) == 1
     assert rows[0].target == "lifecycle"  # type: ignore[union-attr]
+
+
+# ---------------------------------------------------------------------------
+# A-C-001 修复：RECEIVED 行重放严格幂等——用首次落库 payload 再驱动，忽略漂移的本次 body
+# ---------------------------------------------------------------------------
+
+
+def test_replay_with_drifted_body_redrives_with_stored_payload(client: TestClient) -> None:
+    """同 request_id 重发但 body 漂移：after_ingest 必须用首次落库的 payload 再驱动，而非本次 body。
+
+    场景：上游复用 X-Request-Id 但发送了不同 body（金额/字段被改写）。inbox 行是权威记录，
+    重放再驱动必须从既有 payload 收敛，否则 gateway 内部 leg/父单状态会被非首份 body 污染，
+    与被 fwd-{request_id} 去重锁住的下游转发内容分叉。
+    """
+    # 第一次：after_ingest 失败，行留 RECEIVED（payload=首份 BODY）
+    failing_spy = AsyncMock(side_effect=RuntimeError("first attempt failed"))
+    client.app.state.callback_after_ingest = failing_spy  # type: ignore[union-attr]
+    r1 = client.post("/api/v1/callbacks/wedap/transactions", json=BODY, headers=HEADERS)
+    assert r1.status_code == 200
+
+    # 第二次（重放）：同 request_id 但 body 漂移（金额与 txnId 被改写）；after_ingest 成功
+    drifted_body = {**BODY, "amount": "999.9999", "txnId": "TXN-EVIL-0002"}
+    assert drifted_body != BODY
+    success_spy = AsyncMock()
+    client.app.state.callback_after_ingest = success_spy  # type: ignore[union-attr]
+    r2 = client.post("/api/v1/callbacks/wedap/transactions", json=drifted_body, headers=HEADERS)
+    assert r2.status_code == 200
+    assert r2.json()["data"]["deduplicated"] is True
+
+    # 关键断言：after_ingest 用首次落库 payload（BODY）驱动，而非漂移的本次 body
+    assert success_spy.await_count == 1
+    assert success_spy.await_args is not None
+    assert success_spy.await_args.kwargs["body"] == BODY
+    assert success_spy.await_args.kwargs["body"] != drifted_body
+
+    # 行推进 PROCESSED；落库 payload 仍是首份 BODY（重放不覆盖）
+    row = asyncio.run(
+        _query_inbox_row(client.app.state.engine, "OCBC", "cb-req-001")  # type: ignore[union-attr]
+    )
+    assert row is not None
+    assert row.status == "PROCESSED"  # type: ignore[union-attr]
+    assert row.payload == BODY  # type: ignore[union-attr]
