@@ -257,6 +257,7 @@ def test_alembic_upgrade_head_and_on_update_mysql(mysql_engine: sa.Engine) -> No
     2. 插入一条 bank_txn_order，记录 updated_at 初始值。
     3. sleep(1) 后 raw SQL UPDATE status；重查 updated_at 验证自动更新。
     """
+    import pathlib
     import time
     from decimal import Decimal
 
@@ -268,9 +269,11 @@ def test_alembic_upgrade_head_and_on_update_mysql(mysql_engine: sa.Engine) -> No
     # 1. drop_all → alembic upgrade head（进程内，复用 mysql_engine 连接）
     Base.metadata.drop_all(mysql_engine)
 
-    worktree = "/home/ubuntu/lending/lending-bank-gateway/.worktrees/v1-cutover-core"
-    alembic_cfg = Config(f"{worktree}/alembic.ini")
-    alembic_cfg.set_main_option("script_location", f"{worktree}/alembic")
+    # alembic 配置取当前仓库根（由本测试文件位置推导），不写死任何 worktree 路径——
+    # 写死路径会在该 worktree 清理后令本测试 + 其后依赖建表的测试整组 red。
+    repo_root = pathlib.Path(__file__).resolve().parents[2]
+    alembic_cfg = Config(str(repo_root / "alembic.ini"))
+    alembic_cfg.set_main_option("script_location", str(repo_root / "alembic"))
 
     # 直接传入同步连接，跳过 env.py 的 URL 读取路径
     with mysql_engine.connect() as conn:

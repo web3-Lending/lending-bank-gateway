@@ -175,13 +175,14 @@ class WedapClient:
         *,
         tenant_id: str,
         request_id: str,
-        user_id: str,
+        params: dict[str, str],
     ) -> dict[str, Any]:
+        # 契约 C 薄透传：原样转发调用方 query params（userId + wedap 必填 bizSeqNo/channelId 等）。
         return await self._get(
             "/api/v1/deposit/balances/total",
             tenant_id=tenant_id,
             request_id=request_id,
-            params={"userId": user_id},
+            params=params,
         )
 
     async def get_deposit_accounts(
@@ -189,13 +190,14 @@ class WedapClient:
         *,
         tenant_id: str,
         request_id: str,
-        user_id: str,
+        params: dict[str, str],
     ) -> dict[str, Any]:
+        # 契约 C 薄透传：原样转发调用方 query params（userId + wedap 必填 bizSeqNo/channelId 等）。
         return await self._get(
             "/api/v1/deposit/accounts",
             tenant_id=tenant_id,
             request_id=request_id,
-            params={"userId": user_id},
+            params=params,
         )
 
     async def get_user_info(

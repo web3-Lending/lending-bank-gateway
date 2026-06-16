@@ -139,7 +139,7 @@ async def test_replay_deposit_balance_total_fixture() -> None:
         return_value=httpx.Response(200, json=body)
     )
     data = await _client().get_deposit_balance_total(
-        tenant_id=_TENANT, request_id=_REQ_ID, user_id="U-0001"
+        tenant_id=_TENANT, request_id=_REQ_ID, params={"userId": "U-0001"}
     )
     assert data["userId"] == "U-0001"
     assert len(data["accounts"]) == 1
@@ -153,7 +153,7 @@ async def test_replay_deposit_accounts_fixture() -> None:
     body = _fix("deposit_accounts.json")
     respx.get(f"{_BASE}/api/v1/deposit/accounts").mock(return_value=httpx.Response(200, json=body))
     data = await _client().get_deposit_accounts(
-        tenant_id=_TENANT, request_id=_REQ_ID, user_id="U-0001"
+        tenant_id=_TENANT, request_id=_REQ_ID, params={"userId": "U-0001"}
     )
     assert data["userId"] == "U-0001"
     assert len(data["accounts"]) == 2

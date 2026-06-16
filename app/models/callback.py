@@ -52,8 +52,13 @@ class CallbackOutbox(Base, TenantMixin, TimestampMixin):
     target: Mapped[str] = mapped_column(String(32), nullable=False)  # lifecycle / customers
     # 只写不改：直接修改 dict 不触发 dirty tracking
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    # status 枚举：PENDING / SENDING（已被某 dispatcher 原子 claim，外呼中）/ SENT / FAILED / DEAD
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING")
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     next_retry_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
     dedup_key: Mapped[str | None] = mapped_column(String(160))
+    # claim 时间戳：多副本原子 claim 置 SENDING + locked_at；超时未完成由 reclaim 回 FAILED
+    locked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    # 触发该转发的原始 trace_id（A-m-001），dispatcher 透传给下游，链路不断
+    trace_id: Mapped[str | None] = mapped_column(String(64))

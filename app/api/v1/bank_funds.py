@@ -5,7 +5,7 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 
 from app.api.deps import (
@@ -26,11 +26,24 @@ router = APIRouter(prefix="/api/v1/bank-funds", tags=["bank-funds"])
 # ── Pydantic request schemas ───────────────────────────────────────────────────
 
 
-class BankFundsRequest(BaseModel):
+class CollectRequest(BaseModel):
+    # 归集对齐 wedap 真契约：单用户扁平，顶层 txnAmount + bankAccountName 必填。
+    # extra=allow 薄透传：lending 补 bankAccountName/userId 等原样透传 wedap，gateway 不剪裁。
+    # 金额优先扁平 txnAmount（wedap 形态）；过渡期回退 totalAmount，lending 改扁平后只用 txnAmount。
+    model_config = ConfigDict(extra="allow")
     bizSeqNo: str
-    totalAmount: str
     currencyCode: str
-    userList: list[dict[str, Any]] | None = None
+    txnAmount: str | None = None
+    totalAmount: str | None = None
+
+
+class DistributeRequest(BaseModel):
+    # 分发薄透传：wedap body = 顶层 currencyCode + recipients[].distributeAmount（无 totalAmount）。
+    # recipients 各项的 userId/custAccountNo/bankAccountNo/vaultId 等经 extra=allow 原样透传。
+    model_config = ConfigDict(extra="allow")
+    bizSeqNo: str
+    currencyCode: str
+    recipients: list[dict[str, Any]] | None = None
     """显式 null 视同缺省，契约 C 下 wedap 可选字段缺省=null 语义等价。"""
 
 
@@ -86,20 +99,24 @@ async def _submit(
 
 @router.post("/collect-from-users")
 async def collect_from_users(
-    body: BankFundsRequest,
+    body: CollectRequest,
     request: Request,
     ids: dict[str, str] = Depends(require_headers),
 ) -> dict[str, Any]:
     assert_idempotency_key_matches(request, body.bizSeqNo)
-    amount = parse_amount(body.totalAmount)
     payload = body.model_dump(mode="json", exclude_none=True)
-    validate_detail_consistency(
-        payload,
-        total=amount,
-        currency=body.currencyCode,
-        detail_key="userList",
-        amount_field="amount",
-    )
+    # 金额优先 wedap 扁平 txnAmount，过渡回退 totalAmount；空串/缺失视为缺。
+    # 归集单用户无明细，不做 sum 校验。
+    raw_amount = body.txnAmount or body.totalAmount
+    if not raw_amount:
+        raise HTTPException(
+            400,
+            detail={"code": "GW_400_VALIDATION", "message": "missing txnAmount"},
+        )
+    amount = parse_amount(raw_amount)
+    # txnAmount 在场时 totalAmount 属旧形态噪声字段，不透传 wedap（避免注入伪字段 + 幂等漂移）
+    if body.txnAmount and "totalAmount" in payload:
+        payload.pop("totalAmount")
     return await _submit(
         request,
         ids=ids,
@@ -116,19 +133,30 @@ async def collect_from_users(
 
 @router.post("/distribute-to-users")
 async def distribute_to_users(
-    body: BankFundsRequest,
+    body: DistributeRequest,
     request: Request,
     ids: dict[str, str] = Depends(require_headers),
 ) -> dict[str, Any]:
     assert_idempotency_key_matches(request, body.bizSeqNo)
-    amount = parse_amount(body.totalAmount)
     payload = body.model_dump(mode="json", exclude_none=True)
+    # 分发 wedap 契约无顶层总额：本地账本/幂等金额 = Σ recipients[].distributeAmount。
+    # distributeAmount 缺省/null 一致视为「wedap 自动分配」跳过求和（避免 str(None) 误炸 400）。
+    recipients = body.recipients or []
+    amount = sum(
+        (
+            parse_amount(str(r["distributeAmount"]))
+            for r in recipients
+            if r.get("distributeAmount") is not None
+        ),
+        Decimal("0"),
+    )
+    # total=None：分发无独立顶层总额，validate 仅做「非空 + 币种一致」，不做同义重复的 sum 校验
     validate_detail_consistency(
         payload,
-        total=amount,
+        total=None,
         currency=body.currencyCode,
-        detail_key="userList",
-        amount_field="amount",
+        detail_key="recipients",
+        amount_field="distributeAmount",
     )
     return await _submit(
         request,

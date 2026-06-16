@@ -23,6 +23,47 @@ def test_create_app_initializes_wedap_client() -> None:
     assert isinstance(result.state.wedap, WedapClient)
 
 
+def test_create_app_uses_injected_settings_a_m_002() -> None:
+    """A-M-002：create_app 接受注入的 Settings 并落到 app.state.settings，不依赖全局 lru_cache。"""
+    from app.core.config import Settings
+
+    injected = Settings(env="test", wedap_base_url="http://injected-wedap:9999")
+    app = create_app(injected)
+    assert app.state.settings is injected
+    # 注入的配置真实生效（wedap client 用注入的 base_url）
+    assert app.state.wedap._base == "http://injected-wedap:9999"
+
+
+def test_create_app_default_settings_from_factory() -> None:
+    """不传 settings 时回退到 get_settings() 工厂，app.state.settings 存在。"""
+    from app.core.config import Settings
+
+    app = create_app()
+    assert isinstance(app.state.settings, Settings)
+
+
+def test_create_app_parses_per_service_tokens_a_m_002() -> None:
+    """A-m-002：create_app 解析 GW_S2S_CALLER_TOKENS 启用 per-service 校验（覆盖解析分支）。"""
+    from app.core.config import Settings
+
+    app = create_app(
+        Settings(env="test", s2s_caller_tokens="svc-a:tok-a , svc-b:tok-b , bad-no-colon, :empty")
+    )
+    client = TestClient(app)
+    # s2s 中间件在 handler/DB 之前执行：错误 token → 401
+    r = client.get(
+        "/api/v1/bank-funds/status?bizSeqNo=X",
+        headers={"X-Caller-Service": "svc-a", "X-S2S-Token": "WRONG"},
+    )
+    assert r.status_code == 401
+    # 未登记 caller（含被忽略的畸形条目）→ 401
+    r2 = client.get(
+        "/api/v1/bank-funds/status?bizSeqNo=X",
+        headers={"X-Caller-Service": "bad-no-colon", "X-S2S-Token": "tok-a"},
+    )
+    assert r2.status_code == 401
+
+
 def test_create_app_prod_without_secret_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """GW_ENV=prod 且无 secret → create_app 必须 RuntimeError（fail-fast）。"""
     get_settings.cache_clear()
@@ -136,5 +177,34 @@ def test_lifespan_workers_enabled_tasks_started_and_cancelled(
     # stub 被调用即证明 task 被创建并开始运行
     assert outbox_started
     assert recon_started
+
+    get_settings.cache_clear()
+
+
+def test_lifespan_workers_use_dedicated_pool_a_m_003(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A-M-003：worker 用独立 session_factory（≠ app.state.session_factory），与 API 连接池隔离。"""
+    get_settings.cache_clear()
+    monkeypatch.setenv("GW_WORKERS_ENABLED", "true")
+
+    captured: dict[str, object] = {}
+
+    async def fake_outbox_forever(*args: object, **_kwargs: object) -> None:
+        captured["factory"] = args[0]  # run_forever 第一个位置参数 = session_factory
+        await asyncio.sleep(9999)
+
+    async def fake_recon_forever(*_args: object, **_kwargs: object) -> None:
+        await asyncio.sleep(9999)
+
+    app = create_app()
+    with (
+        patch("app.workers.outbox_dispatcher.run_forever", side_effect=fake_outbox_forever),
+        patch("app.workers.recon_worker.run_forever", side_effect=fake_recon_forever),
+    ):
+        with TestClient(app):
+            pass
+
+    assert "factory" in captured
+    # worker 用专用 factory，与 API 的 app.state.session_factory 不是同一个
+    assert captured["factory"] is not app.state.session_factory
 
     get_settings.cache_clear()

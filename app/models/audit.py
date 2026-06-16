@@ -35,3 +35,19 @@ class AuditLog(Base, TenantMixin, TimestampMixin):
     payload: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     prev_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     row_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class AuditChainHead(Base):
+    """per-tenant 审计链尾锚点（A-m-003 并发串行化）。
+
+    write_audit 先幂等确保该 tenant 锚点行存在，再按主键 `FOR UPDATE` 精确锁定该行
+    （主键精确锁不产生间隙锁 → 无 1213 死锁），读 last_row_hash 作为 prev，写 audit_log 后
+    回写 last_row_hash。锁随调用方事务提交释放，per-tenant 串行化，杜绝链分叉。
+
+    注意：本表会被 UPDATE（与 audit_log append-only 不同），故不挂 append-only 触发器。
+    """
+
+    __tablename__ = "audit_chain_head"
+
+    tenant_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    last_row_hash: Mapped[str] = mapped_column(String(64), nullable=False)

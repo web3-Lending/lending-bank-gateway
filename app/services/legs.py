@@ -37,6 +37,129 @@ _HARD_TERMINAL_LEG_STATUSES: frozenset[str] = frozenset(
 _ALLOWED_FROM_SUCCESS: frozenset[str] = frozenset({LegStatus.SUCCESS, LegStatus.REVERSED})
 
 
+async def apply_legs_in_session(
+    session: AsyncSession,
+    *,
+    tenant_id: str,
+    biz_seq_no: str,
+    steps: list[dict[str, Any]],
+) -> None:
+    """在**调用方事务内** upsert leg（external_ref/金额不可变，status 可推进）→ 聚合父单。
+
+    steps 由调用方在**事务外**预取（外呼 get_composite_steps），本函数只做 DB 写，故可与
+    outbox enqueue 等其它写操作纳入同一事务原子提交（A-C-002）。
+    upsert key: (tenant, biz_seq, step_seq)。
+
+    并发安全：order 行和 legs 行均加 FOR UPDATE 行锁，串行化并发 sync。SQLite 忽略该子句。
+
+    失败语义：
+    - order 不存在（未知 tenant/biz_seq_no、乱序回调）→ 抛 LegsSyncIncomplete，调用方据此中断
+      后续 enqueue，inbox 留 RECEIVED 待重放补偿。
+    - 聚合 ValueError / IllegalTransition → 同上，抛 LegsSyncIncomplete。
+    """
+    # FOR UPDATE：并发 sync 串行化，防两个 goroutine 各自聚合写入冲突
+    order = (
+        await session.execute(
+            select(BankTxnOrder)
+            .where(
+                BankTxnOrder.tenant_id == tenant_id,
+                BankTxnOrder.biz_seq_no == biz_seq_no,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if order is None:
+        raise LegsSyncIncomplete(f"unknown order {tenant_id}/{biz_seq_no}")
+    # FOR UPDATE：锁定所有关联 leg 行，防并发 upsert 互相覆盖
+    existing = {
+        leg.step_seq: leg
+        for leg in (
+            await session.execute(
+                select(BankTxnLeg)
+                .where(
+                    BankTxnLeg.tenant_id == tenant_id,
+                    BankTxnLeg.biz_seq_no == biz_seq_no,
+                )
+                .with_for_update()
+            )
+        ).scalars()
+    }
+    for s in steps:
+        seq = int(s["stepSeq"])
+        if seq in existing:
+            leg = existing[seq]
+            new_status = str(s["status"])
+            # ref 漂移告警：external_ref 不可变，不同时只告警不修改
+            if str(s["sysRefNo"]) != leg.external_ref:
+                logger.warning(
+                    "external_ref drift: seq=%s old=%s new=%s",
+                    seq,
+                    leg.external_ref,
+                    s["sysRefNo"],
+                )
+            # 终态防倒退：完全终态不可改；SUCCESS 只允许向 REVERSED 推进
+            is_terminal_overwrite = (
+                leg.status in _HARD_TERMINAL_LEG_STATUSES and new_status != leg.status
+            ) or (leg.status == LegStatus.SUCCESS and new_status not in _ALLOWED_FROM_SUCCESS)
+            if is_terminal_overwrite:
+                logger.warning(
+                    "terminal leg status overwrite rejected: seq=%s status=%s",
+                    seq,
+                    leg.status,
+                )
+            else:
+                leg.status = new_status
+        else:
+            session.add(
+                BankTxnLeg(
+                    tenant_id=tenant_id,
+                    order_id=order.id,
+                    biz_seq_no=biz_seq_no,
+                    external_system="WEDAP_BANK",
+                    external_ref=str(s["sysRefNo"]),
+                    step_type=str(s["stepType"]),
+                    step_seq=seq,
+                    amount=Decimal(str(s["amount"])),
+                    currency=str(s.get("currencyCode", "USD")),
+                    payer_account=s.get("payerAccount"),
+                    payee_account=s.get("payeeAccount"),
+                    status=str(s["status"]),
+                    txn_date=s.get("txnDate"),
+                )
+            )
+    await session.flush()
+    all_legs = (
+        (
+            await session.execute(
+                select(BankTxnLeg).where(
+                    BankTxnLeg.tenant_id == tenant_id,
+                    BankTxnLeg.biz_seq_no == biz_seq_no,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not all_legs:
+        return
+    try:
+        new_status = aggregate_order_status(
+            [(LegStatus(leg.status), str(leg.amount)) for leg in all_legs]
+        )
+        if new_status != OrderStatus(order.status):
+            assert_transition(OrderStatus(order.status), new_status)
+            order.status = new_status
+    except (ValueError, IllegalTransition) as exc:
+        logger.exception(
+            "sync_legs aggregate/transition rejected %s/%s",
+            tenant_id,
+            biz_seq_no,
+        )
+        raise LegsSyncIncomplete(
+            f"sync_legs aggregate/transition failed for {tenant_id}/{biz_seq_no}"
+        ) from exc
+
+
 async def sync_legs_for(
     factory: async_sessionmaker[AsyncSession],
     *,
@@ -44,124 +167,10 @@ async def sync_legs_for(
     tenant_id: str,
     biz_seq_no: str,
 ) -> None:
-    """拉 steps → upsert leg（external_ref/金额不可变，status 可推进）→ 聚合父单。
-
-    upsert key: (tenant, biz_seq, step_seq)。
-
-    并发安全：order 行和 legs 行均加 FOR UPDATE 行锁（with_for_update），串行化并发
-    sync 调用，防止两次并发同步各自聚合后写入不一致状态。SQLite 忽略该子句，单测不受影响。
-
-    失败语义：
-    - order 不存在（未知 tenant/biz_seq_no、乱序回调）→ 抛出 LegsSyncIncomplete，
-      _after_ingest 中断不 enqueue outbox，inbox 行留 RECEIVED 待重放或 admin 重放补偿。
-    - 聚合 ValueError / IllegalTransition → 同上，抛 LegsSyncIncomplete。
-
-    注意：sync_legs_for 与 inbox status 推进为两事务（至少一次语义），崩溃窗口由重放再
-    驱动收敛。
-    """
+    """拉 steps（事务外外呼）→ 单事务 apply_legs_in_session。独立调用入口，保持原契约。"""
     steps = await wedap.get_composite_steps(tenant_id=tenant_id, biz_seq_no=biz_seq_no)
     async with factory() as session:
         async with session.begin():
-            # FOR UPDATE：并发 sync 串行化，防两个 goroutine 各自聚合写入冲突
-            order = (
-                await session.execute(
-                    select(BankTxnOrder)
-                    .where(
-                        BankTxnOrder.tenant_id == tenant_id,
-                        BankTxnOrder.biz_seq_no == biz_seq_no,
-                    )
-                    .with_for_update()
-                )
-            ).scalar_one_or_none()
-            if order is None:
-                raise LegsSyncIncomplete(f"unknown order {tenant_id}/{biz_seq_no}")
-            # FOR UPDATE：锁定所有关联 leg 行，防并发 upsert 互相覆盖
-            existing = {
-                leg.step_seq: leg
-                for leg in (
-                    await session.execute(
-                        select(BankTxnLeg)
-                        .where(
-                            BankTxnLeg.tenant_id == tenant_id,
-                            BankTxnLeg.biz_seq_no == biz_seq_no,
-                        )
-                        .with_for_update()
-                    )
-                ).scalars()
-            }
-            for s in steps:
-                seq = int(s["stepSeq"])
-                if seq in existing:
-                    leg = existing[seq]
-                    new_status = str(s["status"])
-                    # ref 漂移告警：external_ref 不可变，不同时只告警不修改
-                    if str(s["sysRefNo"]) != leg.external_ref:
-                        logger.warning(
-                            "external_ref drift: seq=%s old=%s new=%s",
-                            seq,
-                            leg.external_ref,
-                            s["sysRefNo"],
-                        )
-                    # 终态防倒退：完全终态不可改；SUCCESS 只允许向 REVERSED 推进
-                    is_terminal_overwrite = (
-                        leg.status in _HARD_TERMINAL_LEG_STATUSES and new_status != leg.status
-                    ) or (
-                        leg.status == LegStatus.SUCCESS and new_status not in _ALLOWED_FROM_SUCCESS
-                    )
-                    if is_terminal_overwrite:
-                        logger.warning(
-                            "terminal leg status overwrite rejected: seq=%s status=%s",
-                            seq,
-                            leg.status,
-                        )
-                    else:
-                        leg.status = new_status
-                else:
-                    session.add(
-                        BankTxnLeg(
-                            tenant_id=tenant_id,
-                            order_id=order.id,
-                            biz_seq_no=biz_seq_no,
-                            external_system="WEDAP_BANK",
-                            external_ref=str(s["sysRefNo"]),
-                            step_type=str(s["stepType"]),
-                            step_seq=seq,
-                            amount=Decimal(str(s["amount"])),
-                            currency=str(s.get("currencyCode", "USD")),
-                            payer_account=s.get("payerAccount"),
-                            payee_account=s.get("payeeAccount"),
-                            status=str(s["status"]),
-                            txn_date=s.get("txnDate"),
-                        )
-                    )
-            await session.flush()
-            all_legs = (
-                (
-                    await session.execute(
-                        select(BankTxnLeg).where(
-                            BankTxnLeg.tenant_id == tenant_id,
-                            BankTxnLeg.biz_seq_no == biz_seq_no,
-                        )
-                    )
-                )
-                .scalars()
-                .all()
+            await apply_legs_in_session(
+                session, tenant_id=tenant_id, biz_seq_no=biz_seq_no, steps=steps
             )
-            if not all_legs:
-                return
-            try:
-                new_status = aggregate_order_status(
-                    [(LegStatus(leg.status), str(leg.amount)) for leg in all_legs]
-                )
-                if new_status != OrderStatus(order.status):
-                    assert_transition(OrderStatus(order.status), new_status)
-                    order.status = new_status
-            except (ValueError, IllegalTransition) as exc:
-                logger.exception(
-                    "sync_legs aggregate/transition rejected %s/%s",
-                    tenant_id,
-                    biz_seq_no,
-                )
-                raise LegsSyncIncomplete(
-                    f"sync_legs aggregate/transition failed for {tenant_id}/{biz_seq_no}"
-                ) from exc

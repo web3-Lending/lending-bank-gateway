@@ -435,7 +435,8 @@ def test_replay_received_row_after_ingest_fails_again(client: TestClient) -> Non
 def test_after_ingest_enqueues_outbox_row(client: TestClient) -> None:
     """callback 接收后 _after_ingest 真实执行 → CallbackOutbox 行落库，target=lifecycle。
 
-    mock sync_legs_for（需要 wedap），让 enqueue_forward 真实写库。
+    A-C-002 后：_after_ingest 先外呼预取 steps 再单事务 apply_legs + enqueue。
+    这里 mock wedap.get_composite_steps + apply_legs_in_session，让 enqueue_forward 真实写库。
     """
     from unittest.mock import patch
 
@@ -450,7 +451,8 @@ def test_after_ingest_enqueues_outbox_row(client: TestClient) -> None:
             )
             return list(result.fetchall())
 
-    with patch("app.services.legs.sync_legs_for", new_callable=AsyncMock):
+    client.app.state.wedap = AsyncMock()  # type: ignore[union-attr]  # get_composite_steps no-op
+    with patch("app.services.legs.apply_legs_in_session", new_callable=AsyncMock):
         r = client.post("/api/v1/callbacks/wedap/transactions", json=BODY, headers=HEADERS)
 
     assert r.status_code == 200
@@ -459,3 +461,128 @@ def test_after_ingest_enqueues_outbox_row(client: TestClient) -> None:
     rows = asyncio.run(_query_outbox(client.app.state.engine))  # type: ignore[union-attr]
     assert len(rows) == 1
     assert rows[0].target == "lifecycle"  # type: ignore[union-attr]
+
+
+def test_after_ingest_atomic_enqueue_failure_rolls_back_legs(client: TestClient) -> None:
+    """A-C-002 原子性：enqueue 失败 → 同事务回滚，leg 不落库、inbox 留 RECEIVED、outbox 0 行。
+
+    旧实现 leg 同步与 enqueue 分两事务，leg 会先独立提交；改单事务后两者原子，enqueue 炸则
+    leg 一并回滚。这正是「leg 已落库但 outbox 未入队」崩溃窗口被消除的体现。
+    """
+    from decimal import Decimal
+    from unittest.mock import patch
+
+    from sqlalchemy import func, select
+
+    from app.models.callback import CallbackInbox, CallbackOutbox
+    from app.models.txn import BankTxnLeg, BankTxnOrder
+
+    biz = "DSB-20260611-0009000000001"
+    body = {"bizSeqNo": biz, "type": "LOAN_DISBURSEMENT", "txnStatus": "SUCCESS"}
+    headers = {**HEADERS, "X-Request-Id": "cb-atomic-001"}
+
+    async def _seed() -> None:
+        f = client.app.state.session_factory  # type: ignore[union-attr]
+        async with f() as s:
+            async with s.begin():
+                s.add(
+                    BankTxnOrder(
+                        tenant_id="OCBC",
+                        biz_seq_no=biz,
+                        business_action="DISBURSE",
+                        biz_type="DSB",
+                        amount=Decimal("100.0000"),
+                        currency="USD",
+                        caller_service="lifecycle",
+                        status="SUBMITTED",
+                    )
+                )
+
+    asyncio.run(_seed())
+
+    # wedap 返回一个合法 step（apply_legs 会想 upsert 一条 leg）；enqueue_forward 强制抛错
+    wedap = AsyncMock()
+    wedap.get_composite_steps.return_value = [
+        {
+            "stepSeq": 1,
+            "sysRefNo": "REF-ATOMIC-1",
+            "stepType": "DISBURSEMENT_COLLECTION",
+            "amount": "100.0000",
+            "currencyCode": "USD",
+            "status": "SUCCESS",
+        }
+    ]
+    client.app.state.wedap = wedap  # type: ignore[union-attr]
+
+    async def _count(engine: Any, model: Any) -> int:
+        async with engine.connect() as conn:
+            return int((await conn.execute(select(func.count()).select_from(model))).scalar_one())
+
+    with patch(
+        "app.main.enqueue_forward",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("enqueue boom"),
+    ):
+        r = client.post("/api/v1/callbacks/wedap/transactions", json=body, headers=headers)
+
+    assert r.status_code == 200  # after_ingest 失败补偿仍 200
+
+    engine = client.app.state.engine  # type: ignore[union-attr]
+    assert asyncio.run(_count(engine, BankTxnLeg)) == 0  # leg 随同事务回滚
+    assert asyncio.run(_count(engine, CallbackOutbox)) == 0  # outbox 无行
+
+    async def _inbox_status() -> str:
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    select(CallbackInbox.status).where(
+                        CallbackInbox.tenant_id == "OCBC",
+                        CallbackInbox.request_id == "cb-atomic-001",
+                    )
+                )
+            ).scalar_one()
+            return str(row)
+
+    assert asyncio.run(_inbox_status()) == "RECEIVED"  # 未推进 PROCESSED，待重放
+
+
+# ---------------------------------------------------------------------------
+# A-C-001 修复：RECEIVED 行重放严格幂等——用首次落库 payload 再驱动，忽略漂移的本次 body
+# ---------------------------------------------------------------------------
+
+
+def test_replay_with_drifted_body_redrives_with_stored_payload(client: TestClient) -> None:
+    """同 request_id 重发但 body 漂移：after_ingest 必须用首次落库的 payload 再驱动，而非本次 body。
+
+    场景：上游复用 X-Request-Id 但发送了不同 body（金额/字段被改写）。inbox 行是权威记录，
+    重放再驱动必须从既有 payload 收敛，否则 gateway 内部 leg/父单状态会被非首份 body 污染，
+    与被 fwd-{request_id} 去重锁住的下游转发内容分叉。
+    """
+    # 第一次：after_ingest 失败，行留 RECEIVED（payload=首份 BODY）
+    failing_spy = AsyncMock(side_effect=RuntimeError("first attempt failed"))
+    client.app.state.callback_after_ingest = failing_spy  # type: ignore[union-attr]
+    r1 = client.post("/api/v1/callbacks/wedap/transactions", json=BODY, headers=HEADERS)
+    assert r1.status_code == 200
+
+    # 第二次（重放）：同 request_id 但 body 漂移（金额与 txnId 被改写）；after_ingest 成功
+    drifted_body = {**BODY, "amount": "999.9999", "txnId": "TXN-EVIL-0002"}
+    assert drifted_body != BODY
+    success_spy = AsyncMock()
+    client.app.state.callback_after_ingest = success_spy  # type: ignore[union-attr]
+    r2 = client.post("/api/v1/callbacks/wedap/transactions", json=drifted_body, headers=HEADERS)
+    assert r2.status_code == 200
+    assert r2.json()["data"]["deduplicated"] is True
+
+    # 关键断言：after_ingest 用首次落库 payload（BODY）驱动，而非漂移的本次 body
+    assert success_spy.await_count == 1
+    assert success_spy.await_args is not None
+    assert success_spy.await_args.kwargs["body"] == BODY
+    assert success_spy.await_args.kwargs["body"] != drifted_body
+
+    # 行推进 PROCESSED；落库 payload 仍是首份 BODY（重放不覆盖）
+    row = asyncio.run(
+        _query_inbox_row(client.app.state.engine, "OCBC", "cb-req-001")  # type: ignore[union-attr]
+    )
+    assert row is not None
+    assert row.status == "PROCESSED"  # type: ignore[union-attr]
+    assert row.payload == BODY  # type: ignore[union-attr]

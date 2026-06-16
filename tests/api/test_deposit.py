@@ -144,6 +144,35 @@ def test_accounts_passthrough_audit_no_snapshot(client: TestClient) -> None:
     assert len(snapshots) == 0
 
 
+# ── 2b. balances/accounts 全透传 query params（含 wedap 必填 bizSeqNo/channelId）──
+
+
+def test_balance_total_forwards_all_query_params(client: TestClient) -> None:
+    """契约 C 薄透传：balances/total 把 bizSeqNo/channelId 等全部 query params 转发 wedap。"""
+    r = client.get(
+        "/api/v1/deposit/balances/total",
+        params={"userId": "U1", "bizSeqNo": "BAL-001", "channelId": "LEN"},
+        headers=HEADERS,
+    )
+    assert r.status_code == 200
+    params = client.app.state.wedap.get_deposit_balance_total.call_args.kwargs["params"]  # type: ignore[union-attr]
+    assert params["userId"] == "U1"
+    assert params["bizSeqNo"] == "BAL-001"
+    assert params["channelId"] == "LEN"
+
+
+def test_accounts_forwards_all_query_params(client: TestClient) -> None:
+    """accounts 同样全透传 bizSeqNo/channelId（修复前只转 userId）。"""
+    r = client.get(
+        "/api/v1/deposit/accounts",
+        params={"userId": "U1", "bizSeqNo": "ACC-001", "channelId": "LEN"},
+        headers=HEADERS,
+    )
+    assert r.status_code == 200
+    params = client.app.state.wedap.get_deposit_accounts.call_args.kwargs["params"]  # type: ignore[union-attr]
+    assert params["bizSeqNo"] == "ACC-001" and params["channelId"] == "LEN"
+
+
 # ── 3. users/info 任意 query 参数透传 ──
 
 

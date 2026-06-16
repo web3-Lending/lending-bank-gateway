@@ -216,20 +216,24 @@ async def parse_and_land(
         )
 
     # ── 4. 单事务：批量 insert + task PARSED + supersede 低版本 ───────────
-    async with factory() as session:
-        async with session.begin():
-            # 4-pre. 事务内终检：with_for_update 重读，仅 DOWNLOADED 可继续
-            t_check = await session.get(ReconResultTask, task_id, with_for_update=True)
-            if t_check is None or t_check.status not in ("DOWNLOADED",):
-                logger.warning(
-                    "parse_and_land txn-guard: task_id=%s status=%s; skipping",
-                    task_id,
-                    t_check.status if t_check is not None else "GONE",
-                )
-                return
+    # 脏金额（DataQualityError）置 FAILED 必须在主事务回滚、FOR UPDATE 行锁释放之后再做：
+    # 主事务用 with_for_update 锁住 task 行，若在主事务仍开着时用另一连接 UPDATE 同一 task 行
+    # 置 FAILED，两连接互锁 → MySQL 下 innodb 锁等待超时（自死锁）。SQLite 忽略 FOR UPDATE
+    # 故单测发现不了。因此把 FAILED 留痕移到 except（主事务已退出、锁已释放）后执行。
+    try:
+        async with factory() as session:
+            async with session.begin():
+                # 4-pre. 事务内终检：with_for_update 重读，仅 DOWNLOADED 可继续
+                t_check = await session.get(ReconResultTask, task_id, with_for_update=True)
+                if t_check is None or t_check.status not in ("DOWNLOADED",):
+                    logger.warning(
+                        "parse_and_land txn-guard: task_id=%s status=%s; skipping",
+                        task_id,
+                        t_check.status if t_check is not None else "GONE",
+                    )
+                    return
 
-            # 4a. 差异明细
-            try:
+                # 4a. 差异明细
                 for _row_idx, row in enumerate(diff_rows):
                     (
                         diff_type,
@@ -313,35 +317,33 @@ async def parse_and_land(
                             line_no=_int(line_no),
                         )
                     )
-            except DataQualityError as dqe:
-                # 脏金额不静默：独立事务置 FAILED + data_error 留痕，主事务回滚（三表 0 行）
-                dq_payload: dict[str, Any] = {
-                    "data_error": f"column={dqe.column!r} value={dqe.value!r}"
-                }
-                async with factory() as _sess:
-                    async with _sess.begin():
-                        _t = await _sess.get(ReconResultTask, task_id)
-                        if _t is not None:  # pragma: no branch
-                            _t.status = "FAILED"
-                            _t.column_check = dq_payload
-                raise
 
-            # 4d. 更新 task 为 PARSED
-            t_check.status = "PARSED"
-            t_check.parser_version = PARSER_VERSION
-            t_check.schema_version = SCHEMA_VERSION
-            t_check.column_check = column_check
-            t_check.archive_path = xlsx_path
+                # 4d. 更新 task 为 PARSED
+                t_check.status = "PARSED"
+                t_check.parser_version = PARSER_VERSION
+                t_check.schema_version = SCHEMA_VERSION
+                t_check.column_check = column_check
+                t_check.archive_path = xlsx_path
 
-            # 4e. 同 tenant_id + task_no 低版本（status != SUPERSEDED）→ SUPERSEDED
-            # P1-1 修复：加 tenant_id 条件，防止跨租户污染
-            await session.execute(
-                update(ReconResultTask)
-                .where(
-                    ReconResultTask.tenant_id == tenant_id,
-                    ReconResultTask.task_no == task_no,
-                    ReconResultTask.version < current_version,
-                    ReconResultTask.status != "SUPERSEDED",
+                # 4e. 同 tenant_id + task_no 低版本（status != SUPERSEDED）→ SUPERSEDED
+                # P1-1 修复：加 tenant_id 条件，防止跨租户污染
+                await session.execute(
+                    update(ReconResultTask)
+                    .where(
+                        ReconResultTask.tenant_id == tenant_id,
+                        ReconResultTask.task_no == task_no,
+                        ReconResultTask.version < current_version,
+                        ReconResultTask.status != "SUPERSEDED",
+                    )
+                    .values(status="SUPERSEDED")
                 )
-                .values(status="SUPERSEDED")
-            )
+    except DataQualityError as dqe:
+        # 脏金额不静默：主事务已回滚（三表 0 行、FOR UPDATE 锁已释放），独立事务置 FAILED 留痕
+        dq_payload: dict[str, Any] = {"data_error": f"column={dqe.column!r} value={dqe.value!r}"}
+        async with factory() as _sess:
+            async with _sess.begin():
+                _t = await _sess.get(ReconResultTask, task_id)
+                if _t is not None:  # pragma: no branch
+                    _t.status = "FAILED"
+                    _t.column_check = dq_payload
+        raise

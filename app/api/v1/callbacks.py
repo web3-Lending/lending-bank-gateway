@@ -81,7 +81,7 @@ async def _set_inbox_status(
 
 
 async def _noop_after_ingest(
-    request: Request, *, tenant_id: str, body: dict[str, Any], request_id: str
+    request: Request, *, tenant_id: str, body: dict[str, Any], request_id: str, trace_id: str
 ) -> None:
     """T16/T17 接线点：leg 同步 + outbox 转发。本任务为空实现。"""
 
@@ -133,6 +133,7 @@ async def wedap_transaction_callback(request: Request, body: dict[str, Any]) -> 
                 tenant_id=hdr["tenant_id"],
                 body=body,
                 request_id=hdr["request_id"],
+                trace_id=hdr["trace_id"],
             )
             # after_ingest 成功 → 推进 status=PROCESSED
             await _set_inbox_status(
@@ -158,13 +159,26 @@ async def wedap_transaction_callback(request: Request, body: dict[str, Any]) -> 
         existing = await _get_inbox_row(factory, hdr["tenant_id"], hdr["request_id"])
 
         if existing is not None and existing.status == "RECEIVED":
-            # 上次 after_ingest 未完成 → 重放再驱动
+            # 上次 after_ingest 未完成 → 重放再驱动。
+            # 严格幂等：用首次落库的 payload 驱动，而非本次请求 body。
+            # 同一 request_id 重发若 body 漂移（上游复用 request_id 发不同交易/字段被改写），
+            # 用本次 body 再驱动会让 gateway 内部 leg/父单状态偏离首份已落库内容，
+            # 而 outbox 转发仍被 fwd-{request_id} 去重锁在首份，造成内部与下游状态分叉。
+            # inbox 行即权威记录，重放必须从既有 payload 收敛。
+            if body != existing.payload:
+                logger.warning(
+                    "inbox replay body drift ignored (using stored payload) "
+                    "tenant=%s request_id=%s",
+                    hdr["tenant_id"],
+                    hdr["request_id"],
+                )
             try:
                 await after_ingest(
                     request,
                     tenant_id=hdr["tenant_id"],
-                    body=body,
+                    body=existing.payload,
                     request_id=hdr["request_id"],
+                    trace_id=hdr["trace_id"],
                 )
                 await _set_inbox_status(
                     factory, hdr["tenant_id"], hdr["request_id"], status="PROCESSED", error=None

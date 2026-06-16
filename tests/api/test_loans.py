@@ -210,3 +210,82 @@ def test_disbursement_explicit_empty_lenders_400(client: TestClient) -> None:
     assert r.status_code == 400
     assert r.json()["error"]["code"] == "GW_400_VALIDATION"
     assert "empty lenders" in r.json()["error"]["message"]
+
+
+# ── 还款 lenders[].txnAmount 校验 + extra=allow 透传修复验证 ──────────────────────
+
+
+def test_repayment_lenders_txnamount_sum_ok(client: TestClient) -> None:
+    """还款 lenders[].txnAmount 之和 == repaymentInfo.txnAmount → 200（lending 按占比拆分）。"""
+    body = {
+        "bizSeqNo": "RPY-20260611-0002000000001",
+        "repaymentInfo": {"txnAmount": "100.0000", "currencyCode": "USD"},
+        "lenders": [
+            {"userId": "L1", "txnAmount": "60.0000"},
+            {"userId": "L2", "txnAmount": "40.0000"},
+        ],
+    }
+    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-rpy-sum"}
+    r = client.post("/api/v1/loans/p2p-repayments", json=body, headers=h)
+    assert r.status_code == 200, r.json()
+
+
+def test_repayment_lenders_txnamount_mismatch_400(client: TestClient) -> None:
+    """lenders[].txnAmount 之和 != repaymentInfo.txnAmount → 400（原 shareAmount 会漏判此错）。"""
+    body = {
+        "bizSeqNo": "RPY-20260611-0002000000002",
+        "repaymentInfo": {"txnAmount": "100.0000", "currencyCode": "USD"},
+        "lenders": [
+            {"userId": "L1", "txnAmount": "60.0000"},
+            {"userId": "L2", "txnAmount": "30.0000"},
+        ],
+    }
+    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-rpy-mis"}
+    r = client.post("/api/v1/loans/p2p-repayments", json=body, headers=h)
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "GW_400_VALIDATION"
+
+
+def test_repayment_extra_fields_passthrough(client: TestClient) -> None:
+    """extra=allow：repaymentInfo 嵌套必填字段 + 顶层 lenders[] 全透传（修复前被静默丢致拒单）。"""
+    body = {
+        "bizSeqNo": "RPY-20260611-0002000000003",
+        "repaymentInfo": {
+            "txnAmount": "100.0000",
+            "currencyCode": "USD",
+            "principalAmount": "90.0000",
+            "interestAmount": "10.0000",
+            "userId": "B1",
+            "userName": "borrower",
+            "repaymentType": "NORMAL",
+        },
+        "lenders": [{"userId": "L1", "txnAmount": "100.0000"}],
+    }
+    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-rpy-pt"}
+    r = client.post("/api/v1/loans/p2p-repayments", json=body, headers=h)
+    assert r.status_code == 200, r.json()
+    call_str = str(client.app.state.wedap.submit_repayment.call_args)  # type: ignore[union-attr]
+    for f in ("principalAmount", "interestAmount", "repaymentType", "lenders"):
+        assert f in call_str, f"wedap payload 应含 {f}，实际：{call_str}"
+
+
+def test_disbursement_extra_fields_passthrough(client: TestClient) -> None:
+    """extra=allow：disbursementInfo.postscript + 顶层 feeDeductions 透传 wedap（修复前被丢）。"""
+    body = {
+        "bizSeqNo": "DSB-20260611-0002000000009",
+        "channelId": "LEN",
+        "transType": "DISBURSEMENT",
+        "disbursementInfo": {
+            "txnAmount": "100.0000",
+            "currencyCode": "USD",
+            "userId": "U1",
+            "userName": "u",
+            "postscript": "loan-disb-memo",
+        },
+        "feeDeductions": [{"feeType": "PLATFORM", "amount": "1.0000"}],
+    }
+    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-disb-pt"}
+    r = client.post("/api/v1/loans/p2p-disbursements", json=body, headers=h)
+    assert r.status_code == 200, r.json()
+    call_str = str(client.app.state.wedap.submit_disbursement.call_args)  # type: ignore[union-attr]
+    assert "postscript" in call_str and "feeDeductions" in call_str
