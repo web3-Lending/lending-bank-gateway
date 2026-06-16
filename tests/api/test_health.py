@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from typing import Any
+from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -93,3 +94,70 @@ def test_readyz_db_error_returns_503() -> None:
     body = r.json()
     assert body["success"] is False
     assert body["error"]["code"] == "GW_503_READYZ"
+
+
+def test_build_info_returns_build_time_and_git_sha(app: FastAPI, tmp_path: Any) -> None:
+    """Both stamp files present → /build-info echoes them in the success envelope."""
+    from app.api.v1 import health as health_mod
+
+    bt = tmp_path / "build_time.txt"
+    bt.write_text("2026-05-20T06:14:08Z\n", encoding="utf-8")
+    sha = tmp_path / "git_sha.txt"
+    sha.write_text("d084d91\n", encoding="utf-8")
+    with (
+        patch.object(health_mod, "BUILD_TIME_FILE", bt),
+        patch.object(health_mod, "GIT_SHA_FILE", sha),
+    ):
+        client = TestClient(app)
+        r = client.get("/build-info")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["success"] is True
+    assert body["data"] == {"build_time": "2026-05-20T06:14:08Z", "git_sha": "d084d91"}
+    assert body["trace_id"]
+
+
+def test_build_info_git_sha_dirty_marker(app: FastAPI, tmp_path: Any) -> None:
+    """A dirty working-tree build stamps ``<sha>-dirty``; echoed verbatim so
+    deploy verify can tell an uncommitted build from a clean one."""
+    from app.api.v1 import health as health_mod
+
+    sha = tmp_path / "git_sha.txt"
+    sha.write_text("d084d91-dirty\n", encoding="utf-8")
+    with patch.object(health_mod, "GIT_SHA_FILE", sha):
+        client = TestClient(app)
+        r = client.get("/build-info")
+    assert r.json()["data"]["git_sha"] == "d084d91-dirty"
+
+
+def test_build_info_null_when_files_absent(app: FastAPI, tmp_path: Any) -> None:
+    """Missing stamp files (local dev outside Docker) → both null."""
+    from app.api.v1 import health as health_mod
+
+    missing_bt = tmp_path / "no_build_time.txt"
+    missing_sha = tmp_path / "no_git_sha.txt"
+    with (
+        patch.object(health_mod, "BUILD_TIME_FILE", missing_bt),
+        patch.object(health_mod, "GIT_SHA_FILE", missing_sha),
+    ):
+        client = TestClient(app)
+        r = client.get("/build-info")
+    assert r.status_code == 200
+    assert r.json()["data"] == {"build_time": None, "git_sha": None}
+
+
+def test_build_info_null_when_files_empty(app: FastAPI, tmp_path: Any) -> None:
+    """Empty/whitespace stamp files → null, not empty string."""
+    from app.api.v1 import health as health_mod
+
+    bt = tmp_path / "build_time.txt"
+    bt.write_text("  \n", encoding="utf-8")
+    sha = tmp_path / "git_sha.txt"
+    sha.write_text("   \n", encoding="utf-8")
+    with (
+        patch.object(health_mod, "BUILD_TIME_FILE", bt),
+        patch.object(health_mod, "GIT_SHA_FILE", sha),
+    ):
+        client = TestClient(app)
+        r = client.get("/build-info")
+    assert r.json()["data"] == {"build_time": None, "git_sha": None}
