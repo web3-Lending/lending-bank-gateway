@@ -81,7 +81,7 @@ async def _set_inbox_status(
 
 
 async def _noop_after_ingest(
-    request: Request, *, tenant_id: str, body: dict[str, Any], request_id: str
+    request: Request, *, tenant_id: str, body: dict[str, Any], request_id: str, trace_id: str
 ) -> None:
     """T16/T17 接线点：leg 同步 + outbox 转发。本任务为空实现。"""
 
@@ -133,6 +133,7 @@ async def wedap_transaction_callback(request: Request, body: dict[str, Any]) -> 
                 tenant_id=hdr["tenant_id"],
                 body=body,
                 request_id=hdr["request_id"],
+                trace_id=hdr["trace_id"],
             )
             # after_ingest 成功 → 推进 status=PROCESSED
             await _set_inbox_status(
@@ -177,6 +178,7 @@ async def wedap_transaction_callback(request: Request, body: dict[str, Any]) -> 
                     tenant_id=hdr["tenant_id"],
                     body=existing.payload,
                     request_id=hdr["request_id"],
+                    trace_id=hdr["trace_id"],
                 )
                 await _set_inbox_status(
                     factory, hdr["tenant_id"], hdr["request_id"], status="PROCESSED", error=None

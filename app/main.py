@@ -91,7 +91,7 @@ async def _generic_exception_handler(request: Request, exc: Exception) -> JSONRe
 
 
 async def _after_ingest(
-    request: Request, *, tenant_id: str, body: dict[str, Any], request_id: str
+    request: Request, *, tenant_id: str, body: dict[str, Any], request_id: str, trace_id: str
 ) -> None:
     """leg 同步/父单聚合 + outbox 转发入队 —— **同一事务原子提交**（A-C-002）。
 
@@ -119,6 +119,7 @@ async def _after_ingest(
                 target="lifecycle",
                 payload=body,
                 dedup_key=f"fwd-{request_id}",
+                trace_id=trace_id,
             )
 
 

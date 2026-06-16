@@ -464,7 +464,7 @@ def test_after_ingest_enqueues_outbox_row(client: TestClient) -> None:
 
 
 def test_after_ingest_atomic_enqueue_failure_rolls_back_legs(client: TestClient) -> None:
-    """A-C-002 原子性：enqueue_forward 失败 → 同事务回滚，leg 不落库、inbox 留 RECEIVED、outbox 0 行。
+    """A-C-002 原子性：enqueue 失败 → 同事务回滚，leg 不落库、inbox 留 RECEIVED、outbox 0 行。
 
     旧实现 leg 同步与 enqueue 分两事务，leg 会先独立提交；改单事务后两者原子，enqueue 炸则
     leg 一并回滚。这正是「leg 已落库但 outbox 未入队」崩溃窗口被消除的体现。

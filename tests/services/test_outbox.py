@@ -256,3 +256,88 @@ async def test_none_dedup_key_no_dedup_check(factory) -> None:
                 dedup_key=None,
             )
     assert r1.id != r2.id
+
+
+# ---------------------------------------------------------------------------
+# A-M-001 / A-m-001：原子 claim 回收 + trace_id 透传
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_dispatch_forwards_original_trace_id(factory) -> None:
+    """A-m-001：enqueue 带 trace_id → dispatch 转发 X-Trace-Id=原始 trace_id（非 outbox-{id}）。"""
+    route = respx.post("http://lifecycle/cb").mock(return_value=httpx.Response(200))
+    async with factory() as s:
+        async with s.begin():
+            await enqueue_forward(
+                s,
+                tenant_id="OCBC",
+                target="lifecycle",
+                payload={"bizSeqNo": "B1"},
+                dedup_key="fwd-trace-1",
+                trace_id="trc-original-xyz",
+            )
+    await dispatch_once(factory, targets=TARGETS, max_attempts=3)
+    assert route.called
+    assert route.calls.last.request.headers.get("X-Trace-Id") == "trc-original-xyz"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_dispatch_reclaims_stale_sending_then_resends(factory) -> None:
+    """A-M-001：卡死 SENDING 超时行被 reclaim 回 FAILED 后重投成功 → SENT，locked_at 清空。"""
+    import datetime as dt
+
+    route = respx.post("http://lifecycle/cb").mock(return_value=httpx.Response(200))
+    async with factory() as s:
+        async with s.begin():
+            s.add(
+                CallbackOutbox(
+                    tenant_id="OCBC",
+                    target="lifecycle",
+                    payload={"bizSeqNo": "B1"},
+                    status="SENDING",
+                    locked_at=dt.datetime(2020, 1, 1, tzinfo=dt.UTC),
+                    dedup_key="fwd-stale-1",
+                )
+            )
+    await dispatch_once(factory, targets=TARGETS, max_attempts=3, claim_timeout_seconds=1.0)
+    assert route.called
+    from sqlalchemy import select
+
+    async with factory() as s:
+        rows = (await s.execute(select(CallbackOutbox))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].status == "SENT"
+    assert rows[0].locked_at is None
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_dispatch_skips_fresh_sending_not_reclaimed(factory) -> None:
+    """A-M-001：新鲜 SENDING（locked_at 近）不被 reclaim、也不被 claim（视为别副本在投）。"""
+    import datetime as dt
+
+    respx.post("http://lifecycle/cb").mock(return_value=httpx.Response(200))
+    async with factory() as s:
+        async with s.begin():
+            s.add(
+                CallbackOutbox(
+                    tenant_id="OCBC",
+                    target="lifecycle",
+                    payload={"bizSeqNo": "B1"},
+                    status="SENDING",
+                    locked_at=dt.datetime.now(dt.UTC),
+                    dedup_key="fwd-fresh-1",
+                )
+            )
+    handled = await dispatch_once(
+        factory, targets=TARGETS, max_attempts=3, claim_timeout_seconds=300.0
+    )
+    assert handled == 0
+    from sqlalchemy import select
+
+    async with factory() as s:
+        row = (await s.execute(select(CallbackOutbox))).scalars().one()
+    assert row.status == "SENDING"  # 仍由（假想的）别副本持有，未被本轮动
