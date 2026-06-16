@@ -33,6 +33,14 @@ ENV_FILE="$DEPLOY_DIR/env.local"
 # Git commit SHA baked into the image for GET /build-info anchoring.
 # Exported so docker compose build args ${GIT_SHA} pick it up.
 GIT_SHA="$(git -C "$PROJECT_ROOT" describe --always --dirty 2>/dev/null || echo unknown)"
+# Harden against command injection: git describe can emit tag names, and git
+# refs permit shell metacharacters. Reject anything outside a safe charset and
+# fall back to the bare commit hash (+ -dirty). Defensive parity with the other
+# repos' remote deploy path. (codex review NEEDS-ATTENTION 2026-06-16)
+if ! [[ "$GIT_SHA" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+    GIT_SHA="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    git -C "$PROJECT_ROOT" diff --quiet 2>/dev/null || GIT_SHA="${GIT_SHA}-dirty"
+fi
 export GIT_SHA
 
 # ── Colors & logging ─────────────────────────────────────────
