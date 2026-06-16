@@ -23,6 +23,25 @@ def test_create_app_initializes_wedap_client() -> None:
     assert isinstance(result.state.wedap, WedapClient)
 
 
+def test_create_app_uses_injected_settings_a_m_002() -> None:
+    """A-M-002：create_app 接受注入的 Settings 并落到 app.state.settings，不依赖全局 lru_cache。"""
+    from app.core.config import Settings
+
+    injected = Settings(env="test", wedap_base_url="http://injected-wedap:9999")
+    app = create_app(injected)
+    assert app.state.settings is injected
+    # 注入的配置真实生效（wedap client 用注入的 base_url）
+    assert app.state.wedap._base == "http://injected-wedap:9999"
+
+
+def test_create_app_default_settings_from_factory() -> None:
+    """不传 settings 时回退到 get_settings() 工厂，app.state.settings 存在。"""
+    from app.core.config import Settings
+
+    app = create_app()
+    assert isinstance(app.state.settings, Settings)
+
+
 def test_create_app_prod_without_secret_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """GW_ENV=prod 且无 secret → create_app 必须 RuntimeError（fail-fast）。"""
     get_settings.cache_clear()

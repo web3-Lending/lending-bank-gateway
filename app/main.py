@@ -21,7 +21,7 @@ from app.api.v1.loans import router as loans_router
 from app.api.v1.recon_notify import router as recon_notify_router
 from app.clients.s3 import S3FileClient
 from app.clients.wedap import WedapClient
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.context import IdentifierMiddleware, current_ids
 from app.core.db import build_engine, build_session_factory
 from app.core.envelope import err
@@ -122,7 +122,7 @@ async def _after_ingest(
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """FastAPI lifespan：startup 时按 workers_enabled 起后台 asyncio task；shutdown 时 cancel。"""
-    settings = get_settings()
+    settings: Settings = app.state.settings
     tasks: list[asyncio.Task[None]] = []
 
     if settings.workers_enabled:
@@ -173,14 +173,19 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("worker tasks cancelled on shutdown")
 
 
-def create_app() -> FastAPI:
-    settings = get_settings()
+def create_app(settings: Settings | None = None) -> FastAPI:
+    # 配置注入：默认走 get_settings() 工厂；测试/多环境可显式传入隔离实例，
+    # 不再依赖 lru_cache 全局单例 + cache_clear（A-M-002）。
+    if settings is None:
+        settings = get_settings()
     if settings.env not in ("local", "test") and not settings.s2s_secret:
         raise RuntimeError(
             "GW_S2S_SECRET 必须在非 local/test 环境配置（fail-fast，资金网关禁 fail-open）"
         )
 
     app = FastAPI(title="lending-bank-gateway", version="0.1.0", lifespan=_lifespan)
+    # 全进程统一从 app.state.settings 取配置（lifespan/worker 不再各自调 get_settings）
+    app.state.settings = settings
 
     # 解析 caller 白名单：空串 = 不启用
     allowed_callers: set[str] | None = (
