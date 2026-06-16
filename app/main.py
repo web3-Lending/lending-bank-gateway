@@ -93,23 +93,26 @@ async def _generic_exception_handler(request: Request, exc: Exception) -> JSONRe
 async def _after_ingest(
     request: Request, *, tenant_id: str, body: dict[str, Any], request_id: str
 ) -> None:
-    """T16 接线：leg 同步 + 父单聚合。T17 outbox 转发：独立事务 enqueue。
+    """leg 同步/父单聚合 + outbox 转发入队 —— **同一事务原子提交**（A-C-002）。
 
-    request_id 作为 outbox dedup_key（fwd-{request_id}），确保同一 inbox 请求
-    即使重放也只产生一条 outbox 行（下游幂等键跨重放稳定）。
+    外呼 get_composite_steps 在事务外预取（避免长事务持锁）；随后单事务内 apply_legs +
+    enqueue_forward 一起提交。这样消除「leg 已落库但 outbox 未入队」的崩溃窗口——
+    崩溃则整体回滚，inbox 留 RECEIVED 由重放幂等再驱动（apply 幂等 upsert + enqueue
+    fwd-{request_id} 去重）。request_id 作 outbox dedup_key 保证跨重放只产生一条转发。
     """
-    from app.services.legs import sync_legs_for
+    from app.services.legs import apply_legs_in_session
 
-    await sync_legs_for(
-        request.app.state.session_factory,
-        wedap=request.app.state.wedap,
-        tenant_id=tenant_id,
-        biz_seq_no=str(body.get("bizSeqNo", "")),
+    biz_seq_no = str(body.get("bizSeqNo", ""))
+    # 外呼预取 steps（事务外）
+    steps = await request.app.state.wedap.get_composite_steps(
+        tenant_id=tenant_id, biz_seq_no=biz_seq_no
     )
-
-    # T17：outbox enqueue（独立事务，与 legs 隔离）
+    # 单事务：leg 同步/父单聚合 + outbox enqueue 原子提交
     async with request.app.state.session_factory() as session:
         async with session.begin():
+            await apply_legs_in_session(
+                session, tenant_id=tenant_id, biz_seq_no=biz_seq_no, steps=steps
+            )
             await enqueue_forward(
                 session,
                 tenant_id=tenant_id,
