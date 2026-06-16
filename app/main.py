@@ -209,6 +209,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if settings.s2s_callers.strip()
         else None
     )
+    # 解析 per-service token（A-m-002）：`caller:token,...`；空串 = 不启用，回退共享 secret
+    caller_tokens: dict[str, str] | None = None
+    if settings.s2s_caller_tokens.strip():
+        caller_tokens = {}
+        for pair in settings.s2s_caller_tokens.split(","):
+            if ":" in pair:
+                name, _, tok = pair.partition(":")
+                name, tok = name.strip(), tok.strip()
+                if name and tok:
+                    caller_tokens[name] = tok
+        caller_tokens = caller_tokens or None
 
     # 同时注册 Starlette 基类（路由 miss 404）和 FastAPI 子类（显式 raise HTTPException）
     app.add_exception_handler(StarletteHTTPException, _http_exception_handler)  # type: ignore[arg-type]
@@ -223,6 +234,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         secret=settings.s2s_secret,
         exempt_paths={"/healthz", "/readyz"},
         allowed_callers=allowed_callers,
+        caller_tokens=caller_tokens,
     )
     app.add_middleware(IdentifierMiddleware)
     engine = build_engine(

@@ -130,3 +130,60 @@ def test_caller_whitelist_none_disables_check() -> None:
         headers={"X-Caller-Service": "any-service", "X-S2S-Token": "sec"},
     )
     assert r.status_code == 200
+
+
+# ── per-service token（A-m-002）────────────────────────────────────────────────
+
+
+def _app_per_service(caller_tokens: dict[str, str]) -> FastAPI:
+    app = FastAPI()
+    app.add_middleware(
+        S2SMiddleware,
+        secret="shared-secret-ignored",  # noqa: S106  # 测试用；per-service 模式下被忽略
+        exempt_paths={"/healthz"},
+        caller_tokens=caller_tokens,
+    )
+    app.add_middleware(IdentifierMiddleware)
+
+    @app.post("/api/v1/x")
+    async def x() -> dict:  # type: ignore[misc]
+        return {"ok": True}
+
+    return app
+
+
+def test_per_service_correct_caller_and_token_passes() -> None:
+    """per-service：caller 用自己的专属 token → 放行。"""
+    c = TestClient(_app_per_service({"svc-a": "tok-a", "svc-b": "tok-b"}))
+    r = c.post("/api/v1/x", headers={"X-Caller-Service": "svc-a", "X-S2S-Token": "tok-a"})
+    assert r.status_code == 200
+
+
+def test_per_service_wrong_token_rejected() -> None:
+    """per-service：caller 正确但 token 错 → 401。"""
+    c = TestClient(_app_per_service({"svc-a": "tok-a"}))
+    r = c.post("/api/v1/x", headers={"X-Caller-Service": "svc-a", "X-S2S-Token": "WRONG"})
+    assert r.status_code == 401
+
+
+def test_per_service_caller_using_others_token_rejected() -> None:
+    """per-service 核心：caller A 拿 caller B 的 token → 401（caller↔token 密码学绑定）。"""
+    c = TestClient(_app_per_service({"svc-a": "tok-a", "svc-b": "tok-b"}))
+    r = c.post("/api/v1/x", headers={"X-Caller-Service": "svc-a", "X-S2S-Token": "tok-b"})
+    assert r.status_code == 401
+
+
+def test_per_service_unknown_caller_rejected() -> None:
+    """per-service：未登记的 caller → 401（即使 token 是别人的）。"""
+    c = TestClient(_app_per_service({"svc-a": "tok-a"}))
+    r = c.post("/api/v1/x", headers={"X-Caller-Service": "ghost", "X-S2S-Token": "tok-a"})
+    assert r.status_code == 401
+
+
+def test_per_service_does_not_leak_token_in_logs(caplog: pytest.LogCaptureFixture) -> None:
+    """per-service 校验失败日志不含 token 明文。"""
+    c = TestClient(_app_per_service({"svc-a": "tok-a"}))
+    with caplog.at_level(logging.WARNING):
+        c.post("/api/v1/x", headers={"X-Caller-Service": "svc-a", "X-S2S-Token": "super-secret"})
+    assert "super-secret" not in caplog.text
+    assert any("bad_per_service_token" in r.message for r in caplog.records)

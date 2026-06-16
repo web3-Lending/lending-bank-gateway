@@ -42,6 +42,28 @@ def test_create_app_default_settings_from_factory() -> None:
     assert isinstance(app.state.settings, Settings)
 
 
+def test_create_app_parses_per_service_tokens_a_m_002() -> None:
+    """A-m-002：create_app 解析 GW_S2S_CALLER_TOKENS 启用 per-service 校验（覆盖解析分支）。"""
+    from app.core.config import Settings
+
+    app = create_app(
+        Settings(env="test", s2s_caller_tokens="svc-a:tok-a , svc-b:tok-b , bad-no-colon, :empty")
+    )
+    client = TestClient(app)
+    # s2s 中间件在 handler/DB 之前执行：错误 token → 401
+    r = client.get(
+        "/api/v1/bank-funds/status?bizSeqNo=X",
+        headers={"X-Caller-Service": "svc-a", "X-S2S-Token": "WRONG"},
+    )
+    assert r.status_code == 401
+    # 未登记 caller（含被忽略的畸形条目）→ 401
+    r2 = client.get(
+        "/api/v1/bank-funds/status?bizSeqNo=X",
+        headers={"X-Caller-Service": "bad-no-colon", "X-S2S-Token": "tok-a"},
+    )
+    assert r2.status_code == 401
+
+
 def test_create_app_prod_without_secret_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """GW_ENV=prod 且无 secret → create_app 必须 RuntimeError（fail-fast）。"""
     get_settings.cache_clear()

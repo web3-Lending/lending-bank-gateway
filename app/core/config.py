@@ -15,6 +15,13 @@ class Settings(BaseSettings):
         "http://lending-lifecycel:9000/api/v1/bank/transaction-callback"
     )
     s2s_secret: str | None = None
+    s2s_caller_tokens: str = ""
+    """per-service S2S token（GW_S2S_CALLER_TOKENS），格式 `caller1:token1,caller2:token2`。
+
+    配置后优先于共享 s2s_secret：按调用方专属 token 校验，把 caller 与 token 密码学绑定
+    （A-m-002）——单个 caller 的 token 泄露只能冒充它自己，不能伪造他人 caller。
+    空串=不启用，回退共享 secret 模式。mTLS/签名绑定为后续增强。
+    """
     s2s_callers: str = ""
     """逗号分隔的 S2S 调用方白名单（GW_S2S_CALLERS）。空字符串=不启用白名单校验。
 
