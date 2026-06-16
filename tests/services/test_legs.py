@@ -533,3 +533,38 @@ def test_unknown_biz_seq_no_callback_leaves_inbox_received_no_outbox() -> None:
         assert len(outbox_rows) == 0
 
     asyncio.run(_verify())
+
+
+# ---------------------------------------------------------------------------
+# A-m-004：CLT（归集）单虽无 wedap 实时状态查询，回调链仍能驱动其至终态
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_clt_order_driven_to_terminal_by_callback(factory) -> None:
+    """归集（biz_type=CLT）单无 wedap status API，但回调 sync_legs 聚合与 biz_type 无关，
+    仍能把 CLT 单驱动至终态 SUCCEEDED（A-m-004：CLT 靠回调/对账收敛，回调链覆盖终态）。"""
+    clt_biz = "CLT-20260611-0002000000777"
+    async with factory() as s:
+        async with s.begin():
+            s.add(
+                BankTxnOrder(
+                    tenant_id="OCBC",
+                    biz_seq_no=clt_biz,
+                    business_action="COLLECT",
+                    biz_type="CLT",
+                    amount=Decimal("60.0000"),
+                    currency="USD",
+                    caller_service="lifecycle",
+                    status="SUBMITTED",
+                )
+            )
+
+    steps = [{**STEP, "sysRefNo": "CLT-R1", "stepType": "COLLECTION", "status": "SUCCESS"}]
+    await sync_legs_for(factory, wedap=_wedap(steps), tenant_id="OCBC", biz_seq_no=clt_biz)
+
+    async with factory() as s:
+        order = (
+            await s.execute(select(BankTxnOrder).where(BankTxnOrder.biz_seq_no == clt_biz))
+        ).scalar_one()
+    assert order.status == OrderStatus.SUCCEEDED
