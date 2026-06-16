@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.v1 import callbacks
@@ -128,16 +129,25 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """FastAPI lifespan：startup 时按 workers_enabled 起后台 asyncio task；shutdown 时 cancel。"""
     settings: Settings = app.state.settings
     tasks: list[asyncio.Task[None]] = []
+    worker_engine: AsyncEngine | None = None
 
     if settings.workers_enabled:
         from app.workers import outbox_dispatcher, recon_worker
+
+        # 独立连接池（A-M-003）：worker 慢外呼/长事务不与 API 在线请求争抢同一连接池
+        worker_engine = build_engine(
+            settings.db_url,
+            pool_size=settings.worker_db_pool_size,
+            max_overflow=settings.worker_db_max_overflow,
+        )
+        worker_factory = build_session_factory(worker_engine)
 
         tasks.append(
             asyncio.create_task(
                 supervised(
                     "outbox-dispatcher",
                     lambda: outbox_dispatcher.run_forever(
-                        app.state.session_factory,
+                        worker_factory,
                         targets=app.state.outbox_targets,
                         max_attempts=settings.outbox_max_attempts,
                         interval_seconds=settings.outbox_interval_seconds,
@@ -152,7 +162,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 supervised(
                     "recon-worker",
                     lambda: recon_worker.run_forever(
-                        app.state.session_factory,
+                        worker_factory,
                         s3=S3FileClient(endpoint_url=settings.s3_endpoint_url),
                         archive_dir=settings.archive_dir,
                         interval_seconds=settings.recon_interval_seconds,
@@ -163,7 +173,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
         )
         logger.info(
-            "worker tasks started: outbox_interval=%.1fs recon_interval=%.1fs",
+            "worker tasks started (dedicated pool): outbox_interval=%.1fs recon_interval=%.1fs",
             settings.outbox_interval_seconds,
             settings.recon_interval_seconds,
         )
@@ -175,6 +185,8 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         logger.info("worker tasks cancelled on shutdown")
+    if worker_engine is not None:  # pragma: no cover
+        await worker_engine.dispose()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:

@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     outbox_max_attempts: int = 8
     db_pool_size: int = 5
     db_max_overflow: int = 10
+    # worker 专用连接池（A-M-003）：与 API 隔离，避免 worker 慢外呼/长事务争抢在线请求连接
+    worker_db_pool_size: int = 3
+    worker_db_max_overflow: int = 5
     workers_enabled: bool = True
     """是否在进程内启动后台 worker（GW_WORKERS_ENABLED）。
     设为 False 可在多副本中禁用 worker，或在单元测试中关闭后台任务。

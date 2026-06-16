@@ -157,3 +157,32 @@ def test_lifespan_workers_enabled_tasks_started_and_cancelled(
     assert recon_started
 
     get_settings.cache_clear()
+
+
+def test_lifespan_workers_use_dedicated_pool_a_m_003(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A-M-003：worker 用独立 session_factory（≠ app.state.session_factory），与 API 连接池隔离。"""
+    get_settings.cache_clear()
+    monkeypatch.setenv("GW_WORKERS_ENABLED", "true")
+
+    captured: dict[str, object] = {}
+
+    async def fake_outbox_forever(*args: object, **_kwargs: object) -> None:
+        captured["factory"] = args[0]  # run_forever 第一个位置参数 = session_factory
+        await asyncio.sleep(9999)
+
+    async def fake_recon_forever(*_args: object, **_kwargs: object) -> None:
+        await asyncio.sleep(9999)
+
+    app = create_app()
+    with (
+        patch("app.workers.outbox_dispatcher.run_forever", side_effect=fake_outbox_forever),
+        patch("app.workers.recon_worker.run_forever", side_effect=fake_recon_forever),
+    ):
+        with TestClient(app):
+            pass
+
+    assert "factory" in captured
+    # worker 用专用 factory，与 API 的 app.state.session_factory 不是同一个
+    assert captured["factory"] is not app.state.session_factory
+
+    get_settings.cache_clear()
