@@ -146,7 +146,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/BankFundsRequest"
+                "$ref": "#/components/schemas/CollectRequest"
               }
             }
           },
@@ -593,43 +593,46 @@
   },
   "components": {
     "schemas": {
-      "BankFundsRequest": {
+      "CollectRequest": {
         "properties": {
           "bizSeqNo": {
             "type": "string",
             "title": "Bizseqno"
           },
-          "totalAmount": {
-            "type": "string",
-            "title": "Totalamount"
-          },
           "currencyCode": {
             "type": "string",
             "title": "Currencycode"
           },
-          "userList": {
+          "txnAmount": {
             "anyOf": [
               {
-                "items": {
-                  "additionalProperties": true,
-                  "type": "object"
-                },
-                "type": "array"
+                "type": "string"
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Userlist"
+            "title": "Txnamount"
+          },
+          "totalAmount": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Totalamount"
           }
         },
+        "additionalProperties": true,
         "type": "object",
         "required": [
           "bizSeqNo",
-          "totalAmount",
           "currencyCode"
         ],
-        "title": "BankFundsRequest"
+        "title": "CollectRequest"
       },
       "DisbursementInfo": {
         "properties": {

@@ -26,13 +26,15 @@ router = APIRouter(prefix="/api/v1/bank-funds", tags=["bank-funds"])
 # ── Pydantic request schemas ───────────────────────────────────────────────────
 
 
-class BankFundsRequest(BaseModel):
-    # 归集（collect）沿用本 schema：切扁平 txnAmount 需 lending 先改 body，本轮不切（FU Q2）。
+class CollectRequest(BaseModel):
+    # 归集对齐 wedap 真契约：单用户扁平，顶层 txnAmount + bankAccountName 必填。
+    # extra=allow 薄透传：lending 补 bankAccountName/userId 等原样透传 wedap，gateway 不剪裁。
+    # 金额优先扁平 txnAmount（wedap 形态）；过渡期回退 totalAmount，lending 改扁平后只用 txnAmount。
+    model_config = ConfigDict(extra="allow")
     bizSeqNo: str
-    totalAmount: str
     currencyCode: str
-    userList: list[dict[str, Any]] | None = None
-    """显式 null 视同缺省，契约 C 下 wedap 可选字段缺省=null 语义等价。"""
+    txnAmount: str | None = None
+    totalAmount: str | None = None
 
 
 class DistributeRequest(BaseModel):
@@ -97,20 +99,20 @@ async def _submit(
 
 @router.post("/collect-from-users")
 async def collect_from_users(
-    body: BankFundsRequest,
+    body: CollectRequest,
     request: Request,
     ids: dict[str, str] = Depends(require_headers),
 ) -> dict[str, Any]:
     assert_idempotency_key_matches(request, body.bizSeqNo)
-    amount = parse_amount(body.totalAmount)
     payload = body.model_dump(mode="json", exclude_none=True)
-    validate_detail_consistency(
-        payload,
-        total=amount,
-        currency=body.currencyCode,
-        detail_key="userList",
-        amount_field="amount",
-    )
+    # 金额优先 wedap 扁平 txnAmount，过渡回退 totalAmount；归集单用户无明细，不做 sum 校验。
+    raw_amount = body.txnAmount if body.txnAmount is not None else body.totalAmount
+    if raw_amount is None:
+        raise HTTPException(
+            400,
+            detail={"code": "GW_400_VALIDATION", "message": "missing txnAmount"},
+        )
+    amount = parse_amount(raw_amount)
     return await _submit(
         request,
         ids=ids,

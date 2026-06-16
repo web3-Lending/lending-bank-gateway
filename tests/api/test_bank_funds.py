@@ -66,12 +66,13 @@ def test_collect_idempotent_replay_no_extra_call(client: TestClient) -> None:
     assert client.app.state.wedap.collect_from_users.await_count == 1  # type: ignore[union-attr]
 
 
-def test_collect_missing_total_amount_422(client: TestClient) -> None:
-    """totalAmount 字段缺失 → Pydantic 必填校验 → 422。"""
+def test_collect_missing_amount_400(client: TestClient) -> None:
+    """txnAmount/totalAmount 都缺 → 400（归集对齐 wedap 后 totalAmount 非必填）。"""
     body_no_amount = {k: v for k, v in COLLECT_BODY.items() if k != "totalAmount"}
     r = client.post("/api/v1/bank-funds/collect-from-users", json=body_no_amount, headers=HEADERS)
-    assert r.status_code == 422
-    assert r.json()["error"]["code"] == "GW_422_VALIDATION"
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "GW_400_VALIDATION"
+    assert "missing txnAmount" in r.json()["error"]["message"]
 
 
 def test_collect_invalid_amount_str_400(client: TestClient) -> None:
@@ -198,19 +199,36 @@ def test_collect_without_userlist_payload_excludes_key(client: TestClient) -> No
     )
 
 
-def test_collect_explicit_empty_userlist_400(client: TestClient) -> None:
-    """显式传入 userList=[] → 仍触发 400（空列表不合法）。"""
+def test_collect_wedap_flat_txnamount_passthrough(client: TestClient) -> None:
+    """归集对齐 wedap 扁平：顶层 txnAmount 取金额，bankAccountName 等 extra=allow 透传。"""
     body = {
         "bizSeqNo": "CLT-20260611-0002000000003",
+        "channelId": "LEN",
+        "transType": "BANK_FUND_COLLECT",
+        "bankAccountNo": "ESCROW001",
+        "bankAccountName": "P2P 中转户",
+        "userId": "U1",
+        "txnAmount": "500.0000",
+        "currencyCode": "USD",
+    }
+    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-flat"}
+    r = client.post("/api/v1/bank-funds/collect-from-users", json=body, headers=h)
+    assert r.status_code == 200, r.json()
+    call_str = str(client.app.state.wedap.collect_from_users.call_args)  # type: ignore[union-attr]
+    assert "bankAccountName" in call_str and "txnAmount" in call_str
+
+
+def test_collect_txnamount_preferred_over_totalamount(client: TestClient) -> None:
+    """同时给 txnAmount 与 totalAmount → 取 wedap 扁平 txnAmount（过渡期优先级）。"""
+    body = {
+        "bizSeqNo": "CLT-20260611-0002000000005",
+        "txnAmount": "777.0000",
         "totalAmount": "500.0000",
         "currencyCode": "USD",
-        "userList": [],
     }
-    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-empty-ul"}
+    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-both"}
     r = client.post("/api/v1/bank-funds/collect-from-users", json=body, headers=h)
-    assert r.status_code == 400
-    assert r.json()["error"]["code"] == "GW_400_VALIDATION"
-    assert "empty userList" in r.json()["error"]["message"]
+    assert r.status_code == 200, r.json()
 
 
 def test_distribute_without_recipients_passes_validation(client: TestClient) -> None:
