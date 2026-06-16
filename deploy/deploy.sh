@@ -29,6 +29,13 @@ CONTAINER_NAME="lending-bank-gateway"
 APP_PORT="8022"
 HEALTH_ENDPOINT="/healthz"
 ENV_FILE="$DEPLOY_DIR/env.local"
+# Dedicated compose project name. WITHOUT this, docker compose defaults the
+# project to the compose file's directory name ("deploy"), which COLLIDES with
+# every other repo's deploy/ dir sharing the same default — and a `down`/`up`
+# with --remove-orphans then deletes those repos' containers as cross-project
+# "orphans". 2026-06-16 incident: 14 unrelated containers (lending-console-bff,
+# lending-lifecycel, wedap-*) were wiped this way. Isolate to our own project.
+COMPOSE_PROJECT="lending-bank-gateway"
 
 # Git commit SHA baked into the image for GET /build-info anchoring.
 # Exported so docker compose build args ${GIT_SHA} pick it up.
@@ -79,7 +86,7 @@ else
 fi
 
 compose_cmd() {
-    $DC -f "$DEPLOY_DIR/docker-compose.yml" --env-file "$ENV_FILE" "$@"
+    $DC -p "$COMPOSE_PROJECT" -f "$DEPLOY_DIR/docker-compose.yml" --env-file "$ENV_FILE" "$@"
 }
 
 ensure_networks() {
@@ -112,14 +119,14 @@ case "$ACTION" in
         exit 0 ;;
     stop)
         print_info "Stopping..."
-        compose_cmd down --remove-orphans 2>/dev/null || true
+        compose_cmd down 2>/dev/null || true
         print_success "Stopped"
         exit 0 ;;
     restart)
         print_info "Restarting..."
         ensure_networks
-        compose_cmd down --remove-orphans 2>/dev/null || true
-        compose_cmd up -d --force-recreate --remove-orphans
+        compose_cmd down 2>/dev/null || true
+        compose_cmd up -d --force-recreate
         print_success "Restarted"
         exit 0 ;;
 esac
@@ -138,7 +145,7 @@ if [ "$BUILD_ONLY" = true ]; then
 fi
 
 print_info "Starting service..."
-compose_cmd up -d --force-recreate --remove-orphans
+compose_cmd up -d --force-recreate
 
 print_info "Waiting for service..."
 sleep 3
