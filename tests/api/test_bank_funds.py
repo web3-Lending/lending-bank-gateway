@@ -119,10 +119,7 @@ def test_distribute_idempotent_replay_no_extra_call(client: TestClient) -> None:
 
 
 def test_collect_same_key_different_payload_409(client: TestClient) -> None:
-    """同 Idempotency-Key 不同 payload → 409 GW_409_IDEMPOTENCY。
-    mutated 保持明细一致性（userList sum == totalAmount）以确保明细校验先通过，
-    再由幂等层检测到 payload hash 变化触发 409。
-    """
+    """同 Idempotency-Key 不同 payload（金额变化）→ payload hash 变化 → 409 GW_409_IDEMPOTENCY。"""
     client.post("/api/v1/bank-funds/collect-from-users", json=COLLECT_BODY, headers=HEADERS)
     mutated = {
         **COLLECT_BODY,
@@ -219,7 +216,7 @@ def test_collect_wedap_flat_txnamount_passthrough(client: TestClient) -> None:
 
 
 def test_collect_txnamount_preferred_over_totalamount(client: TestClient) -> None:
-    """同时给 txnAmount 与 totalAmount → 取 wedap 扁平 txnAmount（过渡期优先级）。"""
+    """同时给 txnAmount 与 totalAmount → 取扁平 txnAmount(777)；旧 totalAmount 不透传 wedap。"""
     body = {
         "bizSeqNo": "CLT-20260611-0002000000005",
         "txnAmount": "777.0000",
@@ -229,6 +226,19 @@ def test_collect_txnamount_preferred_over_totalamount(client: TestClient) -> Non
     h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-both"}
     r = client.post("/api/v1/bank-funds/collect-from-users", json=body, headers=h)
     assert r.status_code == 200, r.json()
+    # 实际取 777（非 500）+ totalAmount 已从透传 wedap 的 payload 移除（I1/I3）
+    call_str = str(client.app.state.wedap.collect_from_users.call_args)  # type: ignore[union-attr]
+    assert "777.0000" in call_str
+    assert "totalAmount" not in call_str and "500.0000" not in call_str
+
+
+def test_collect_empty_txnamount_falls_back_or_400(client: TestClient) -> None:
+    """txnAmount 空串且无 totalAmount → 400 missing（C1：空串视为缺，不报误导的 bad amount）。"""
+    body = {"bizSeqNo": "CLT-20260611-0002000000006", "txnAmount": "", "currencyCode": "USD"}
+    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-empty-txn"}
+    r = client.post("/api/v1/bank-funds/collect-from-users", json=body, headers=h)
+    assert r.status_code == 400
+    assert "missing txnAmount" in r.json()["error"]["message"]
 
 
 def test_distribute_without_recipients_passes_validation(client: TestClient) -> None:
