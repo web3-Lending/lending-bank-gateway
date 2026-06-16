@@ -2,9 +2,27 @@
 
 - Scope: full repo（app/ 45 源文件，统一资金网关 ADR-0031）
 - Branch: `fix/gateway-northbound-passthrough`
-- Iterations: 1
-- Date: 2026-06-15
-- Exit status: **PARTIAL-EXIT**（机械门禁全绿 + 可当场修复 finding 全闭环；8 项架构债/v2/跨仓 finding 已登记 followups，待用户拍板）
+- Iterations: 2
+- Date: 2026-06-15 ~ 2026-06-16
+- Exit status: **全部 finding 闭环**（iter1 4 真实 bug 修复；iter2 用户拍板「全部修」8 项架构债全部根因修复，6 followup complete + 2 跨仓/外部 followup 保持 open 并附进度）
+
+## 迭代总览
+
+- **iter1**：6 角色实质评审，找出 4 个 lint/覆盖率结构性漏掉的真实缺陷并修复（见下「Real Bugs」）；8 项架构债登记 followup。
+- **iter2**：用户选择对 8 项架构债「全部修」。逐项根因修复 + 测试 + MySQL 真机验证（详见 `iteration-2/summary.md`）。
+  - 最关键发现：A-m-003 naive 链尾 `FOR UPDATE` 经 MySQL 实测会 **1213 死锁**，改 per-tenant 锚点表方案才正确。
+  - ⚠️ 评审期间检测到**另一活跃会话**在同一 worktree 编辑 `bank_funds.py`（无关 txnAmount 特性）；本评审仅提交自己文件，未污染对方 WIP（详见 iter2 summary §并发会话告警）。
+
+## 最终门禁（iter2 收口）
+
+- 单测 410 passed / 行 100% / 分支 100%
+- 集成 13 passed（MySQL 8.0；含 alembic 0007/0008 upgrade head + recon 自死锁 / audit 链并发 / outbox 原子 claim 真机测）
+- ruff（本评审文件）clean · mypy --strict clean(45) · 单一 alembic head 0008
+- 12 commit（iter1 4 fix + 报告；iter2 8 fix）
+
+---
+
+## （iter1 历史）原 PARTIAL-EXIT 记录
 
 ## Coverage
 
