@@ -118,9 +118,15 @@ async def dispatch_once(
     """投递一轮到期行；返回实际处理条数。
 
     多副本安全（A-M-001）：每条行先**原子 claim**（条件 UPDATE 置 SENDING + locked_at，
-    rowcount==1 才拥有），再事务外外呼，再独立事务终结状态。两副本同轮只有一个能 claim 成功，
-    杜绝重复投递与 attempts 双计。外呼后崩溃留下的 SENDING 行由 _reclaim_stale_sending 超时回收。
-    httpx client 整轮复用（CR-m-002）；X-Trace-Id 透传原始 trace_id（A-m-001）。
+    rowcount==1 才拥有），再事务外外呼，再独立事务终结状态。正常运行下两副本同轮只有一个能
+    claim 成功，消除「同轮重复 claim + attempts 双计」。外呼后崩溃留下的 SENDING 行由
+    _reclaim_stale_sending 超时回收。
+
+    投递语义为 **at-least-once**（非 exactly-once）：极端边界——副本 A claim 后外呼 stall 超过
+    claim_timeout_seconds（默认 300s，远大于 10s 外呼 timeout）→ 副本 B reclaim 并重投 → A 迟到
+    成功 = 下游收到两次。最终一致性依赖**下游按 X-Request-Id(=dedup_key) 幂等**兜底。
+    （CAS/claim-token 加固该边界见 followup。）httpx client 整轮复用（CR-m-002）；
+    X-Trace-Id 透传原始 trace_id（A-m-001）。
     """
     now = dt.datetime.now(dt.UTC)
 

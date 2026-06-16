@@ -41,10 +41,21 @@ async def write_audit(
         )
     ).scalar_one_or_none()
     if exists is None:
+        # 锚点不存在时 seed：必须从该 tenant **既有 audit_log 链尾**接续，而非硬编码 GENESIS。
+        # 否则在升级前已有审计历史的库上，新链会从 GENESIS 重起 → 与历史末行断链（M1）。
+        hist_tail = (
+            await session.execute(
+                select(AuditLog.row_hash)
+                .where(AuditLog.tenant_id == tenant_id)
+                .order_by(AuditLog.id.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        seed = hist_tail or GENESIS
         try:
             async with session.begin_nested():
                 await session.execute(
-                    insert(AuditChainHead).values(tenant_id=tenant_id, last_row_hash=GENESIS)
+                    insert(AuditChainHead).values(tenant_id=tenant_id, last_row_hash=seed)
                 )
         except (
             IntegrityError
