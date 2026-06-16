@@ -105,7 +105,8 @@ async def collect_from_users(
 ) -> dict[str, Any]:
     assert_idempotency_key_matches(request, body.bizSeqNo)
     payload = body.model_dump(mode="json", exclude_none=True)
-    # 金额优先 wedap 扁平 txnAmount，过渡回退 totalAmount；空串/缺失视为缺。归集单用户，不 sum 校验。
+    # 金额优先 wedap 扁平 txnAmount，过渡回退 totalAmount；空串/缺失视为缺。
+    # 归集单用户无明细，不做 sum 校验。
     raw_amount = body.txnAmount or body.totalAmount
     if not raw_amount:
         raise HTTPException(
