@@ -232,7 +232,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(
         S2SMiddleware,
         secret=settings.s2s_secret,
-        exempt_paths={"/healthz", "/readyz"},
+        exempt_paths={"/healthz", "/readyz", "/build-info"},
         allowed_callers=allowed_callers,
         caller_tokens=caller_tokens,
     )
