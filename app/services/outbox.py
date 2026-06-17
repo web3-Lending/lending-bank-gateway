@@ -129,6 +129,15 @@ async def dispatch_once(
     claim_token CAS 守护（`_finalize_after_send`：WHERE status=SENDING AND claim_token=本次令牌）——
     A 迟到的终结写回 rowcount=0 被拒，不会覆盖 B 已写的终态。httpx client 整轮复用（CR-m-002）；
     X-Trace-Id 透传原始 trace_id（A-m-001）。
+
+    部署边界（claim_token CAS 的前提假设）：CAS 只约束**新代码**的 finalizer。本服务为
+    单容器单 dispatcher（asyncio 任务，container_name=lending-bank-gateway，无多副本），
+    部署是 stop-old→start-new——旧进程停后不再 finalize，旧代码 claim 的 SENDING 行
+    （claim_token=NULL）由新容器 _reclaim_stale_sending 超时回收，无新旧并发覆盖窗口。
+    若将来改成**多副本滚动升级**且跨 0009 迁移边界，则存在短暂窗口：旧副本（无 CAS、
+    claim_token=NULL）迟到 finalize 可覆盖新副本终态；该窗口退化为升级前的 at-least-once
+    语义，仍由下游 X-Request-Id 幂等兜底 + 下轮 reclaim 自愈，无数据丢失。届时应改为
+    先 drain 旧副本（≥ claim_timeout + 外呼 timeout）再起新副本，或分阶段切换。
     """
     now = dt.datetime.now(dt.UTC)
 
@@ -230,8 +239,9 @@ async def dispatch_once(
                 max_attempts=max_attempts,
                 backoff_base_seconds=backoff_base_seconds,
             )
-            # finalized=False（CAS 未命中，迟到副本被拒）不计入 handled；用 int 避免分支，
-            # 该 False 分支仅多副本并发可达（MySQL 集成测覆盖），无需单测分支
+            # finalized=False（CAS 未命中，迟到副本被拒）不计入 handled；用 int 避免分支。
+            # _finalize_after_send 的 CAS 命中/未命中两态由 test_outbox.py
+            # test_finalize_cas_rejects_stale_claim_token 等确定性覆盖。
             handled += int(finalized)
 
     return handled
@@ -287,7 +297,7 @@ async def _finalize_after_send(
                 )
                 .values(**values)
             )
-            updated = bool(result.rowcount == 1)  # type: ignore[attr-defined]  # CursorResult.rowcount
+            updated = bool(result.rowcount == 1)  # type: ignore[attr-defined]
 
     if not updated:
         # 迟到副本：行已被 reclaim 回收或被另一副本终结 → 本次写回作废，下游靠 X-Request-Id 幂等
