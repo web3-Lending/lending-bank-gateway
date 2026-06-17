@@ -13,3 +13,12 @@ deploy/env.local
 .team_review_state.json
 .team_review/
 .team_review_gate_status.json
+
+# spec-kit 本地/自动生成状态（官方建议忽略）
+.specify/extensions/.cache/
+.specify/extensions/.backup/
+.specify/extensions/*/*.local.yml
+.specify/extensions/.registry
+
+# spec-kit 技能目录（可能含凭证，本地保留，不纳入版本库）
+.claude/
