@@ -193,6 +193,9 @@ def test_status_wedap_unsupported_biz_type_degrades_with_no_status_api(
     wedap = r.json()["data"]["wedap"]
     assert wedap["unavailable"] is True
     assert wedap["reason"] == "no_status_api"
+    # CLT(归集)单：补 note 说明这是预期降级（终态由回调驱动），非故障
+    assert "note" in wedap
+    assert "回调" in wedap["note"]
 
 
 # ── Test 5：composite steps 透传 ─────────────────────────────────────────────

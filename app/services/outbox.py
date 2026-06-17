@@ -9,6 +9,7 @@
 
 import datetime as dt
 import logging
+import uuid
 from typing import Any
 
 import httpx
@@ -91,7 +92,7 @@ async def _reclaim_stale_sending(
     """把卡死在 SENDING 超过 claim_timeout 的行回收为 FAILED（上一轮 dispatcher 外呼后崩溃）。
 
     locked_at < now - timeout 才回收，避免误抢正在外呼的行。回收为 FAILED（attempts 不变），
-    下一轮按 backoff 重投。
+    并清空 claim_token（旧 claim 作废，下一轮重新 claim 生成新令牌）。下一轮按 backoff 重投。
     """
     cutoff = now - dt.timedelta(seconds=claim_timeout_seconds)
     async with factory() as session:
@@ -103,7 +104,7 @@ async def _reclaim_stale_sending(
                     CallbackOutbox.locked_at.is_not(None),
                     CallbackOutbox.locked_at < cutoff,
                 )
-                .values(status="FAILED", last_error="reclaimed_stale_sending")
+                .values(status="FAILED", last_error="reclaimed_stale_sending", claim_token=None)
             )
 
 
@@ -124,9 +125,19 @@ async def dispatch_once(
 
     投递语义为 **at-least-once**（非 exactly-once）：极端边界——副本 A claim 后外呼 stall 超过
     claim_timeout_seconds（默认 300s，远大于 10s 外呼 timeout）→ 副本 B reclaim 并重投 → A 迟到
-    成功 = 下游收到两次。最终一致性依赖**下游按 X-Request-Id(=dedup_key) 幂等**兜底。
-    （CAS/claim-token 加固该边界见 followup。）httpx client 整轮复用（CR-m-002）；
+    成功 = 下游收到两次。下游重复由 **X-Request-Id(=dedup_key) 幂等** 兜底；本地行的**终态**则由
+    claim_token CAS 守护（`_finalize_after_send`：WHERE status=SENDING AND claim_token=本次令牌）——
+    A 迟到的终结写回 rowcount=0 被拒，不会覆盖 B 已写的终态。httpx client 整轮复用（CR-m-002）；
     X-Trace-Id 透传原始 trace_id（A-m-001）。
+
+    部署边界（claim_token CAS 的前提假设）：CAS 只约束**新代码**的 finalizer。本服务为
+    单容器单 dispatcher（asyncio 任务，container_name=lending-bank-gateway，无多副本），
+    部署是 stop-old→start-new——旧进程停后不再 finalize，旧代码 claim 的 SENDING 行
+    （claim_token=NULL）由新容器 _reclaim_stale_sending 超时回收，无新旧并发覆盖窗口。
+    若将来改成**多副本滚动升级**且跨 0009 迁移边界，则存在短暂窗口：旧副本（无 CAS、
+    claim_token=NULL）迟到 finalize 可覆盖新副本终态；该窗口退化为升级前的 at-least-once
+    语义，仍由下游 X-Request-Id 幂等兜底 + 下轮 reclaim 自愈，无数据丢失。届时应改为
+    先 drain 旧副本（≥ claim_timeout + 外呼 timeout）再起新副本，或分阶段切换。
     """
     now = dt.datetime.now(dt.UTC)
 
@@ -154,7 +165,9 @@ async def dispatch_once(
     handled = 0
     async with httpx.AsyncClient(timeout=10.0) as client:
         for oid in due_ids:
-            # 2a. 原子 claim：仅当仍 PENDING/FAILED 且到期才置 SENDING（多副本只有一个 rowcount==1）
+            # 2a. 原子 claim：仅当仍 PENDING/FAILED 且到期才置 SENDING + 写本次 claim_token
+            #     （多副本只有一个 rowcount==1）。claim_token 每次生成新 uuid4，供 2c 终结 CAS 用。
+            claim_token = str(uuid.uuid4())
             async with factory() as session:
                 async with session.begin():
                     result = await session.execute(
@@ -167,7 +180,11 @@ async def dispatch_once(
                                 CallbackOutbox.next_retry_at <= now,
                             ),
                         )
-                        .values(status="SENDING", locked_at=dt.datetime.now(dt.UTC))
+                        .values(
+                            status="SENDING",
+                            locked_at=dt.datetime.now(dt.UTC),
+                            claim_token=claim_token,
+                        )
                     )
                     claimed = result.rowcount  # type: ignore[attr-defined]  # CursorResult.rowcount
             if (
@@ -176,13 +193,14 @@ async def dispatch_once(
                 # 被别的副本抢走，或状态已变 → 跳过
                 continue
 
-            # 2b. 读已 claim 的行数据
+            # 2b. 读已 claim 的行数据（attempts 在 claim 后稳定，除非被 reclaim——那样 2c CAS 会拒）
             async with factory() as session:
                 row = await session.get(CallbackOutbox, oid)
                 if row is None:  # pragma: no cover - claim 成功后理论不可达
                     continue
                 tenant_id, target, payload = row.tenant_id, row.target, row.payload
                 dedup_key, trace_id = row.dedup_key, row.trace_id
+                attempts_before = row.attempts
 
             url = targets.get(target)
             ok_flag, error = False, None
@@ -210,31 +228,88 @@ async def dispatch_once(
                 except httpx.HTTPError as exc:
                     error = type(exc).__name__
 
-            # 2c. 终结状态（清 locked_at）
-            async with factory() as session:
-                async with session.begin():
-                    row = await session.get(CallbackOutbox, oid)
-                    if row is None:  # pragma: no cover - 理论不可达
-                        continue
-                    row.attempts += 1
-                    row.locked_at = None
-                    if ok_flag:
-                        row.status = "SENT"
-                    elif row.attempts >= max_attempts:
-                        row.status = "DEAD"
-                        row.last_error = error
-                        logger.error(
-                            "outbox %s DEAD after %s attempts: %s", oid, row.attempts, error
-                        )
-                    else:
-                        row.status = "FAILED"
-                        row.last_error = error
-                        row.next_retry_at = dt.datetime.now(dt.UTC) + dt.timedelta(
-                            seconds=backoff_base_seconds * (2 ** (row.attempts - 1))
-                        )
-            handled += 1
+            # 2c. 终结状态（CAS 守护：仅当行仍 SENDING 且 claim_token 匹配本次 claim 才写回）
+            finalized = await _finalize_after_send(
+                factory,
+                oid=oid,
+                claim_token=claim_token,
+                attempts_before=attempts_before,
+                ok_flag=ok_flag,
+                error=error,
+                max_attempts=max_attempts,
+                backoff_base_seconds=backoff_base_seconds,
+            )
+            # finalized=False（CAS 未命中，迟到副本被拒）不计入 handled；用 int 避免分支。
+            # _finalize_after_send 的 CAS 命中/未命中两态由 test_outbox.py
+            # test_finalize_cas_rejects_stale_claim_token 等确定性覆盖。
+            handled += int(finalized)
 
     return handled
+
+
+async def _finalize_after_send(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    oid: int,
+    claim_token: str,
+    attempts_before: int,
+    ok_flag: bool,
+    error: str | None,
+    max_attempts: int,
+    backoff_base_seconds: float,
+) -> bool:
+    """CAS 守护地写回终态：仅当行仍 `status=SENDING` 且 `claim_token` 等于本次 claim 令牌才更新。
+
+    返回 True=本副本成功终结该行；False=CAS 未命中（行已被 reclaim 回收或被另一副本终结）→
+    调用方跳过、不计入 handled。这样副本 A stall 超时被 B reclaim 重投后，A 迟到的成功写回
+    会被 CAS（status 已非 SENDING 或 claim_token 已变/清空）拒绝，不覆盖 B 的终态。
+
+    attempts 用 claim 时读到的 `attempts_before + 1`，而非再读一次——claim 后 attempts 只可能
+    被 reclaim 路径间接改变（reclaim 不动 attempts，re-claim 也不动），唯一自增点是本函数；
+    若中途被 reclaim+重投，CAS 命中失败，attempts 也不会被本次错误推进。
+    """
+    new_attempts = attempts_before + 1
+    values: dict[str, Any] = {
+        "attempts": new_attempts,
+        "locked_at": None,
+        "claim_token": None,
+    }
+    if ok_flag:
+        values["status"] = "SENT"
+    elif new_attempts >= max_attempts:
+        values["status"] = "DEAD"
+        values["last_error"] = error
+    else:
+        values["status"] = "FAILED"
+        values["last_error"] = error
+        values["next_retry_at"] = dt.datetime.now(dt.UTC) + dt.timedelta(
+            seconds=backoff_base_seconds * (2 ** (new_attempts - 1))
+        )
+
+    async with factory() as session:
+        async with session.begin():
+            result = await session.execute(
+                update(CallbackOutbox)
+                .where(
+                    CallbackOutbox.id == oid,
+                    CallbackOutbox.status == "SENDING",
+                    CallbackOutbox.claim_token == claim_token,
+                )
+                .values(**values)
+            )
+            updated = bool(result.rowcount == 1)  # type: ignore[attr-defined]
+
+    if not updated:
+        # 迟到副本：行已被 reclaim 回收或被另一副本终结 → 本次写回作废，下游靠 X-Request-Id 幂等
+        logger.warning(
+            "outbox %s 终结 CAS 未命中（status!=SENDING 或 claim_token 不匹配，"
+            "已被 reclaim/另一副本终结）→ 跳过写回",
+            oid,
+        )
+    elif values["status"] == "DEAD":
+        logger.error("outbox %s DEAD after %s attempts: %s", oid, new_attempts, error)
+
+    return updated
 
 
 async def replay_dead(session: AsyncSession, *, outbox_id: int) -> bool:
