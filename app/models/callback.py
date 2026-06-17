@@ -62,3 +62,7 @@ class CallbackOutbox(Base, TenantMixin, TimestampMixin):
     locked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     # 触发该转发的原始 trace_id（A-m-001），dispatcher 透传给下游，链路不断
     trace_id: Mapped[str | None] = mapped_column(String(64))
+    # 本次 claim 的唯一令牌（每次原子 claim 生成新 uuid4）。终结状态写回用
+    # CAS 守护（WHERE status=SENDING AND claim_token=本次令牌），防止 stall 超时被
+    # reclaim 后的旧副本迟到成功覆盖新副本的终态（at-least-once 极端边界加固）。
+    claim_token: Mapped[str | None] = mapped_column(String(36))

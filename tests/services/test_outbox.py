@@ -7,7 +7,13 @@ import respx
 from app.core.db import build_engine, build_session_factory
 from app.models.base import Base
 from app.models.callback import CallbackOutbox
-from app.services.outbox import dispatch_once, enqueue_forward, replay_dead
+from app.services.outbox import (
+    _finalize_after_send,
+    _reclaim_stale_sending,
+    dispatch_once,
+    enqueue_forward,
+    replay_dead,
+)
 
 
 @pytest.fixture()
@@ -341,3 +347,164 @@ async def test_dispatch_skips_fresh_sending_not_reclaimed(factory) -> None:
     async with factory() as s:
         row = (await s.execute(select(CallbackOutbox))).scalars().one()
     assert row.status == "SENDING"  # 仍由（假想的）别副本持有，未被本轮动
+
+
+# ---------------------------------------------------------------------------
+# A-M-002（migration 0009）：claim_token CAS 防迟到副本覆盖终态
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_dispatch_success_clears_claim_token(factory) -> None:
+    """成功投递后 claim_token 被清空（终态行无活跃 claim）。"""
+    respx.post("http://lifecycle/cb").mock(return_value=httpx.Response(200))
+    oid = await _enqueue(factory)
+    await dispatch_once(factory, targets=TARGETS, max_attempts=3)
+    async with factory() as s:
+        row = await s.get(CallbackOutbox, oid)
+    assert row.status == "SENT"
+    assert row.claim_token is None
+
+
+@pytest.mark.asyncio
+async def test_finalize_cas_rejects_stale_claim_token(factory) -> None:
+    """CAS：claim_token 不匹配（迟到副本 A）→ 终结写回被拒，B 的行状态/令牌/attempts 不变。"""
+    import datetime as dt
+
+    # 行已被「副本 B」claim 并持 token=tok-B
+    async with factory() as s:
+        async with s.begin():
+            row = CallbackOutbox(
+                tenant_id="OCBC",
+                target="lifecycle",
+                payload={"bizSeqNo": "B1"},
+                status="SENDING",
+                locked_at=dt.datetime.now(dt.UTC),
+                claim_token="tok-B",  # noqa: S106
+            )
+            s.add(row)
+            await s.flush()
+            oid = row.id
+
+    # 「副本 A」（持旧 token=tok-A）迟到终结 → CAS 未命中
+    ok = await _finalize_after_send(
+        factory,
+        oid=oid,
+        claim_token="tok-A",  # noqa: S106
+        attempts_before=0,
+        ok_flag=True,
+        error=None,
+        max_attempts=3,
+        backoff_base_seconds=0,
+    )
+    assert ok is False
+    async with factory() as s:
+        row = await s.get(CallbackOutbox, oid)
+    assert row.status == "SENDING"  # B 仍持有，未被 A 覆盖
+    assert row.claim_token == "tok-B"  # noqa: S105
+    assert row.attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_finalize_cas_succeeds_with_matching_token(factory) -> None:
+    """CAS：claim_token 匹配 → 终结成功，状态 SENT、令牌清空、attempts+1。"""
+    import datetime as dt
+
+    async with factory() as s:
+        async with s.begin():
+            row = CallbackOutbox(
+                tenant_id="OCBC",
+                target="lifecycle",
+                payload={"bizSeqNo": "B1"},
+                status="SENDING",
+                locked_at=dt.datetime.now(dt.UTC),
+                claim_token="tok-A",  # noqa: S106
+                attempts=0,
+            )
+            s.add(row)
+            await s.flush()
+            oid = row.id
+
+    ok = await _finalize_after_send(
+        factory,
+        oid=oid,
+        claim_token="tok-A",  # noqa: S106
+        attempts_before=0,
+        ok_flag=True,
+        error=None,
+        max_attempts=3,
+        backoff_base_seconds=0,
+    )
+    assert ok is True
+    async with factory() as s:
+        row = await s.get(CallbackOutbox, oid)
+    assert row.status == "SENT"
+    assert row.claim_token is None
+    assert row.attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_finalize_cas_failed_branch_sets_retry(factory) -> None:
+    """CAS 命中 + ok_flag=False + 未达 max → FAILED + next_retry_at 设定 + 令牌清空。"""
+    import datetime as dt
+
+    async with factory() as s:
+        async with s.begin():
+            row = CallbackOutbox(
+                tenant_id="OCBC",
+                target="lifecycle",
+                payload={"bizSeqNo": "B1"},
+                status="SENDING",
+                locked_at=dt.datetime.now(dt.UTC),
+                claim_token="tok-A",  # noqa: S106
+                attempts=0,
+            )
+            s.add(row)
+            await s.flush()
+            oid = row.id
+
+    ok = await _finalize_after_send(
+        factory,
+        oid=oid,
+        claim_token="tok-A",  # noqa: S106
+        attempts_before=0,
+        ok_flag=False,
+        error="http 502",
+        max_attempts=3,
+        backoff_base_seconds=1,
+    )
+    assert ok is True
+    async with factory() as s:
+        row = await s.get(CallbackOutbox, oid)
+    assert row.status == "FAILED"
+    assert row.last_error == "http 502"
+    assert row.next_retry_at is not None
+    assert row.claim_token is None
+    assert row.attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_reclaim_clears_claim_token(factory) -> None:
+    """reclaim 把超时 SENDING 回 FAILED 时清空 claim_token（旧 claim 作废）。"""
+    import datetime as dt
+
+    async with factory() as s:
+        async with s.begin():
+            row = CallbackOutbox(
+                tenant_id="OCBC",
+                target="lifecycle",
+                payload={"bizSeqNo": "B1"},
+                status="SENDING",
+                locked_at=dt.datetime(2020, 1, 1, tzinfo=dt.UTC),
+                claim_token="tok-stale",  # noqa: S106
+            )
+            s.add(row)
+            await s.flush()
+            oid = row.id
+
+    await _reclaim_stale_sending(factory, now=dt.datetime.now(dt.UTC), claim_timeout_seconds=1.0)
+    async with factory() as s:
+        row = await s.get(CallbackOutbox, oid)
+    assert row.status == "FAILED"
+    assert row.claim_token is None
