@@ -49,6 +49,30 @@
         }
       }
     },
+    "/build-info": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Build Info",
+        "description": "Return image build time (UTC ISO-8601) + git commit SHA, envelope-wrapped.\n\nBoth are baked into the image by deploy/Dockerfile. Each returns ``null``\nwhen its file is absent — e.g. a local dev run outside Docker. ``git_sha``\nanchors the running container to the exact commit it was built from\n(deploy verify step (a)).",
+        "operationId": "build_info_build_info_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Build Info Build Info Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/loans/p2p-disbursements": {
       "post": {
         "tags": [
