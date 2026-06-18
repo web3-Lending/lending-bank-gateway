@@ -4,7 +4,13 @@ COPY pyproject.toml README.md ./
 COPY app ./app
 COPY alembic.ini ./
 COPY alembic ./alembic
-RUN pip install --no-cache-dir -e . && useradd -r gateway && mkdir -p /srv/archive && chown gateway /srv/archive
+# 启动入口：先 alembic upgrade head 再 uvicorn（容器自迁移，与 lending-recon 一致）。
+COPY deploy/entrypoint.sh /srv/entrypoint.sh
+# PIP_DEFAULT_TIMEOUT/PIP_RETRIES 走 env，让 PEP517 build-isolation 子进程（拉 setuptools 等
+# build 依赖）也继承——dev-hw→pythonhosted 偶发 read timeout，仅命令行 --timeout 覆盖不到子进程。
+ENV PIP_DEFAULT_TIMEOUT=300 PIP_RETRIES=8
+RUN pip install --no-cache-dir --timeout=300 --retries=8 -e . && useradd -r gateway \
+    && mkdir -p /srv/archive && chown gateway /srv/archive && chmod +x /srv/entrypoint.sh
 # Git commit SHA + build-time stamp baked into the image — read by GET /build-info;
 # the sha is also exposed as an OCI revision label. Written as root (before
 # USER gateway) so /srv ownership stays root; the files are world-readable.
@@ -16,4 +22,4 @@ LABEL org.opencontainers.image.revision="${GIT_SHA}"
 USER gateway
 EXPOSE 8022
 HEALTHCHECK --interval=30s --timeout=5s CMD python -c "import urllib.request as u; u.urlopen('http://127.0.0.1:8022/healthz')"
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8022"]
+CMD ["/srv/entrypoint.sh"]
