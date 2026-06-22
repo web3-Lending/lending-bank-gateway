@@ -46,11 +46,14 @@ async def _select_candidates(
     now: dt.datetime,
     stale_after_seconds: float,
     max_age_seconds: float,
+    leg_backfill_seconds: float,
     batch_limit: int,
 ) -> list[tuple[str, str]]:
-    """兜底候选：① 非终态且超 stale_after；② 终态但无 leg。均限 max_age 窗内。"""
+    """兜底候选：① 非终态 stale（created_at 在 max_age~stale_after 窗）；② 终态但无 leg
+    且 finalized_at 在 leg_backfill 短窗内（超窗放弃补拉，防 CLT 空 steps 每轮热重试）。"""
     stale_before = now - timedelta(seconds=stale_after_seconds)
     min_created = now - timedelta(seconds=max_age_seconds)
+    backfill_after = now - timedelta(seconds=leg_backfill_seconds)
     has_leg = exists().where(
         and_(
             BankTxnLeg.tenant_id == BankTxnOrder.tenant_id,
@@ -60,16 +63,16 @@ async def _select_candidates(
     cond_nonterminal = and_(
         BankTxnOrder.status.in_(_NON_TERMINAL),
         BankTxnOrder.created_at < stale_before,
+        BankTxnOrder.created_at > min_created,
     )
-    cond_terminal_no_leg = and_(BankTxnOrder.status.in_(_TERMINAL), ~has_leg)
+    cond_terminal_no_leg = and_(
+        BankTxnOrder.status.in_(_TERMINAL),
+        ~has_leg,
+        BankTxnOrder.finalized_at > backfill_after,
+    )
     stmt = (
         select(BankTxnOrder.tenant_id, BankTxnOrder.biz_seq_no)
-        .where(
-            and_(
-                BankTxnOrder.created_at > min_created,
-                or_(cond_nonterminal, cond_terminal_no_leg),
-            )
-        )
+        .where(or_(cond_nonterminal, cond_terminal_no_leg))
         .limit(batch_limit)
     )
     return [(r[0], r[1]) for r in (await session.execute(stmt)).all()]
@@ -82,6 +85,7 @@ async def reconcile_once(
     now: dt.datetime,
     stale_after_seconds: float,
     max_age_seconds: float,
+    leg_backfill_seconds: float,
     batch_limit: int,
 ) -> int:
     """一轮兜底：选候选 → 逐单 sync_legs_for（隔离失败）。now 由调用方传入（可测）。"""
@@ -91,6 +95,7 @@ async def reconcile_once(
             now=now,
             stale_after_seconds=stale_after_seconds,
             max_age_seconds=max_age_seconds,
+            leg_backfill_seconds=leg_backfill_seconds,
             batch_limit=batch_limit,
         )
     count = 0
@@ -116,6 +121,7 @@ async def run_forever(  # pragma: no cover
     interval_seconds: float,
     stale_after_seconds: float,
     max_age_seconds: float,
+    leg_backfill_seconds: float,
     batch_limit: int,
 ) -> None:
     """薄壳循环：每 interval 扫一轮兜底。崩溃由 supervised 退避重启。"""
@@ -127,6 +133,7 @@ async def run_forever(  # pragma: no cover
             now=now,
             stale_after_seconds=stale_after_seconds,
             max_age_seconds=max_age_seconds,
+            leg_backfill_seconds=leg_backfill_seconds,
             batch_limit=batch_limit,
         )
         await asyncio.sleep(interval_seconds)

@@ -183,6 +183,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                         interval_seconds=settings.order_reconcile_interval_seconds,
                         stale_after_seconds=settings.order_reconcile_stale_after_seconds,
                         max_age_seconds=settings.order_reconcile_max_age_seconds,
+                        leg_backfill_seconds=settings.order_reconcile_leg_backfill_seconds,
                         batch_limit=settings.order_reconcile_batch_limit,
                     ),
                     restart_delay_seconds=settings.worker_restart_delay_seconds,

@@ -137,7 +137,7 @@ async def test_finalize_idempotent_skips_when_already_finalized(factory) -> None
 # ── order_reconcile worker ────────────────────────────────────────────────────
 
 
-async def _seed_order(factory, *, biz, status, with_leg=False) -> None:
+async def _seed_order(factory, *, biz, status, with_leg=False, finalized_at=None) -> None:
     async with factory() as s:
         async with s.begin():
             s.add(
@@ -151,6 +151,7 @@ async def _seed_order(factory, *, biz, status, with_leg=False) -> None:
                     caller_service="lifecycle",
                     status=status,
                     submitted_at=dt.datetime.now(dt.UTC),
+                    finalized_at=finalized_at,
                 )
             )
             await s.flush()
@@ -177,7 +178,9 @@ async def _seed_order(factory, *, biz, status, with_leg=False) -> None:
 async def test_reconcile_once_picks_stale_nonterminal_and_terminal_without_leg(factory) -> None:
     """兜底双扫描：① 非终态 stale；② 终态但无 leg。终态有 leg 的不选。"""
     await _seed_order(factory, biz="DSB-STALE", status="SUBMITTED")  # ① 非终态
-    await _seed_order(factory, biz="DSB-TERM-NOLEG", status="SUCCEEDED")  # ② 终态无 leg
+    await _seed_order(
+        factory, biz="DSB-TERM-NOLEG", status="SUCCEEDED", finalized_at=dt.datetime.now(dt.UTC)
+    )  # ② 终态无 leg（finalized 在 backfill 窗内）
     await _seed_order(factory, biz="DSB-TERM-LEG", status="SUCCEEDED", with_leg=True)  # 不选
     now = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=60)  # 让 stale_after 已过
     with patch("app.workers.order_reconcile_worker.sync_legs_for", new_callable=AsyncMock) as m:
@@ -187,6 +190,7 @@ async def test_reconcile_once_picks_stale_nonterminal_and_terminal_without_leg(f
             now=now,
             stale_after_seconds=1.0,
             max_age_seconds=1e9,
+            leg_backfill_seconds=1e9,
             batch_limit=10,
         )
     assert count == 2
@@ -210,6 +214,31 @@ async def test_reconcile_once_isolates_per_order_failure(factory) -> None:
             now=now,
             stale_after_seconds=1.0,
             max_age_seconds=1e9,
+            leg_backfill_seconds=1e9,
             batch_limit=10,
         )
     assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_reconcile_skips_terminal_no_leg_beyond_backfill_window(factory) -> None:
+    """终态无 leg 但 finalized_at 超 leg_backfill 窗 → 不再补拉（防 CLT 空 steps 长期热重试）。"""
+    now = dt.datetime.now(dt.UTC)
+    await _seed_order(
+        factory,
+        biz="DSB-OLD-TERM",
+        status="SUCCEEDED",
+        finalized_at=now - dt.timedelta(hours=2),  # 2h 前收口
+    )
+    with patch("app.workers.order_reconcile_worker.sync_legs_for", new_callable=AsyncMock) as m:
+        count = await reconcile_once(
+            factory,
+            wedap=AsyncMock(),
+            now=now,
+            stale_after_seconds=1.0,
+            max_age_seconds=1e9,
+            leg_backfill_seconds=3600.0,  # 1h 窗，2h 前的终态单不选
+            batch_limit=10,
+        )
+    assert count == 0
+    assert m.call_count == 0

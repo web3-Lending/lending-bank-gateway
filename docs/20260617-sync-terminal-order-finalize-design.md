@@ -89,8 +89,8 @@ finalize_order_in_session(session, *, tenant_id, biz_seq_no, target_status, sour
 
 新增 `app/workers/order_reconcile_worker.py`（**命名区别于现有对账摄取 `recon_worker.py`**），配置前缀 `order_reconcile_*`：
 
-- 扫描两类：① 非终态 `{ACCEPTED, SUBMITTED, PROCESSING, RESULT_UNKNOWN}` 且 `submitted_at` 超 `stale_after`；② 终态但 legs 缺失。
-- **biz_type-aware 拉取**（MED-1）：composite（CLT/DST 多 leg）用 `/composite-transactions/{biz}/steps`；DSB/RPY/DST 单 leg 用各自 `/status` 端点兜底；**CLT 若仅回调能给明细 → 标注「CLT 无法 worker 兜底明细」为运维风险**（见 §6）。
+- 扫描两类（实现：均按 `created_at`/`finalized_at` 时间窗，非 `submitted_at`）：① 非终态 `{ACCEPTED, SUBMITTED, PROCESSING, RESULT_UNKNOWN}` 且 `created_at` 在 `max_age`~`stale_after` 窗内；② 终态但 legs 缺失，**且 `finalized_at` 在 `leg_backfill` 短窗内**（默认 1h，超窗放弃补拉，防 CLT/无 composite 明细的终态单每轮空 steps 热重试，codex MED）。
+- **拉取（composite-only）**（MED-1）：`sync_legs_for` 统一调 `/composite-transactions/{biz}/steps`（未做 biz_type 分流）；CLT 无 status 端点、若非 composite 则明细兜不到 → **「CLT 无法 worker 兜底明细」为运维风险**（见 §6），后续可扩展 biz_type-aware 分流。
 - 拉到后走 `finalize_order_in_session`（统一收口，含转发）。
 - 单单 `LegsSyncIncomplete` 隔离不中断批；`max_age` 下界避免无限扫古单。
 - `main.py` lifespan 照 outbox/recon worker 同款 `supervised()` 注册；3 worker 共享 worker 连接池 → **重评 `worker_db_pool_size`**。
