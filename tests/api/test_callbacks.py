@@ -433,16 +433,49 @@ def test_replay_received_row_after_ingest_fails_again(client: TestClient) -> Non
 
 
 def test_after_ingest_enqueues_outbox_row(client: TestClient) -> None:
-    """callback 接收后 _after_ingest 真实执行 → CallbackOutbox 行落库，target=lifecycle。
+    """V2：终态回调 → apply_legs 聚合 SUCCEEDED → finalize 转发 outbox（稳定 dedup key）。
 
-    A-C-002 后：_after_ingest 先外呼预取 steps 再单事务 apply_legs + enqueue。
-    这里 mock wedap.get_composite_steps + apply_legs_in_session，让 enqueue_forward 真实写库。
+    同步优先 V2 后转发并入 apply_legs 的终态收口（finalize_terminal_in_session），仅终态转发，
+    dedup_key 用业务稳定键 fwd-{tenant}-{biz}-{status}（替代易分叉的 fwd-{request_id}）。
     """
-    from unittest.mock import patch
+    from decimal import Decimal
 
     from sqlalchemy import select
 
     from app.models.callback import CallbackOutbox
+    from app.models.txn import BankTxnOrder
+
+    async def _seed() -> None:
+        f = client.app.state.session_factory  # type: ignore[union-attr]
+        async with f() as s:
+            async with s.begin():
+                s.add(
+                    BankTxnOrder(
+                        tenant_id="OCBC",
+                        biz_seq_no="BSQ-20260611-0001",
+                        business_action="REPAY",
+                        biz_type="RPY",
+                        amount=Decimal("100.0000"),
+                        currency="USD",
+                        caller_service="lifecycle",
+                        status="SUBMITTED",
+                    )
+                )
+
+    asyncio.run(_seed())
+
+    wedap = AsyncMock()
+    wedap.get_composite_steps.return_value = [
+        {
+            "stepSeq": 1,
+            "sysRefNo": "REF-OUT-1",
+            "stepType": "REPAYMENT",
+            "amount": "100.0000",
+            "currencyCode": "USD",
+            "status": "SUCCESS",
+        }
+    ]
+    client.app.state.wedap = wedap  # type: ignore[union-attr]
 
     async def _query_outbox(engine: Any) -> list[Any]:
         async with engine.connect() as conn:
@@ -451,16 +484,14 @@ def test_after_ingest_enqueues_outbox_row(client: TestClient) -> None:
             )
             return list(result.fetchall())
 
-    client.app.state.wedap = AsyncMock()  # type: ignore[union-attr]  # get_composite_steps no-op
-    with patch("app.services.legs.apply_legs_in_session", new_callable=AsyncMock):
-        r = client.post("/api/v1/callbacks/wedap/transactions", json=BODY, headers=HEADERS)
-
+    r = client.post("/api/v1/callbacks/wedap/transactions", json=BODY, headers=HEADERS)
     assert r.status_code == 200
     assert r.json()["data"]["received"] is True
 
     rows = asyncio.run(_query_outbox(client.app.state.engine))  # type: ignore[union-attr]
     assert len(rows) == 1
     assert rows[0].target == "lifecycle"  # type: ignore[union-attr]
+    assert rows[0].dedup_key == "fwd-OCBC-BSQ-20260611-0001-SUCCEEDED"  # type: ignore[union-attr]
 
 
 def test_after_ingest_atomic_enqueue_failure_rolls_back_legs(client: TestClient) -> None:
@@ -519,7 +550,7 @@ def test_after_ingest_atomic_enqueue_failure_rolls_back_legs(client: TestClient)
             return int((await conn.execute(select(func.count()).select_from(model))).scalar_one())
 
     with patch(
-        "app.main.enqueue_forward",
+        "app.services.order_finalize.enqueue_forward",
         new_callable=AsyncMock,
         side_effect=RuntimeError("enqueue boom"),
     ):

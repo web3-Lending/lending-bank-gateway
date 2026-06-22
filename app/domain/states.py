@@ -28,6 +28,7 @@ _ALLOWED: dict[OrderStatus, set[OrderStatus]] = {
     OrderStatus.ACCEPTED: {
         OrderStatus.SUBMITTED,
         OrderStatus.RESULT_UNKNOWN,
+        OrderStatus.SUCCEEDED,  # 同步优先：wedap ≤5s 返 SUCCESS → 直接终态（配 tx2 CAS 防倒退）
         OrderStatus.FAILED,
         OrderStatus.CANCELLED,
     },

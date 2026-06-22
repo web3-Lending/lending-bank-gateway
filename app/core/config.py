@@ -35,7 +35,8 @@ class Settings(BaseSettings):
     db_pool_size: int = 5
     db_max_overflow: int = 10
     # worker 专用连接池（A-M-003）：与 API 隔离，避免 worker 慢外呼/长事务争抢在线请求连接
-    worker_db_pool_size: int = 3
+    # 3 worker（outbox / recon-ingest / order-reconcile）共享本池，pool_size 取 4 留余量
+    worker_db_pool_size: int = 4
     worker_db_max_overflow: int = 5
     workers_enabled: bool = True
     """是否在进程内启动后台 worker（GW_WORKERS_ENABLED）。
@@ -45,6 +46,18 @@ class Settings(BaseSettings):
     """outbox dispatcher 每轮投递间隔秒数（GW_OUTBOX_INTERVAL_SECONDS）。"""
     recon_interval_seconds: float = 30.0
     """recon worker 每轮摄取间隔秒数（GW_RECON_INTERVAL_SECONDS）。"""
+    order_reconcile_interval_seconds: float = 60.0
+    """order-reconcile worker 每轮扫描间隔秒数（GW_ORDER_RECONCILE_INTERVAL_SECONDS）。"""
+    order_reconcile_stale_after_seconds: float = 30.0
+    """order 未达终态多久视为待兜底（GW_ORDER_RECONCILE_STALE_AFTER_SECONDS）。"""
+    order_reconcile_max_age_seconds: float = 604800.0
+    """只兜底此窗口内 order，避免无限扫古单（默认 7d）。GW_ORDER_RECONCILE_MAX_AGE_SECONDS"""
+    order_reconcile_leg_backfill_seconds: float = 3600.0
+    """终态无 leg 的 leg 补拉窗（按 finalized_at，默认 1h）：超此窗放弃补拉，避免 CLT/无 composite
+    明细的终态单每轮热重试打爆 wedap。超窗 = 明细永缺（CLT residual risk）。
+    GW_ORDER_RECONCILE_LEG_BACKFILL_SECONDS"""
+    order_reconcile_batch_limit: int = 100
+    """每轮兜底处理的 order 上限（GW_ORDER_RECONCILE_BATCH_LIMIT）。"""
     archive_dir: str = "/srv/archive"
     """对账文件本地归档目录（GW_ARCHIVE_DIR）。"""
     worker_restart_delay_seconds: float = 5.0

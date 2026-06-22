@@ -13,6 +13,7 @@ from app.domain.states import (
     assert_transition,
 )
 from app.models.txn import BankTxnLeg, BankTxnOrder
+from app.services.order_finalize import finalize_terminal_in_session, is_terminal
 
 
 class LegsSyncIncomplete(Exception):
@@ -43,6 +44,8 @@ async def apply_legs_in_session(
     tenant_id: str,
     biz_seq_no: str,
     steps: list[dict[str, Any]],
+    source: str = "CALLBACK",
+    trace_id: str = "",
 ) -> None:
     """在**调用方事务内** upsert leg（external_ref/金额不可变，status 可推进）→ 聚合父单。
 
@@ -141,6 +144,14 @@ async def apply_legs_in_session(
         .all()
     )
     if not all_legs:
+        # 空 steps 不静默 no-op（codex HIGH-3）：order 终态但 legs 缺失（如 CLT 无 composite
+        # 明细）会留资金流水裂缝，必须留痕告警，由后续重放/兜底 worker 补拉，而非吞掉。
+        logger.warning(
+            "apply_legs: no legs for %s/%s (source=%s); ledger 明细缺失待补拉",
+            tenant_id,
+            biz_seq_no,
+            source,
+        )
         return
     try:
         new_status = aggregate_order_status(
@@ -149,6 +160,12 @@ async def apply_legs_in_session(
         if new_status != OrderStatus(order.status):
             assert_transition(OrderStatus(order.status), new_status)
             order.status = new_status
+            # 终态统一收口：finalized_at/via + audit + 转发 lifecycle（稳定 key）。
+            # 幂等：若同步路径已收口（finalized_at 非空）则 finalize 内部跳过，不重复转发。
+            if is_terminal(new_status):
+                await finalize_terminal_in_session(
+                    session, order=order, source=source, trace_id=trace_id
+                )
     except (ValueError, IllegalTransition) as exc:
         logger.exception(
             "sync_legs aggregate/transition rejected %s/%s",
@@ -166,11 +183,16 @@ async def sync_legs_for(
     wedap: Any,
     tenant_id: str,
     biz_seq_no: str,
+    source: str = "RECONCILE",
 ) -> None:
-    """拉 steps（事务外外呼）→ 单事务 apply_legs_in_session。独立调用入口，保持原契约。"""
+    """拉 steps（事务外外呼）→ 单事务 apply_legs_in_session。order-reconcile worker 兜底入口。"""
     steps = await wedap.get_composite_steps(tenant_id=tenant_id, biz_seq_no=biz_seq_no)
     async with factory() as session:
         async with session.begin():
             await apply_legs_in_session(
-                session, tenant_id=tenant_id, biz_seq_no=biz_seq_no, steps=steps
+                session,
+                tenant_id=tenant_id,
+                biz_seq_no=biz_seq_no,
+                steps=steps,
+                source=source,
             )
