@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Any
 
 import httpx
-from sqlalchemy import update
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -21,6 +21,7 @@ from app.services.idempotency import (
     check_or_register,
     record_response,
 )
+from app.services.order_finalize import finalize_terminal_in_session, is_terminal
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +107,16 @@ async def submit_order(
             request_id=req.request_id,
             payload=req.wedap_payload,
         )
-        new_status = OrderStatus.SUBMITTED
+        # 同步优先：按 wedap HTTP 200 返回的 txnStatus 映射 order 终态
+        # SUCCESS（≤5s 同步终态）→ SUCCEEDED；FAILED（HTTP 200 业务失败）→ FAILED；
+        # PROCESSING（>5s 异步在途）/ 缺省 / 未知 → SUBMITTED（保守，等回调/兜底 worker）
+        wedap_status = str(data.get("txnStatus", "")).upper()
+        if wedap_status == "SUCCESS":
+            new_status = OrderStatus.SUCCEEDED
+        elif wedap_status == "FAILED":
+            new_status = OrderStatus.FAILED
+        else:
+            new_status = OrderStatus.SUBMITTED
         response: dict[str, Any] = {
             "txnStatus": data.get("txnStatus", "PROCESSING"),
             "bizSeqNo": req.biz_seq_no,
@@ -132,19 +142,48 @@ async def submit_order(
         new_status = OrderStatus.FAILED
         response = {"txnStatus": "FAILED", "bizSeqNo": req.biz_seq_no, "errorCode": exc.code}
 
-    # 事务2：状态推进 + submitted_at + record_response + audit
+    # 事务2：CAS 状态推进（FOR UPDATE 读 order，仅当仍 ACCEPTED 才推进——防回调/兜底已
+    # 聚合到更强终态被本次外呼结果盲写倒退，codex HIGH-1）+ 同步终态收口 + record_response。
     assert_transition(OrderStatus.ACCEPTED, new_status)
     now = dt.datetime.now(dt.UTC)
     async with factory() as session:
         async with session.begin():
-            await session.execute(
-                update(BankTxnOrder)
-                .where(
-                    BankTxnOrder.tenant_id == req.tenant_id,
-                    BankTxnOrder.biz_seq_no == req.biz_seq_no,
+            order = (
+                await session.execute(
+                    select(BankTxnOrder)
+                    .where(
+                        BankTxnOrder.tenant_id == req.tenant_id,
+                        BankTxnOrder.biz_seq_no == req.biz_seq_no,
+                    )
+                    .with_for_update()
                 )
-                .values(status=new_status, submitted_at=now)
-            )
+            ).scalar_one()
+            if order.status == OrderStatus.ACCEPTED:
+                order.status = new_status
+                order.submitted_at = now
+                if is_terminal(new_status):
+                    # 同步终态：finalized_at/via + audit + 转发 lifecycle（稳定 key）
+                    await finalize_terminal_in_session(
+                        session,
+                        order=order,
+                        source="SYNC",
+                        trace_id=req.request_id,
+                        caller_service=req.caller_service,
+                    )
+                else:
+                    # 非终态（SUBMITTED/RESULT_UNKNOWN）：仅审计，不转发（等回调/兜底）
+                    await write_audit(
+                        session,
+                        tenant_id=req.tenant_id,
+                        actor=f"svc:{req.caller_service}",
+                        action=f"ORDER_{new_status}",
+                        entity=f"bank_txn_order:{req.biz_seq_no}",
+                        payload={
+                            "business_action": req.business_action,
+                            "amount": str(req.amount),
+                        },
+                    )
+            # else：order 已被回调/兜底 worker 推进到更强态 → CAS skip 不覆盖，仅写 record_response
             await record_response(
                 session,
                 tenant_id=req.tenant_id,
@@ -152,13 +191,5 @@ async def submit_order(
                 idempotency_key=req.biz_seq_no,
                 response=response,
                 final_effect_id=f"order:{req.biz_seq_no}",
-            )
-            await write_audit(
-                session,
-                tenant_id=req.tenant_id,
-                actor=f"svc:{req.caller_service}",
-                action=f"ORDER_{new_status}",
-                entity=f"bank_txn_order:{req.biz_seq_no}",
-                payload={"business_action": req.business_action, "amount": str(req.amount)},
             )
     return response

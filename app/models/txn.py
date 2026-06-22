@@ -39,6 +39,9 @@ class BankTxnOrder(Base, TenantMixin, TimestampMixin):
     submitted_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     acked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     finalized_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    # 终态来源留痕：SYNC（同步 HTTP 终态）/ CALLBACK（回调 leg 聚合）/ RECONCILE（兜底 worker）
+    # 给 recon 对账「同步 vs 回调谁收口」+ 排查重复 webhook 用
+    finalized_via: Mapped[str | None] = mapped_column(String(12))
 
 
 class BankTxnLeg(Base, TenantMixin, TimestampMixin):

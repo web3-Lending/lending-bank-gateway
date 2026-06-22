@@ -27,7 +27,6 @@ from app.core.context import IdentifierMiddleware, current_ids
 from app.core.db import build_engine, build_session_factory
 from app.core.envelope import err
 from app.core.s2s import S2SMiddleware
-from app.services.outbox import enqueue_forward
 from app.workers.supervisor import supervised
 
 logger = logging.getLogger(__name__)
@@ -94,12 +93,13 @@ async def _generic_exception_handler(request: Request, exc: Exception) -> JSONRe
 async def _after_ingest(
     request: Request, *, tenant_id: str, body: dict[str, Any], request_id: str, trace_id: str
 ) -> None:
-    """leg 同步/父单聚合 + outbox 转发入队 —— **同一事务原子提交**（A-C-002）。
+    """leg 同步/父单聚合 + （终态时）outbox 转发 —— **同一事务原子提交**（A-C-002）。
 
-    外呼 get_composite_steps 在事务外预取（避免长事务持锁）；随后单事务内 apply_legs +
-    enqueue_forward 一起提交。这样消除「leg 已落库但 outbox 未入队」的崩溃窗口——
-    崩溃则整体回滚，inbox 留 RECEIVED 由重放幂等再驱动（apply 幂等 upsert + enqueue
-    fwd-{request_id} 去重）。request_id 作 outbox dedup_key 保证跨重放只产生一条转发。
+    外呼 get_composite_steps 在事务外预取（避免长事务持锁）；随后单事务内 apply_legs
+    一起提交。V2 同步优先：**转发已并入 apply_legs 的终态收口**（finalize_terminal_in_session，
+    仅 SUCCEEDED/FAILED 转发，dedup_key 用业务稳定键 fwd-{tenant}-{biz}-{status}）——与同步/
+    兜底路径共用同一收口，消除「同步终态/回调终态各转一次」的双事件分叉。非终态（pending leg
+    → PROCESSING）不转发，lifecycle 等终态。崩溃则整体回滚，inbox 留 RECEIVED 由重放幂等再驱动。
     """
     from app.services.legs import apply_legs_in_session
 
@@ -108,18 +108,15 @@ async def _after_ingest(
     steps = await request.app.state.wedap.get_composite_steps(
         tenant_id=tenant_id, biz_seq_no=biz_seq_no
     )
-    # 单事务：leg 同步/父单聚合 + outbox enqueue 原子提交
+    # 单事务：leg 同步/父单聚合（终态时内部 finalize 转发）原子提交
     async with request.app.state.session_factory() as session:
         async with session.begin():
             await apply_legs_in_session(
-                session, tenant_id=tenant_id, biz_seq_no=biz_seq_no, steps=steps
-            )
-            await enqueue_forward(
                 session,
                 tenant_id=tenant_id,
-                target="lifecycle",
-                payload=body,
-                dedup_key=f"fwd-{request_id}",
+                biz_seq_no=biz_seq_no,
+                steps=steps,
+                source="CALLBACK",
                 trace_id=trace_id,
             )
 
@@ -132,7 +129,11 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     worker_engine: AsyncEngine | None = None
 
     if settings.workers_enabled:
-        from app.workers import outbox_dispatcher, recon_worker
+        from app.workers import (
+            order_reconcile_worker,
+            outbox_dispatcher,
+            recon_worker,
+        )
 
         # 独立连接池（A-M-003）：worker 慢外呼/长事务不与 API 在线请求争抢同一连接池
         worker_engine = build_engine(
@@ -170,6 +171,23 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     restart_delay_seconds=settings.worker_restart_delay_seconds,
                 ),
                 name="recon-worker",
+            )
+        )
+        tasks.append(
+            asyncio.create_task(
+                supervised(
+                    "order-reconcile-worker",
+                    lambda: order_reconcile_worker.run_forever(
+                        worker_factory,
+                        wedap=app.state.wedap,
+                        interval_seconds=settings.order_reconcile_interval_seconds,
+                        stale_after_seconds=settings.order_reconcile_stale_after_seconds,
+                        max_age_seconds=settings.order_reconcile_max_age_seconds,
+                        batch_limit=settings.order_reconcile_batch_limit,
+                    ),
+                    restart_delay_seconds=settings.worker_restart_delay_seconds,
+                ),
+                name="order-reconcile-worker",
             )
         )
         logger.info(

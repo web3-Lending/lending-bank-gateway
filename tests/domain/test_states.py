@@ -26,7 +26,7 @@ def test_legal_transitions() -> None:
     [
         (OrderStatus.SUCCEEDED, OrderStatus.FAILED),
         (OrderStatus.FAILED, OrderStatus.SUCCEEDED),
-        (OrderStatus.ACCEPTED, OrderStatus.SUCCEEDED),
+        # 注：ACCEPTED→SUCCEEDED 同步优先 V2 后已合法（≤5s 同步终态），移出非法集
         (OrderStatus.REVERSED, OrderStatus.PROCESSING),
     ],
 )
