@@ -31,6 +31,12 @@ class Settings(BaseSettings):
     v2 规划 per-service token/签名绑定，届时可移除本字段。
     """
     env: str = "local"
+    log_level: str = "INFO"
+    """root logger 级别（GW_LOG_LEVEL）。app.* 的 logger propagate 到 root，
+    create_app 时据此给 root 装 stdout handler，使 worker 启停 / 崩溃 / reconcile
+    日志在容器 `docker logs` 可见（此前 root 无 handler → INFO 全静默）。
+    取值不区分大小写：DEBUG/INFO/WARNING/ERROR；非法值回退 INFO。
+    """
     outbox_max_attempts: int = 8
     db_pool_size: int = 5
     db_max_overflow: int = 10

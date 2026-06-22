@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -208,3 +210,69 @@ def test_lifespan_workers_use_dedicated_pool_a_m_003(monkeypatch: pytest.MonkeyP
     assert captured["factory"] is not app.state.session_factory
 
     get_settings.cache_clear()
+
+
+class TestWorkerLogging:
+    """GW-WORKER-LOGGING：create_app 必须给 root 装 stdout handler，否则 app.* 的
+    INFO/exception 在容器 docker logs 里静默（worker 启停/崩溃/reconcile 全不可见）。"""
+
+    @staticmethod
+    def _reset_logging() -> None:
+        import app.main as main_mod
+
+        root = logging.getLogger()
+        for h in [
+            h
+            for h in root.handlers
+            if isinstance(h, logging.StreamHandler) and getattr(h, "stream", None) is sys.stdout
+        ]:
+            root.removeHandler(h)
+        main_mod._logging_configured = False
+
+    @staticmethod
+    def _stdout_handlers() -> list[logging.Handler]:
+        return [
+            h
+            for h in logging.getLogger().handlers
+            if isinstance(h, logging.StreamHandler) and getattr(h, "stream", None) is sys.stdout
+        ]
+
+    def test_create_app_installs_stdout_handler(self) -> None:
+        """create_app 后 root 有指向 stdout 的 StreamHandler，级别 ≤ INFO。"""
+        self._reset_logging()
+        create_app()
+        assert self._stdout_handlers(), "root 应有指向 stdout 的 StreamHandler"
+        assert logging.getLogger().level <= logging.INFO
+
+    def test_app_logger_info_propagates_to_root(self, caplog: pytest.LogCaptureFixture) -> None:
+        """app.main 的 logger.info 经 propagate 落到 root（此前 root 无 handler → 静默）。"""
+        from app.main import logger as app_logger
+
+        self._reset_logging()
+        create_app()
+        with caplog.at_level(logging.INFO):
+            app_logger.info("worker probe line")
+        assert any("worker probe line" in r.message for r in caplog.records)
+
+    def test_invalid_log_level_falls_back_to_info(self) -> None:
+        """非法 GW_LOG_LEVEL 回退 INFO，不抛异常。"""
+        from app.core.config import Settings
+
+        self._reset_logging()
+        create_app(Settings(env="test", log_level="NOPE"))
+        assert logging.getLogger().level == logging.INFO
+
+    def test_log_level_honored(self) -> None:
+        """合法 GW_LOG_LEVEL（DEBUG）生效到 root。"""
+        from app.core.config import Settings
+
+        self._reset_logging()
+        create_app(Settings(env="test", log_level="debug"))
+        assert logging.getLogger().level == logging.DEBUG
+
+    def test_configure_logging_idempotent(self) -> None:
+        """重复 create_app 不重复装 handler，避免日志行翻倍。"""
+        self._reset_logging()
+        create_app()
+        create_app()
+        assert len(self._stdout_handlers()) == 1
