@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -30,6 +31,33 @@ from app.core.s2s import S2SMiddleware
 from app.workers.supervisor import supervised
 
 logger = logging.getLogger(__name__)
+
+_logging_configured = False
+
+
+def _configure_logging(level: str) -> None:
+    """给 root logger 装 stdout handler，使 app.* 的 INFO/exception 在容器 docker logs 可见。
+
+    背景：此前 app 只 `logging.getLogger(__name__)` 而进程从未配 root handler，
+    app.main 的 `worker tasks started`、supervised 崩溃 `logger.exception`、
+    order-reconcile 的 warning 全部被 root 默认 WARNING lastResort 吞掉——运维在
+    `docker logs` 里看不到 3 个 worker 是否在跑 / 是否崩溃 / 是否扫到候选。
+
+    uvicorn 自带 logger（propagate=False）有独立 handler，不受本配置影响；这里只补
+    root 这条传播链。幂等：模块级 `_logging_configured` 防止多次 create_app（测试）
+    重复装 handler 导致日志行重复；level 非法时回退 INFO。
+    """
+    global _logging_configured
+    root = logging.getLogger()
+    resolved = logging.getLevelName(level.upper())
+    if not isinstance(resolved, int):  # getLevelName 对非法名返回 "Level XXX" 字符串
+        resolved = logging.INFO
+    root.setLevel(resolved)
+    if not _logging_configured:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+        root.addHandler(handler)
+        _logging_configured = True
 
 
 def _resolve_trace_id(request: Request) -> str:
@@ -213,6 +241,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # 不再依赖 lru_cache 全局单例 + cache_clear（A-M-002）。
     if settings is None:
         settings = get_settings()
+    _configure_logging(settings.log_level)
     if settings.env not in ("local", "test") and not settings.s2s_secret:
         raise RuntimeError(
             "GW_S2S_SECRET 必须在非 local/test 环境配置（fail-fast，资金网关禁 fail-open）"
