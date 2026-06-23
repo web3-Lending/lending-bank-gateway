@@ -94,14 +94,14 @@ async def test_replay_distribute_fixture() -> None:
 @pytest.mark.asyncio
 @respx.mock
 async def test_replay_funds_status_fixture_dsb() -> None:
-    """funds_status.json：DSB→/api/v1/loans/p2p-disbursements/{biz}/status，txnStatus=SUCCESS。"""
+    """funds_status.json：DISB→/api/v1/loans/p2p-disbursements/{biz}/status，txnStatus=SUCCESS。"""
     body = _fix("funds_status.json")
     biz = "DSB-20260611-0001234567890"
     respx.get(f"{_BASE}/api/v1/loans/p2p-disbursements/{biz}/status").mock(
         return_value=httpx.Response(200, json=body)
     )
     data = await _client().query_funds_status(
-        tenant_id=_TENANT, request_id=_REQ_ID, biz_seq_no=biz, biz_type="DSB"
+        tenant_id=_TENANT, request_id=_REQ_ID, biz_seq_no=biz, biz_type="DISB"
     )
     assert data["txnStatus"] == "SUCCESS"
 

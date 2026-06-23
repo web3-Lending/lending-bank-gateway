@@ -126,9 +126,9 @@ class WedapClient:
 
     # biz_type → wedap 状态查询路径映射（wedap 无统一 /bank-funds/status 接口）
     _STATUS_PATH_TMPL: dict[str, str] = {
-        "DSB": "/api/v1/loans/p2p-disbursements/{biz}/status",
-        "RPY": "/api/v1/loans/p2p-repayments/{biz}/status",
-        "DST": "/api/v1/bank-funds/user-distributions/{biz}",
+        "DISB": "/api/v1/loans/p2p-disbursements/{biz}/status",
+        "RPMT": "/api/v1/loans/p2p-repayments/{biz}/status",
+        "DIST": "/api/v1/bank-funds/user-distributions/{biz}",
     }
 
     async def query_funds_status(
@@ -141,11 +141,11 @@ class WedapClient:
     ) -> dict[str, Any]:
         """按业务类型路由到对应的 wedap 状态查询接口。
 
-        wedap 无统一 /bank-funds/status；路径因 biz_type 而异（dev 实调验证，2026-06-12）：
-          - DSB → GET /api/v1/loans/p2p-disbursements/{bizSeqNo}/status
-          - RPY → GET /api/v1/loans/p2p-repayments/{bizSeqNo}/status
-          - DST → GET /api/v1/bank-funds/user-distributions/{bizSeqNo}
-        不支持的 biz_type（如 CLT）raise WedapError("UNSUPPORTED", ...)，调用方走降级路径。
+        wedap 无统一 /bank-funds/status；路径因 biz_type 而异（biz_type 对齐 lifecycel 真码）：
+          - DISB → GET /api/v1/loans/p2p-disbursements/{bizSeqNo}/status
+          - RPMT → GET /api/v1/loans/p2p-repayments/{bizSeqNo}/status
+          - DIST → GET /api/v1/bank-funds/user-distributions/{bizSeqNo}
+        不支持的 biz_type（如 COLL 归集）raise WedapError("UNSUPPORTED", ...)，调用方走降级路径。
         """
         tmpl = self._STATUS_PATH_TMPL.get(biz_type)
         if tmpl is None:
