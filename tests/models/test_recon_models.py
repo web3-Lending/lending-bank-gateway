@@ -465,3 +465,42 @@ def test_task_uq_recon_task_ver_mysql(db_session_recon) -> None:
     db_session_recon.add(ReconResultTask(**{**row, "request_id": "REQ-INT-VER-0002"}))
     with pytest.raises(IntegrityError):
         db_session_recon.flush()
+
+
+# ─────────────────────── G4：复合 FK (task_id, tenant_id) 物理拦截 ──────────────
+
+
+@pytest.mark.asyncio
+async def test_diff_orphan_task_id_raises_fk(session) -> None:
+    """G4：子表 task_id 指向不存在 task → 复合 FK 触发 IntegrityError（SQLite FK pragma ON）。"""
+    session.add(ReconResultDiff(tenant_id=_TENANT, task_id=999999, diff_type="MISSING"))
+    with pytest.raises(IntegrityError):
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_diff_cross_tenant_task_raises_fk(session) -> None:
+    """G4：子表 tenant_id 与父 task.tenant_id 不配对 → 复合 FK (task_id,tenant_id) 拦截。"""
+    parent = _task(tenant_id=_TENANT)
+    session.add(parent)
+    await session.commit()
+    # task_id 正确但 tenant 不同 → 复合 FK 无匹配父行
+    session.add(ReconResultDiff(tenant_id="OTHER-TENANT", task_id=parent.id, diff_type="MISSING"))
+    with pytest.raises(IntegrityError):
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_source_wedap_orphan_task_id_raises_fk(session) -> None:
+    """G4：source_wedap 孤儿 task_id → 复合 FK 拦截。"""
+    session.add(ReconResultSourceWedap(tenant_id=_TENANT, task_id=999999, biz_seq_no="SEQ-X"))
+    with pytest.raises(IntegrityError):
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_source_bank_orphan_task_id_raises_fk(session) -> None:
+    """G4：source_bank 孤儿 task_id → 复合 FK 拦截。"""
+    session.add(ReconResultSourceBank(tenant_id=_TENANT, task_id=999999, bank_seq_no="HSBC-X"))
+    with pytest.raises(IntegrityError):
+        await session.commit()

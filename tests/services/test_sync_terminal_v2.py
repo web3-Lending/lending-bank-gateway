@@ -7,16 +7,19 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from sqlalchemy import select
 
+from app.clients.wedap import WedapError
 from app.core.db import build_engine, build_session_factory
-from app.domain.states import OrderStatus
+from app.domain.states import OrderStatus, map_wedap_txn_status
 from app.models.audit import AuditLog
 from app.models.base import Base
 from app.models.callback import CallbackOutbox
+from app.models.order_alert import OrderStuckAlert
 from app.models.txn import BankTxnLeg, BankTxnOrder
 from app.services.legs import LegsSyncIncomplete
 from app.services.order_finalize import finalize_terminal_in_session
+from app.services.order_status_reconcile import resolve_terminal_via_status_query
 from app.services.submit import SubmitRequest, submit_order
-from app.workers.order_reconcile_worker import reconcile_once
+from app.workers.order_reconcile_worker import alert_stuck_orders, reconcile_once
 
 
 @pytest.fixture()
@@ -183,10 +186,12 @@ async def test_reconcile_once_picks_stale_nonterminal_and_terminal_without_leg(f
     )  # ② 终态无 leg（finalized 在 backfill 窗内）
     await _seed_order(factory, biz="DSB-TERM-LEG", status="SUCCEEDED", with_leg=True)  # 不选
     now = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=60)  # 让 stale_after 已过
+    wedap = AsyncMock()
+    wedap.query_funds_status.return_value = {"txnStatus": "PROCESSING"}  # 非终态→回落 leg 兜底
     with patch("app.workers.order_reconcile_worker.sync_legs_for", new_callable=AsyncMock) as m:
         count = await reconcile_once(
             factory,
-            wedap=AsyncMock(),
+            wedap=wedap,
             now=now,
             stale_after_seconds=1.0,
             max_age_seconds=1e9,
@@ -203,6 +208,8 @@ async def test_reconcile_once_isolates_per_order_failure(factory) -> None:
     """单单 LegsSyncIncomplete 隔离：不中断批，不计入成功数。"""
     await _seed_order(factory, biz="DSB-FAIL", status="SUBMITTED")
     now = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=60)
+    wedap = AsyncMock()
+    wedap.query_funds_status.return_value = {"txnStatus": "PROCESSING"}  # 非终态→回落 leg 兜底
     with patch(
         "app.workers.order_reconcile_worker.sync_legs_for",
         new_callable=AsyncMock,
@@ -210,7 +217,7 @@ async def test_reconcile_once_isolates_per_order_failure(factory) -> None:
     ):
         count = await reconcile_once(
             factory,
-            wedap=AsyncMock(),
+            wedap=wedap,
             now=now,
             stale_after_seconds=1.0,
             max_age_seconds=1e9,
@@ -242,3 +249,212 @@ async def test_reconcile_skips_terminal_no_leg_beyond_backfill_window(factory) -
         )
     assert count == 0
     assert m.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_reconcile_once_isolates_missing_txn_date(factory) -> None:
+    """G1 worker 级回归：候选单 steps 缺 txnDate → 真实 apply_legs 抛 LegsSyncIncomplete →
+    reconcile_once 单笔隔离(count=0)，不逸出 KeyError/InvalidOperation 打穿整轮 worker。"""
+    await _seed_order(factory, biz="DSB-NOTXN", status="SUBMITTED")  # 非终态 stale
+    step_no_date = {
+        "stepSeq": 1,
+        "sysRefNo": "R1",
+        "stepType": "DISBURSEMENT_COLLECTION",
+        "amount": "60.0000",
+        "currencyCode": "USD",
+        "status": "SUCCESS",
+        # 故意无 txnDate
+    }
+    wedap = AsyncMock()
+    wedap.get_composite_steps.return_value = [step_no_date]
+    wedap.query_funds_status.return_value = {"txnStatus": "PROCESSING"}  # 非终态→回落 leg 兜底
+    now = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=60)
+    count = await reconcile_once(
+        factory,
+        wedap=wedap,
+        now=now,
+        stale_after_seconds=1.0,
+        max_age_seconds=1e9,
+        leg_backfill_seconds=1e9,
+        batch_limit=10,
+    )
+    assert count == 0  # 隔离，未计成功
+    async with factory() as s:
+        legs = (await s.execute(select(BankTxnLeg))).scalars().all()
+    assert legs == []  # 整批回滚，无部分 leg
+
+
+# ---------------------------------------------------------------------------
+# G2：map_wedap_txn_status 共享映射 + status-query 主动收敛
+# ---------------------------------------------------------------------------
+
+
+def test_map_wedap_txn_status() -> None:
+    """SUCCESS→SUCCEEDED、FAILED→FAILED、其余/未知/空→None（调用方决定回落）。"""
+    assert map_wedap_txn_status("SUCCESS") == OrderStatus.SUCCEEDED
+    assert map_wedap_txn_status("success") == OrderStatus.SUCCEEDED
+    assert map_wedap_txn_status("FAILED") == OrderStatus.FAILED
+    assert map_wedap_txn_status("PROCESSING") is None
+    assert map_wedap_txn_status("") is None
+    assert map_wedap_txn_status("WHATEVER") is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_status_query_success_finalizes(factory) -> None:
+    """G2：RESULT_UNKNOWN 父单 status-query 返 SUCCESS → 锁内收敛 SUCCEEDED + 转发一次。"""
+    await _seed_order(factory, biz="DSB-RU", status="RESULT_UNKNOWN")
+    wedap = AsyncMock()
+    wedap.query_funds_status.return_value = {"txnStatus": "SUCCESS"}
+    ok = await resolve_terminal_via_status_query(
+        factory, wedap=wedap, tenant_id="OCBC", biz_seq_no="DSB-RU"
+    )
+    assert ok is True
+    async with factory() as s:
+        order = (
+            await s.execute(select(BankTxnOrder).where(BankTxnOrder.biz_seq_no == "DSB-RU"))
+        ).scalar_one()
+        outbox = (await s.execute(select(CallbackOutbox))).scalars().all()
+    assert order.status == OrderStatus.SUCCEEDED
+    assert order.finalized_at is not None and order.finalized_via == "RECONCILE"
+    assert len(outbox) == 1
+
+
+@pytest.mark.asyncio
+async def test_resolve_status_query_skips_already_finalized(factory) -> None:
+    """G2 CAS：父单已终态/已收口 → 锁内重读跳过，不重复转发（防 SUCCEEDED→SUCCEEDED）。"""
+    await _seed_order(
+        factory, biz="DSB-DONE", status="SUCCEEDED", finalized_at=dt.datetime.now(dt.UTC)
+    )
+    wedap = AsyncMock()
+    wedap.query_funds_status.return_value = {"txnStatus": "SUCCESS"}
+    ok = await resolve_terminal_via_status_query(
+        factory, wedap=wedap, tenant_id="OCBC", biz_seq_no="DSB-DONE"
+    )
+    assert ok is False
+    async with factory() as s:
+        outbox = (await s.execute(select(CallbackOutbox))).scalars().all()
+    assert outbox == []
+
+
+@pytest.mark.asyncio
+async def test_resolve_status_query_unsupported_returns_false(factory) -> None:
+    """G2：CLT 等 query_funds_status UNSUPPORTED → 返 False（交 G6），父单不变。"""
+    await _seed_order(factory, biz="CLT-X", status="RESULT_UNKNOWN")
+    wedap = AsyncMock()
+    wedap.query_funds_status.side_effect = WedapError("UNSUPPORTED", "no status api")
+    ok = await resolve_terminal_via_status_query(
+        factory, wedap=wedap, tenant_id="OCBC", biz_seq_no="CLT-X"
+    )
+    assert ok is False
+    async with factory() as s:
+        order = (
+            await s.execute(select(BankTxnOrder).where(BankTxnOrder.biz_seq_no == "CLT-X"))
+        ).scalar_one()
+    assert order.status == OrderStatus.RESULT_UNKNOWN
+
+
+@pytest.mark.asyncio
+async def test_resolve_status_query_nonterminal_noop(factory) -> None:
+    """G2：status-query 返非终态(PROCESSING) → no-op，父单不变。"""
+    await _seed_order(factory, biz="DSB-PROC", status="RESULT_UNKNOWN")
+    wedap = AsyncMock()
+    wedap.query_funds_status.return_value = {"txnStatus": "PROCESSING"}
+    ok = await resolve_terminal_via_status_query(
+        factory, wedap=wedap, tenant_id="OCBC", biz_seq_no="DSB-PROC"
+    )
+    assert ok is False
+    async with factory() as s:
+        order = (
+            await s.execute(select(BankTxnOrder).where(BankTxnOrder.biz_seq_no == "DSB-PROC"))
+        ).scalar_one()
+    assert order.status == OrderStatus.RESULT_UNKNOWN
+
+
+@pytest.mark.asyncio
+async def test_resolve_status_query_order_not_found(factory) -> None:
+    """G2：父单不存在 → 返 False，不外呼 wedap。"""
+    wedap = AsyncMock()
+    ok = await resolve_terminal_via_status_query(
+        factory, wedap=wedap, tenant_id="OCBC", biz_seq_no="NOPE"
+    )
+    assert ok is False
+    wedap.query_funds_status.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_once_converges_via_status_query(factory) -> None:
+    """G2：非终态 stale 单经 status-query 收敛终态，免去 leg 兜底（sync_legs_for 不被调用）。"""
+    await _seed_order(factory, biz="DSB-SQ", status="RESULT_UNKNOWN")
+    wedap = AsyncMock()
+    wedap.query_funds_status.return_value = {"txnStatus": "SUCCESS"}
+    now = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=60)
+    with patch("app.workers.order_reconcile_worker.sync_legs_for", new_callable=AsyncMock) as m:
+        count = await reconcile_once(
+            factory,
+            wedap=wedap,
+            now=now,
+            stale_after_seconds=1.0,
+            max_age_seconds=1e9,
+            leg_backfill_seconds=1e9,
+            batch_limit=10,
+        )
+    assert count == 1
+    m.assert_not_called()
+    async with factory() as s:
+        order = (
+            await s.execute(select(BankTxnOrder).where(BankTxnOrder.biz_seq_no == "DSB-SQ"))
+        ).scalar_one()
+    assert order.status == OrderStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_reconcile_once_isolates_status_query_unexpected_error(factory) -> None:
+    """G2 隔离：status-query 抛非预期异常 → 单笔隔离回落 leg 兜底，不打穿整轮。"""
+    await _seed_order(factory, biz="DSB-SQ-ERR", status="RESULT_UNKNOWN")
+    wedap = AsyncMock()
+    wedap.query_funds_status.side_effect = RuntimeError("boom")  # resolve 不吞 → worker 兜
+    now = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=60)
+    with patch("app.workers.order_reconcile_worker.sync_legs_for", new_callable=AsyncMock) as m:
+        count = await reconcile_once(
+            factory,
+            wedap=wedap,
+            now=now,
+            stale_after_seconds=1.0,
+            max_age_seconds=1e9,
+            leg_backfill_seconds=1e9,
+            batch_limit=10,
+        )
+    assert count == 1  # 回落 leg 兜底成功
+    m.assert_called_once()  # 走了 leg 路径
+
+
+# ---------------------------------------------------------------------------
+# G6：stuck-order 去重告警
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_alert_stuck_orders_dedups(factory) -> None:
+    """G6：超 max_age 非终态父单 → 首轮新增告警(+ERROR)；次轮 UNIQUE 去重不重复。"""
+    await _seed_order(factory, biz="DSB-STUCK", status="RESULT_UNKNOWN")
+    now = dt.datetime.now(dt.UTC) + dt.timedelta(days=10)  # 远超 max_age
+    n1 = await alert_stuck_orders(factory, now=now, max_age_seconds=604800.0, batch_limit=10)
+    assert n1 == 1
+    n2 = await alert_stuck_orders(factory, now=now, max_age_seconds=604800.0, batch_limit=10)
+    assert n2 == 0  # UNIQUE(tenant,biz) 去重
+    async with factory() as s:
+        alerts = (await s.execute(select(OrderStuckAlert))).scalars().all()
+    assert len(alerts) == 1
+    assert alerts[0].biz_seq_no == "DSB-STUCK" and alerts[0].biz_type == "DSB"
+
+
+@pytest.mark.asyncio
+async def test_alert_stuck_orders_skips_within_window_and_terminal(factory) -> None:
+    """G6：窗内非终态 / 终态单 不告警。"""
+    await _seed_order(factory, biz="DSB-FRESH", status="SUBMITTED")  # 窗内
+    await _seed_order(factory, biz="DSB-DONE2", status="SUCCEEDED")  # 终态
+    now = dt.datetime.now(dt.UTC)  # max_age 内
+    n = await alert_stuck_orders(factory, now=now, max_age_seconds=604800.0, batch_limit=10)
+    assert n == 0
+    async with factory() as s:
+        assert (await s.execute(select(OrderStuckAlert))).scalars().all() == []

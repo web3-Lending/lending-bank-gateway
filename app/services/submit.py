@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.clients.wedap import WedapError
 from app.domain.biz_seq import validate_biz_seq_no
-from app.domain.states import OrderStatus, assert_transition
+from app.domain.states import OrderStatus, assert_transition, map_wedap_txn_status
 from app.models.txn import BankTxnOrder
 from app.services.audit import write_audit
 from app.services.idempotency import (
@@ -111,12 +111,8 @@ async def submit_order(
         # SUCCESS（≤5s 同步终态）→ SUCCEEDED；FAILED（HTTP 200 业务失败）→ FAILED；
         # PROCESSING（>5s 异步在途）/ 缺省 / 未知 → SUBMITTED（保守，等回调/兜底 worker）
         wedap_status = str(data.get("txnStatus", "")).upper()
-        if wedap_status == "SUCCESS":
-            new_status = OrderStatus.SUCCEEDED
-        elif wedap_status == "FAILED":
-            new_status = OrderStatus.FAILED
-        else:
-            new_status = OrderStatus.SUBMITTED
+        # 同步收口复用 G2 共享映射；None（PROCESSING/缺省/未知）回落 SUBMITTED 保持既有语义。
+        new_status = map_wedap_txn_status(wedap_status) or OrderStatus.SUBMITTED
         response: dict[str, Any] = {
             "txnStatus": data.get("txnStatus", "PROCESSING"),
             "bizSeqNo": req.biz_seq_no,

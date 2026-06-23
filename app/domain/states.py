@@ -15,6 +15,21 @@ class OrderStatus(StrEnum):
     REVERSED = "REVERSED"
 
 
+def map_wedap_txn_status(txn_status: str) -> "OrderStatus | None":
+    """wedap txnStatus → order 终态映射；非终态/未知返回 None。
+
+    SUCCESS → SUCCEEDED；FAILED → FAILED；PROCESSING/缺省/未知 → None。
+    submit 同步收口对 None 回落 SUBMITTED；G2 status-query 收敛对 None 视为非终态 no-op。
+    单一来源：submit 同步收口与 G2 兜底复用本函数，避免映射逻辑分叉。
+    """
+    s = txn_status.upper()
+    if s == "SUCCESS":
+        return OrderStatus.SUCCEEDED
+    if s == "FAILED":
+        return OrderStatus.FAILED
+    return None
+
+
 class LegStatus(StrEnum):
     PENDING = "PENDING"
     SUCCESS = "SUCCESS"

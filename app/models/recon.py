@@ -13,6 +13,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     BigInteger,
+    ForeignKeyConstraint,
     Index,
     Integer,
     Numeric,
@@ -41,6 +42,8 @@ class ReconResultTask(Base, TenantMixin, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("tenant_id", "request_id", name="uq_recon_task_req"),
         UniqueConstraint("tenant_id", "task_no", "version", name="uq_recon_task_ver"),
+        # G4：复合唯一 (id, tenant_id) 作为子表复合 FK (task_id, tenant_id) 的引用目标。
+        UniqueConstraint("id", "tenant_id", name="uq_recon_task_id_tenant"),
     )
 
     id: Mapped[int] = mapped_column(_BIG_PK, primary_key=True, autoincrement=True)
@@ -65,9 +68,17 @@ class ReconResultDiff(Base, TenantMixin, TimestampMixin):
 
     __tablename__ = "recon_result_diff"
     __table_args__ = (
-        Index("ix_recon_diff_task_id", "task_id"),
+        # G4：复合索引 (task_id, tenant_id)（task_id 最左前缀，兼容原查询）替代原单列索引，
+        # 同时满足 MySQL 复合 FK 所需索引前缀。
+        Index("ix_recon_diff_task_tenant", "task_id", "tenant_id"),
         Index("ix_recon_diff_wedap_biz_seq_no", "wedap_biz_seq_no"),
         Index("ix_recon_diff_bank_seq_no", "bank_seq_no"),
+        ForeignKeyConstraint(
+            ["task_id", "tenant_id"],
+            ["recon_result_task.id", "recon_result_task.tenant_id"],
+            name="fk_recon_diff_task",
+            ondelete="RESTRICT",
+        ),
         # ix_recon_result_diff_tenant_id 由 TenantMixin(index=True) 自动生成，无需在此重复声明
     )
 
@@ -88,9 +99,15 @@ class ReconResultSourceWedap(Base, TenantMixin, TimestampMixin):
 
     __tablename__ = "recon_result_source_wedap"
     __table_args__ = (
-        Index("ix_recon_src_wedap_task_id", "task_id"),
+        Index("ix_recon_src_wedap_task_tenant", "task_id", "tenant_id"),
         Index("ix_recon_src_wedap_biz_seq_no", "biz_seq_no"),
         Index("ix_recon_src_wedap_bank_biz_seq_no", "bank_biz_seq_no"),
+        ForeignKeyConstraint(
+            ["task_id", "tenant_id"],
+            ["recon_result_task.id", "recon_result_task.tenant_id"],
+            name="fk_recon_src_wedap_task",
+            ondelete="RESTRICT",
+        ),
         # ix_recon_result_source_wedap_tenant_id 由 TenantMixin(index=True) 自动生成
     )
 
@@ -112,8 +129,14 @@ class ReconResultSourceBank(Base, TenantMixin, TimestampMixin):
 
     __tablename__ = "recon_result_source_bank"
     __table_args__ = (
-        Index("ix_recon_src_bank_task_id", "task_id"),
+        Index("ix_recon_src_bank_task_tenant", "task_id", "tenant_id"),
         Index("ix_recon_src_bank_bank_seq_no", "bank_seq_no"),
+        ForeignKeyConstraint(
+            ["task_id", "tenant_id"],
+            ["recon_result_task.id", "recon_result_task.tenant_id"],
+            name="fk_recon_src_bank_task",
+            ondelete="RESTRICT",
+        ),
         # ix_recon_result_source_bank_tenant_id 由 TenantMixin(index=True) 自动生成
     )
 

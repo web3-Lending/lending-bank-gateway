@@ -69,6 +69,16 @@ def parse_amount(raw: Any) -> Decimal:
                 "message": f"amount must be positive: {raw!r}",
             },
         )
+    # G5：scale（小数位）护栏——v1 全 4dp 法币，>4dp 输入会被 Numeric(21,4) 列静默 round，
+    # 显式拒为 400 不静默截断。value 已确保 finite（上方护栏），exponent 必为 int。
+    if -int(value.as_tuple().exponent) > 4:
+        raise HTTPException(
+            400,
+            detail={
+                "code": "GW_400_VALIDATION",
+                "message": f"amount scale exceeds 4 decimal places: {raw!r}",
+            },
+        )
     return value
 
 

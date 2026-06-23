@@ -24,6 +24,7 @@ if config.config_file_name is not None:
 import app.models.audit  # noqa: F401, E402
 import app.models.callback  # noqa: F401, E402
 import app.models.idempotency  # noqa: F401, E402
+import app.models.order_alert  # noqa: F401, E402
 import app.models.query_audit  # noqa: F401, E402
 import app.models.recon  # noqa: F401, E402
 import app.models.txn  # noqa: F401, E402

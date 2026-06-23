@@ -1,0 +1,114 @@
+{
+  "schema_version": "1",
+  "table": "bank_txn_leg",
+  "columns": {
+    "id": {
+      "python_type": "int",
+      "nullable": false
+    },
+    "order_id": {
+      "python_type": "int",
+      "nullable": false
+    },
+    "biz_seq_no": {
+      "python_type": "str",
+      "nullable": false,
+      "length": 32
+    },
+    "external_system": {
+      "python_type": "str",
+      "nullable": false,
+      "length": 16
+    },
+    "external_ref": {
+      "python_type": "str",
+      "nullable": false,
+      "length": 64
+    },
+    "step_type": {
+      "python_type": "str",
+      "nullable": false,
+      "length": 40
+    },
+    "step_seq": {
+      "python_type": "int",
+      "nullable": false
+    },
+    "amount": {
+      "python_type": "Decimal",
+      "nullable": false,
+      "precision": 21,
+      "scale": 4
+    },
+    "currency": {
+      "python_type": "str",
+      "nullable": false,
+      "length": 3
+    },
+    "payer_account": {
+      "python_type": "str",
+      "nullable": true,
+      "length": 64
+    },
+    "payee_account": {
+      "python_type": "str",
+      "nullable": true,
+      "length": 64
+    },
+    "status": {
+      "python_type": "str",
+      "nullable": false,
+      "length": 16
+    },
+    "txn_date": {
+      "python_type": "str",
+      "nullable": true,
+      "length": 8
+    },
+    "posted_at": {
+      "python_type": "datetime",
+      "nullable": true
+    },
+    "tenant_id": {
+      "python_type": "str",
+      "nullable": false,
+      "length": 36
+    },
+    "created_at": {
+      "python_type": "datetime",
+      "nullable": false
+    },
+    "updated_at": {
+      "python_type": "datetime",
+      "nullable": false
+    }
+  },
+  "primary_key": [
+    "id"
+  ],
+  "unique_constraints": {
+    "uq_leg_tenant_biz_step": [
+      "tenant_id",
+      "biz_seq_no",
+      "step_seq"
+    ],
+    "uq_leg_tenant_ext": [
+      "tenant_id",
+      "external_system",
+      "external_ref"
+    ]
+  },
+  "foreign_keys": [
+    {
+      "name": "fk_leg_order_tenant",
+      "columns": [
+        "order_id",
+        "tenant_id"
+      ],
+      "references": [
+        "bank_txn_order.id",
+        "bank_txn_order.tenant_id"
+      ]
+    }
+  ]
+}

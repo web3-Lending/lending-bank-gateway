@@ -568,3 +568,93 @@ async def test_clt_order_driven_to_terminal_by_callback(factory) -> None:
             await s.execute(select(BankTxnOrder).where(BankTxnOrder.biz_seq_no == clt_biz))
         ).scalar_one()
     assert order.status == OrderStatus.SUCCEEDED
+
+
+# ---------------------------------------------------------------------------
+# G1：txn_date 拒单兜底 —— 上游缺/畸形字段 → 包装 LegsSyncIncomplete（非裸异常逸出 worker）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_new_leg_missing_txn_date_raises_legs_sync_incomplete(factory) -> None:
+    """G1：新 leg 插入缺 txnDate → 抛 LegsSyncIncomplete（不再静默落 NULL），零 leg 落库。"""
+    step_no_date = {k: v for k, v in STEP.items() if k != "txnDate"}
+    with pytest.raises(LegsSyncIncomplete):
+        await sync_legs_for(
+            factory, wedap=_wedap([step_no_date]), tenant_id="OCBC", biz_seq_no=BIZ
+        )
+    async with factory() as s:
+        legs = (await s.execute(select(BankTxnLeg))).scalars().all()
+        order = (await s.execute(select(BankTxnOrder))).scalar_one()
+    assert legs == []  # 整批回滚，不落部分 leg
+    assert order.status == "SUBMITTED"  # 父单不推进
+
+
+@pytest.mark.asyncio
+async def test_new_leg_malformed_amount_raises_legs_sync_incomplete(factory) -> None:
+    """G1：新 leg amount 非法（Decimal 抛 InvalidOperation）→ 包装 LegsSyncIncomplete，不逸出。"""
+    step_bad_amount = {**STEP, "amount": "not-a-number"}
+    with pytest.raises(LegsSyncIncomplete):
+        await sync_legs_for(
+            factory, wedap=_wedap([step_bad_amount]), tenant_id="OCBC", biz_seq_no=BIZ
+        )
+    async with factory() as s:
+        legs = (await s.execute(select(BankTxnLeg))).scalars().all()
+    assert legs == []
+
+
+@pytest.mark.asyncio
+async def test_existing_leg_status_update_without_txn_date_ok(factory) -> None:
+    """G1 回归：txnDate 仅新 leg 插入必填；既有 leg 的状态更新步不携带 txnDate 也不应被拒。"""
+    # 先落 leg（带 txnDate）
+    await sync_legs_for(factory, wedap=_wedap([STEP]), tenant_id="OCBC", biz_seq_no=BIZ)
+    # 再同步：仅 stepSeq+sysRefNo+status（无 txnDate/amount/stepType）→ 更新分支，不应抛
+    update_step = {"stepSeq": 1, "sysRefNo": "R1", "status": "SUCCESS"}
+    await sync_legs_for(factory, wedap=_wedap([update_step]), tenant_id="OCBC", biz_seq_no=BIZ)
+    async with factory() as s:
+        leg = (await s.execute(select(BankTxnLeg))).scalar_one()
+    assert leg.txn_date == "20260611"  # 既有 txn_date 保留
+
+
+@pytest.mark.asyncio
+async def test_common_field_malformed_raises_legs_sync_incomplete(factory) -> None:
+    """G1：公共字段畸形（stepSeq 非整数）→ int() 抛 ValueError → 包装 LegsSyncIncomplete。"""
+    bad = {**STEP, "stepSeq": "not-an-int"}
+    with pytest.raises(LegsSyncIncomplete):
+        await sync_legs_for(factory, wedap=_wedap([bad]), tenant_id="OCBC", biz_seq_no=BIZ)
+    async with factory() as s:
+        legs = (await s.execute(select(BankTxnLeg))).scalars().all()
+    assert legs == []
+
+
+@pytest.mark.asyncio
+async def test_new_leg_empty_txn_date_raises_legs_sync_incomplete(factory) -> None:
+    """G1：新 leg txnDate 为空串 → 显式 raise → 包装 LegsSyncIncomplete（空值等同缺失）。"""
+    empty = {**STEP, "txnDate": ""}
+    with pytest.raises(LegsSyncIncomplete):
+        await sync_legs_for(factory, wedap=_wedap([empty]), tenant_id="OCBC", biz_seq_no=BIZ)
+    async with factory() as s:
+        legs = (await s.execute(select(BankTxnLeg))).scalars().all()
+    assert legs == []
+
+
+@pytest.mark.asyncio
+async def test_empty_sys_ref_no_raises_legs_sync_incomplete(factory) -> None:
+    """G1：公共必填 sysRefNo 为空串 → 拒单（非空校验），零 leg 落库。"""
+    with pytest.raises(LegsSyncIncomplete):
+        await sync_legs_for(
+            factory, wedap=_wedap([{**STEP, "sysRefNo": ""}]), tenant_id="OCBC", biz_seq_no=BIZ
+        )
+    async with factory() as s:
+        assert (await s.execute(select(BankTxnLeg))).scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_new_leg_empty_step_type_raises_legs_sync_incomplete(factory) -> None:
+    """G1：新 leg 必填 stepType 为空串 → 拒单，零 leg 落库。"""
+    with pytest.raises(LegsSyncIncomplete):
+        await sync_legs_for(
+            factory, wedap=_wedap([{**STEP, "stepType": ""}]), tenant_id="OCBC", biz_seq_no=BIZ
+        )
+    async with factory() as s:
+        assert (await s.execute(select(BankTxnLeg))).scalars().all() == []
