@@ -216,3 +216,21 @@ def test_none_userlist_value_passes() -> None:
         detail_key="userList",
         amount_field="amount",
     )
+
+
+# ── G5: per-currency 精度护栏（v1 全局 ≤4dp scale，拒静默 round）──────────────
+
+
+@pytest.mark.parametrize("raw", ["1.23000", "0.00001", "1.234567"])
+def test_parse_amount_rejects_over_4dp_scale_400(raw: str) -> None:
+    """G5：小数位 >4dp → 400 scale 超限（防 Numeric(21,4) 静默 round），含显式末尾零 1.23000。"""
+    with pytest.raises(HTTPException) as exc_info:
+        parse_amount(raw)
+    assert exc_info.value.status_code == 400
+    assert "scale" in exc_info.value.detail["message"]  # type: ignore[index]
+
+
+@pytest.mark.parametrize("raw", ["1.2345", "100", "1E+3", "0.0001"])
+def test_parse_amount_accepts_within_4dp_scale(raw: str) -> None:
+    """G5：≤4dp（含指数表示 1E+3=1000）正常返回正数。"""
+    assert parse_amount(raw) > 0
