@@ -78,9 +78,9 @@ def test_status_after_submit_returns_order_and_wedap(client: TestClient) -> None
     assert data["orderStatus"] == "SUBMITTED"
     assert data["bizSeqNo"] == COLLECT_BODY["bizSeqNo"]
     assert data["wedap"]["txnStatus"] == "SUBMITTED"
-    # 验证 biz_type 从 order 取出并传给 query_funds_status
+    # 验证 biz_type 从 order 取出并传给 query_funds_status（COLL = lifecycel 真码归集）
     call_kwargs = client.app.state.wedap.query_funds_status.call_args  # type: ignore[union-attr]
-    assert call_kwargs.kwargs["biz_type"] == "CLT"
+    assert call_kwargs.kwargs["biz_type"] == "COLL"
 
 
 # ── Test 2：未知 bizSeqNo → 404 GW_404_ORDER ─────────────────────────────────

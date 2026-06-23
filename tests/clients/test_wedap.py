@@ -243,7 +243,7 @@ async def test_distribute_to_users_missing_data_returns_empty() -> None:
 
 @respx.mock
 async def test_query_funds_status_dsb_routes_to_disbursement_status() -> None:
-    """DSB → GET /api/v1/loans/p2p-disbursements/{biz}/status。"""
+    """DISB → GET /api/v1/loans/p2p-disbursements/{biz}/status。"""
     biz = "DSB-20260612-0001"
     route = respx.get(f"{BASE}/api/v1/loans/p2p-disbursements/{biz}/status").mock(
         return_value=httpx.Response(
@@ -256,7 +256,7 @@ async def test_query_funds_status_dsb_routes_to_disbursement_status() -> None:
         )
     )
     resp = await _client().query_funds_status(
-        tenant_id="OCBC", request_id="qry-dsb-001", biz_seq_no=biz, biz_type="DSB"
+        tenant_id="OCBC", request_id="qry-dsb-001", biz_seq_no=biz, biz_type="DISB"
     )
     assert resp["txnStatus"] == "SUCCESS"
     req = route.calls.last.request
@@ -266,7 +266,7 @@ async def test_query_funds_status_dsb_routes_to_disbursement_status() -> None:
 
 @respx.mock
 async def test_query_funds_status_rpy_routes_to_repayment_status() -> None:
-    """RPY → GET /api/v1/loans/p2p-repayments/{biz}/status。"""
+    """RPMT → GET /api/v1/loans/p2p-repayments/{biz}/status。"""
     biz = "RPY-20260612-0001"
     route = respx.get(f"{BASE}/api/v1/loans/p2p-repayments/{biz}/status").mock(
         return_value=httpx.Response(
@@ -279,7 +279,7 @@ async def test_query_funds_status_rpy_routes_to_repayment_status() -> None:
         )
     )
     resp = await _client().query_funds_status(
-        tenant_id="OCBC", request_id="qry-rpy-001", biz_seq_no=biz, biz_type="RPY"
+        tenant_id="OCBC", request_id="qry-rpy-001", biz_seq_no=biz, biz_type="RPMT"
     )
     assert resp["txnStatus"] == "PROCESSING"
     req = route.calls.last.request
@@ -288,7 +288,7 @@ async def test_query_funds_status_rpy_routes_to_repayment_status() -> None:
 
 @respx.mock
 async def test_query_funds_status_dst_routes_to_user_distributions() -> None:
-    """DST → GET /api/v1/bank-funds/user-distributions/{biz}。"""
+    """DIST → GET /api/v1/bank-funds/user-distributions/{biz}。"""
     biz = "DST-20260612-0001"
     route = respx.get(f"{BASE}/api/v1/bank-funds/user-distributions/{biz}").mock(
         return_value=httpx.Response(
@@ -301,7 +301,7 @@ async def test_query_funds_status_dst_routes_to_user_distributions() -> None:
         )
     )
     resp = await _client().query_funds_status(
-        tenant_id="OCBC", request_id="qry-dst-001", biz_seq_no=biz, biz_type="DST"
+        tenant_id="OCBC", request_id="qry-dst-001", biz_seq_no=biz, biz_type="DIST"
     )
     assert resp["txnStatus"] == "SUCCESS"
     req = route.calls.last.request
@@ -309,13 +309,13 @@ async def test_query_funds_status_dst_routes_to_user_distributions() -> None:
 
 
 async def test_query_funds_status_unsupported_biz_type_raises() -> None:
-    """CLT 等无状态接口的类型 → WedapError(UNSUPPORTED)。"""
+    """COLL(归集) 等无状态接口的类型 → WedapError(UNSUPPORTED)。"""
     with pytest.raises(WedapError) as exc_info:
         await _client().query_funds_status(
-            tenant_id="OCBC", request_id="r", biz_seq_no="CLT-001", biz_type="CLT"
+            tenant_id="OCBC", request_id="r", biz_seq_no="COLL-001", biz_type="COLL"
         )
     assert exc_info.value.code == "UNSUPPORTED"
-    assert "CLT" in str(exc_info.value)
+    assert "COLL" in str(exc_info.value)
 
 
 @respx.mock
@@ -326,7 +326,7 @@ async def test_query_funds_status_dsb_missing_data_returns_empty() -> None:
         return_value=httpx.Response(200, json={"code": "200", "msg": "SUCCESS"})
     )
     resp = await _client().query_funds_status(
-        tenant_id="OCBC", request_id="r", biz_seq_no=biz, biz_type="DSB"
+        tenant_id="OCBC", request_id="r", biz_seq_no=biz, biz_type="DISB"
     )
     assert resp == {}
 
