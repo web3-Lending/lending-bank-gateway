@@ -290,51 +290,6 @@
         }
       }
     },
-    "/api/v1/composite-transactions/{biz_seq_no}/steps": {
-      "get": {
-        "tags": [
-          "composite"
-        ],
-        "summary": "Composite Steps",
-        "description": "本地 order 守卫 + 透传 wedap composite-transactions steps。",
-        "operationId": "composite_steps_api_v1_composite_transactions__biz_seq_no__steps_get",
-        "parameters": [
-          {
-            "name": "biz_seq_no",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Biz Seq No"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Composite Steps Api V1 Composite Transactions  Biz Seq No  Steps Get"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/callbacks/wedap/transactions": {
       "post": {
         "tags": [

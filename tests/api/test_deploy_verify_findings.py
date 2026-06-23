@@ -2,7 +2,6 @@
 
 缺陷 1：读路径未捕获 httpx.HTTPStatusError → 上游 4xx/5xx 应返回 502 GW_502_UPSTREAM
   - deposit 端点（_audited_passthrough）
-  - composite steps 端点
   - /status 端点（降级路径，HTTP 200 + wedap unavailable）
 
 缺陷 2：500 响应 trace_id="trc-none"
@@ -74,7 +73,6 @@ def status_client() -> TestClient:
     wedap = AsyncMock()
     wedap.collect_from_users.return_value = {"txnStatus": "PROCESSING"}
     wedap.query_funds_status.return_value = {"txnStatus": "SUBMITTED"}
-    wedap.get_composite_steps.return_value = []
     app.state.wedap = wedap
     return TestClient(app)
 
@@ -113,27 +111,6 @@ def test_deposit_upstream_503_returns_502(deposit_client: TestClient) -> None:
     assert body["error"]["code"] == "GW_502_UPSTREAM"
     # 消息中含 HTTP 状态码，不泄露 wedap 响应体
     assert "503" in body["error"]["message"]
-
-
-# ── 缺陷 1：composite steps HTTPStatusError → 502 ─────────────────────────────
-
-
-def test_steps_upstream_503_returns_502(status_client: TestClient) -> None:
-    """composite steps：wedap 返回 503 → 502 GW_502_UPSTREAM。"""
-    # 先种单
-    status_client.post("/api/v1/bank-funds/collect-from-users", json=COLLECT_BODY, headers=HEADERS)
-
-    status_client.app.state.wedap.get_composite_steps.side_effect = (  # type: ignore[union-attr]
-        _make_http_status_error(503)
-    )
-
-    r = status_client.get(
-        f"/api/v1/composite-transactions/{COLLECT_BODY['bizSeqNo']}/steps",
-        headers=HEADERS,
-    )
-    assert r.status_code == 502
-    body = r.json()
-    assert body["error"]["code"] == "GW_502_UPSTREAM"
 
 
 # ── 缺陷 1：/status 端点 HTTPStatusError → 200 降级 ──────────────────────────

@@ -1,4 +1,4 @@
-"""状态查询 API 测试：GET /status + GET /{biz_seq_no}/steps。"""
+"""状态查询 API 测试：GET /status。"""
 
 import asyncio
 from unittest.mock import AsyncMock
@@ -28,7 +28,6 @@ COLLECT_BODY = {
 }
 
 STATUS_URL = "/api/v1/bank-funds/status"
-STEPS_URL_TEMPLATE = "/api/v1/composite-transactions/{biz_seq_no}/steps"
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -50,10 +49,6 @@ def client() -> TestClient:
         "txnStatus": "SUBMITTED",
         "bizSeqNo": COLLECT_BODY["bizSeqNo"],
     }
-    wedap.get_composite_steps.return_value = [
-        {"stepSeq": 1, "stepType": "DEBIT", "status": "SUCCESS"},
-        {"stepSeq": 2, "stepType": "CREDIT", "status": "SUCCESS"},
-    ]
     app.state.wedap = wedap
     return TestClient(app)
 
@@ -198,98 +193,7 @@ def test_status_wedap_unsupported_biz_type_degrades_with_no_status_api(
     assert "回调" in wedap["note"]
 
 
-# ── Test 5：composite steps 透传 ─────────────────────────────────────────────
-
-
-def test_composite_steps_passthrough(client: TestClient) -> None:
-    """先种单，mock get_composite_steps 返回两 leg，断言 data.steps 原样透传。"""
-    # 先种单（本地守卫需要 order 存在）
-    client.post("/api/v1/bank-funds/collect-from-users", json=COLLECT_BODY, headers=HEADERS)
-
-    biz_seq_no = COLLECT_BODY["bizSeqNo"]
-    r = client.get(
-        STEPS_URL_TEMPLATE.format(biz_seq_no=biz_seq_no),
-        headers=HEADERS,
-    )
-    assert r.status_code == 200
-    body = r.json()
-    assert body["success"] is True
-    steps = body["data"]["steps"]
-    assert len(steps) == 2
-    assert steps[0]["stepSeq"] == 1
-    assert steps[1]["stepType"] == "CREDIT"
-
-
-# ── Test 5b：steps 未知单 → 404 GW_404_ORDER ─────────────────────────────────
-
-
-def test_steps_unknown_order_404(client: TestClient) -> None:
-    """steps 端点：未知 bizSeqNo（本地无记录） → 404 GW_404_ORDER。"""
-    r = client.get(
-        STEPS_URL_TEMPLATE.format(biz_seq_no="CLT-20260611-NOTEXIST0001"),
-        headers=HEADERS,
-    )
-    assert r.status_code == 404
-    assert r.json()["error"]["code"] == "GW_404_ORDER"
-
-
-# ── Test 5c：steps 跨 tenant 隔离 → 404 ──────────────────────────────────────
-
-
-def test_steps_cross_tenant_isolation_404(client: TestClient) -> None:
-    """tenant A 种单，tenant B 查 steps → 404（跨租户不可见）。"""
-    # tenant A 种单
-    client.post("/api/v1/bank-funds/collect-from-users", json=COLLECT_BODY, headers=HEADERS)
-
-    # tenant B 查询 steps
-    headers_b = {**HEADERS, "X-Tenant-Id": "DBS", "X-Request-Id": "req-steps-b"}
-    r = client.get(
-        STEPS_URL_TEMPLATE.format(biz_seq_no=COLLECT_BODY["bizSeqNo"]),
-        headers=headers_b,
-    )
-    assert r.status_code == 404
-    assert r.json()["error"]["code"] == "GW_404_ORDER"
-
-
-# ── Test 5d：steps wedap 超时 → 502 GW_502_UPSTREAM ──────────────────────────
-
-
-def test_steps_wedap_timeout_502(client: TestClient) -> None:
-    """steps 端点：wedap get_composite_steps 超时 → 502 GW_502_UPSTREAM。"""
-    # 先种单
-    client.post("/api/v1/bank-funds/collect-from-users", json=COLLECT_BODY, headers=HEADERS)
-
-    # 让 wedap 超时
-    client.app.state.wedap.get_composite_steps.side_effect = httpx.TimeoutException("timeout")  # type: ignore[union-attr]
-
-    r = client.get(
-        STEPS_URL_TEMPLATE.format(biz_seq_no=COLLECT_BODY["bizSeqNo"]),
-        headers=HEADERS,
-    )
-    assert r.status_code == 502
-    assert r.json()["error"]["code"] == "GW_502_UPSTREAM"
-
-
-# ── Test 5e：steps wedap TransportError → 502 ─────────────────────────────────
-
-
-def test_steps_wedap_transport_error_502(client: TestClient) -> None:
-    """steps 端点：wedap get_composite_steps TransportError → 502 GW_502_UPSTREAM。"""
-    # 先种单
-    client.post("/api/v1/bank-funds/collect-from-users", json=COLLECT_BODY, headers=HEADERS)
-
-    # 让 wedap 网络错误
-    client.app.state.wedap.get_composite_steps.side_effect = httpx.TransportError("conn reset")  # type: ignore[union-attr]
-
-    r = client.get(
-        STEPS_URL_TEMPLATE.format(biz_seq_no=COLLECT_BODY["bizSeqNo"]),
-        headers=HEADERS,
-    )
-    assert r.status_code == 502
-    assert r.json()["error"]["code"] == "GW_502_UPSTREAM"
-
-
-# ── Test 6：缺 X-Tenant-Id → 400 ─────────────────────────────────────────────
+# ── Test 5：缺 X-Tenant-Id → 400 ─────────────────────────────────────────────
 
 
 def test_status_missing_tenant_id_400(client: TestClient) -> None:
@@ -298,17 +202,6 @@ def test_status_missing_tenant_id_400(client: TestClient) -> None:
     r = client.get(
         STATUS_URL,
         params={"bizSeqNo": COLLECT_BODY["bizSeqNo"]},
-        headers=h,
-    )
-    assert r.status_code == 400
-    assert r.json()["error"]["code"] == "GW_400_HEADER"
-
-
-def test_steps_missing_tenant_id_400(client: TestClient) -> None:
-    """composite steps 缺 X-Tenant-Id → 400 GW_400_HEADER。"""
-    h = {k: v for k, v in HEADERS.items() if k != "X-Tenant-Id"}
-    r = client.get(
-        STEPS_URL_TEMPLATE.format(biz_seq_no=COLLECT_BODY["bizSeqNo"]),
         headers=h,
     )
     assert r.status_code == 400

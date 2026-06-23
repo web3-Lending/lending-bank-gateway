@@ -15,7 +15,6 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api.v1 import callbacks
 from app.api.v1.admin_ops import router as admin_ops_router
 from app.api.v1.bank_funds import router as bank_funds_router
-from app.api.v1.composite import router as composite_router
 from app.api.v1.deposit import router as deposit_router
 from app.api.v1.health import router as health_router
 from app.api.v1.loans import router as loans_router
@@ -303,7 +302,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health_router)
     app.include_router(loans_router)
     app.include_router(bank_funds_router)
-    app.include_router(composite_router)
     app.include_router(callbacks.router)
     app.include_router(admin_ops_router)
     app.include_router(recon_notify_router)

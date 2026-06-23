@@ -55,11 +55,11 @@ lending-bank-gateway/
 │   ├── api/v1/
 │   │   ├── loans.py                  # p2p-disbursements / p2p-repayments
 │   │   ├── bank_funds.py             # collect / distribute / status
-│   │   ├── composite.py              # composite steps 透传
+│   │   ├── composite.py              # [已废弃 2026-06-23] composite steps 北向透传（仅历史；内部预取走 wedap client）
 │   │   ├── deposit.py                # balances/total · accounts · users/info
 │   │   ├── callbacks.py              # wedap 交易回调接收
 │   │   ├── recon_notify.py           # 对账结果 notify 接收
-│   │   ├── fiat_vault.py             # fiat-vault/transactions 供数
+│   │   ├── fiat_vault.py             # [已废弃 2026-06-23] fiat-vault/transactions 供数（仅历史；recon 改跨库直读 bank_txn_order）
 │   │   ├── admin_ops.py              # outbox dead-letter 重放
 │   │   └── health.py                 # /healthz /readyz
 │   └── workers/
@@ -1984,6 +1984,8 @@ git commit -m "feat: [M3] 北向资金交易 API x4（envelope/幂等409/ADR-002
 ```
 
 ### Task 13: 状态查询 API（bank-funds/status 合成 + steps 透传）
+
+> ⚠️ **historical（2026-06-23）**：本 Task 的 `composite.py` / steps 北向透传接口已废弃（chore/deprecate-composite-steps-endpoint）；`bank-funds/status` 部分仍有效。gateway 内部 wedap client 拉 steps 落 leg 不受影响。
 
 **Files:**
 - Create: `app/api/v1/composite.py`
