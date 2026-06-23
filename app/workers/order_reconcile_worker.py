@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.domain.states import OrderStatus
 from app.models.txn import BankTxnLeg, BankTxnOrder
 from app.services.legs import LegsSyncIncomplete, sync_legs_for
+from app.services.order_status_reconcile import resolve_terminal_via_status_query
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ async def _select_candidates(
     max_age_seconds: float,
     leg_backfill_seconds: float,
     batch_limit: int,
-) -> list[tuple[str, str]]:
+) -> list[tuple[str, str, str]]:
     """兜底候选：① 非终态 stale（created_at 在 max_age~stale_after 窗）；② 终态但无 leg
     且 finalized_at 在 leg_backfill 短窗内（超窗放弃补拉，防 CLT 空 steps 每轮热重试）。"""
     stale_before = now - timedelta(seconds=stale_after_seconds)
@@ -71,11 +72,11 @@ async def _select_candidates(
         BankTxnOrder.finalized_at > backfill_after,
     )
     stmt = (
-        select(BankTxnOrder.tenant_id, BankTxnOrder.biz_seq_no)
+        select(BankTxnOrder.tenant_id, BankTxnOrder.biz_seq_no, BankTxnOrder.status)
         .where(or_(cond_nonterminal, cond_terminal_no_leg))
         .limit(batch_limit)
     )
-    return [(r[0], r[1]) for r in (await session.execute(stmt)).all()]
+    return [(r[0], r[1], r[2]) for r in (await session.execute(stmt)).all()]
 
 
 async def reconcile_once(
@@ -99,7 +100,25 @@ async def reconcile_once(
             batch_limit=batch_limit,
         )
     count = 0
-    for tenant_id, biz_seq_no in candidates:
+    for tenant_id, biz_seq_no, status in candidates:
+        # G2：非终态父单先经 wedap status-query 主动收敛终态；收敛成功免去 leg 兜底外呼。
+        # 路径隔离：status-query 的意外异常（DB / 脏状态 ValueError / 其它）不打穿整轮，
+        # 单笔记录后回落 leg 兜底（resolve 内部已吞 WedapError/httpx，此处兜未预期异常）。
+        try:
+            converged = OrderStatus(status) not in _TERMINAL and (
+                await resolve_terminal_via_status_query(
+                    factory, wedap=wedap, tenant_id=tenant_id, biz_seq_no=biz_seq_no
+                )
+            )
+        except Exception:  # noqa: BLE001 - 兜底 worker 单笔隔离，任何意外回落 leg 兜底
+            logger.exception(
+                "status-reconcile failed %s/%s（回落 leg 兜底）", tenant_id, biz_seq_no
+            )
+            converged = False
+        if converged:
+            count += 1
+            continue
+        # leg 明细兜底（终态无 leg 补拉 / status-query 未收敛）
         try:
             await sync_legs_for(
                 factory,
