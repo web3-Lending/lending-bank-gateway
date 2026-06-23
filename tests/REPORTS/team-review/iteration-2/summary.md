@@ -16,6 +16,8 @@ iter1 的 8 项 deferred 架构债，用户选择全部进 iteration 2 现场修
 | A-M-004 跨库契约(gateway 侧) | `a29dcc7` | bank_txn_leg 列名/类型/可空 + 表名契约冻结测试，漂移即 CI red | 契约快照测试 |
 | A-m-004 CLT 终态 | `db641e6` | 验证 CLT 单经回调 sync_legs(biz_type 无关)驱动至终态 SUCCEEDED | 回归测试 |
 
+> **A-M-004 后续纠偏（2026-06-23 · FU-GW-LEG-CONTRACT-PREMISE-20260623-001）**：`a29dcc7` 当时建的是 `bank_txn_leg` 跨库契约，但实测 recon 直读的是 order 级 `bank_txn_order`（C5 约束「绝不下钻 leg」），leg 无跨库消费方。已删 leg 契约、改建 `bank_txn_order` 契约（commit 7d28261）+ 废弃 fiat-vault HTTP 供数端点（e3af8d6）。
+
 ## 关键工程发现（本轮最有价值）
 
 **A-m-003 naive FOR UPDATE 会死锁**：直接对 `audit_log` 链尾 `SELECT ... ORDER BY id DESC LIMIT 1

@@ -17,7 +17,6 @@ from app.api.v1.admin_ops import router as admin_ops_router
 from app.api.v1.bank_funds import router as bank_funds_router
 from app.api.v1.composite import router as composite_router
 from app.api.v1.deposit import router as deposit_router
-from app.api.v1.fiat_vault import router as fiat_vault_router
 from app.api.v1.health import router as health_router
 from app.api.v1.loans import router as loans_router
 from app.api.v1.recon_notify import router as recon_notify_router
@@ -308,7 +307,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(callbacks.router)
     app.include_router(admin_ops_router)
     app.include_router(recon_notify_router)
-    app.include_router(fiat_vault_router)
     app.include_router(deposit_router)
     return app
 

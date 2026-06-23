@@ -1,12 +1,8 @@
 {
   "schema_version": "1",
-  "table": "bank_txn_leg",
+  "table": "bank_txn_order",
   "columns": {
     "id": {
-      "python_type": "int",
-      "nullable": false
-    },
-    "order_id": {
       "python_type": "int",
       "nullable": false
     },
@@ -15,24 +11,15 @@
       "nullable": false,
       "length": 32
     },
-    "external_system": {
+    "business_action": {
       "python_type": "str",
       "nullable": false,
-      "length": 16
+      "length": 32
     },
-    "external_ref": {
+    "biz_type": {
       "python_type": "str",
       "nullable": false,
-      "length": 64
-    },
-    "step_type": {
-      "python_type": "str",
-      "nullable": false,
-      "length": 40
-    },
-    "step_seq": {
-      "python_type": "int",
-      "nullable": false
+      "length": 8
     },
     "amount": {
       "python_type": "Decimal",
@@ -45,29 +32,37 @@
       "nullable": false,
       "length": 3
     },
-    "payer_account": {
+    "caller_service": {
       "python_type": "str",
-      "nullable": true,
-      "length": 64
-    },
-    "payee_account": {
-      "python_type": "str",
-      "nullable": true,
-      "length": 64
+      "nullable": false,
+      "length": 32
     },
     "status": {
       "python_type": "str",
       "nullable": false,
-      "length": 16
+      "length": 24
     },
-    "txn_date": {
+    "request_id": {
       "python_type": "str",
       "nullable": true,
-      "length": 8
+      "length": 64
     },
-    "posted_at": {
+    "submitted_at": {
       "python_type": "datetime",
       "nullable": true
+    },
+    "acked_at": {
+      "python_type": "datetime",
+      "nullable": true
+    },
+    "finalized_at": {
+      "python_type": "datetime",
+      "nullable": true
+    },
+    "finalized_via": {
+      "python_type": "str",
+      "nullable": true,
+      "length": 12
     },
     "tenant_id": {
       "python_type": "str",
@@ -87,28 +82,14 @@
     "id"
   ],
   "unique_constraints": {
-    "uq_leg_tenant_biz_step": [
-      "tenant_id",
-      "biz_seq_no",
-      "step_seq"
+    "uq_order_id_tenant": [
+      "id",
+      "tenant_id"
     ],
-    "uq_leg_tenant_ext": [
+    "uq_order_tenant_biz": [
       "tenant_id",
-      "external_system",
-      "external_ref"
+      "biz_seq_no"
     ]
   },
-  "foreign_keys": [
-    {
-      "name": "fk_leg_order_tenant",
-      "columns": [
-        "order_id",
-        "tenant_id"
-      ],
-      "references": [
-        "bank_txn_order.id",
-        "bank_txn_order.tenant_id"
-      ]
-    }
-  ]
+  "foreign_keys": []
 }
