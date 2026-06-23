@@ -39,7 +39,7 @@ lending-bank-gateway 是 lending 项目群对接 wedap（银行资金通道平�
 | 3 | 资金归集 | POST /api/v1/bank-funds/collect-from-users | ✅ user-collections | 9000 + liquidation |
 | 4 | 资金分发 | POST /api/v1/bank-funds/distribute-to-users | ✅ user-distributions | 9000 |
 | 5 | 资金状态查询 | GET /api/v1/bank-funds/status | ✅ 状态查询 | 9000（RESULT_UNKNOWN 收敛） |
-| 6 | 组合交易 leg 查询 | GET /api/v1/composite-transactions/{bizSeqNo}/steps | ✅ wedap-adapter 同名 | gateway 内用 + 排查 |
+| 6 | 组合交易 leg 查询 | ~~GET /api/v1/composite-transactions/{bizSeqNo}/steps~~ | ⚠️ 北向已废弃 2026-06-23 | 仅 gateway 内部 wedap client 拉 steps 落 leg（无北向接口；透传 wedap step 给 lending 违背组合交易透明边界 + 零消费方） |
 | 7 | 存款总余额 | GET /api/v1/deposit/balances/total | ✅ WeDAPAPI-Public 4.2.x | 9000 |
 | 8 | 存款账户列表 | GET /api/v1/deposit/accounts | ✅ Public 4.2.2（20260331 调查核对对齐） | 9000 + customers |
 | 9 | 用户信息查询 | GET /api/v1/users/info | ✅ Public 3.3.1 | customers |
