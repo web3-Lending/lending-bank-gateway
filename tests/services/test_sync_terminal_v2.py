@@ -242,3 +242,35 @@ async def test_reconcile_skips_terminal_no_leg_beyond_backfill_window(factory) -
         )
     assert count == 0
     assert m.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_reconcile_once_isolates_missing_txn_date(factory) -> None:
+    """G1 worker 级回归：候选单 steps 缺 txnDate → 真实 apply_legs 抛 LegsSyncIncomplete →
+    reconcile_once 单笔隔离(count=0)，不逸出 KeyError/InvalidOperation 打穿整轮 worker。"""
+    await _seed_order(factory, biz="DSB-NOTXN", status="SUBMITTED")  # 非终态 stale
+    step_no_date = {
+        "stepSeq": 1,
+        "sysRefNo": "R1",
+        "stepType": "DISBURSEMENT_COLLECTION",
+        "amount": "60.0000",
+        "currencyCode": "USD",
+        "status": "SUCCESS",
+        # 故意无 txnDate
+    }
+    wedap = AsyncMock()
+    wedap.get_composite_steps.return_value = [step_no_date]
+    now = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=60)
+    count = await reconcile_once(
+        factory,
+        wedap=wedap,
+        now=now,
+        stale_after_seconds=1.0,
+        max_age_seconds=1e9,
+        leg_backfill_seconds=1e9,
+        batch_limit=10,
+    )
+    assert count == 0  # 隔离，未计成功
+    async with factory() as s:
+        legs = (await s.execute(select(BankTxnLeg))).scalars().all()
+    assert legs == []  # 整批回滚，无部分 leg

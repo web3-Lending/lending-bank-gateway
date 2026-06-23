@@ -1,5 +1,5 @@
 import logging
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from sqlalchemy import select
@@ -36,6 +36,20 @@ _HARD_TERMINAL_LEG_STATUSES: frozenset[str] = frozenset(
 
 # SUCCESS 只允许向 REVERSED 推进（冲正），其余变更视为非法倒退
 _ALLOWED_FROM_SUCCESS: frozenset[str] = frozenset({LegStatus.SUCCESS, LegStatus.REVERSED})
+
+
+def _required_str(s: dict[str, Any], key: str) -> str:
+    """取必填字符串字段：缺失/None → KeyError；空串/纯空白 → ValueError。
+
+    G1：wedap step 的必填字段不允许为空（缺/空=上游违约）；调用方据此包装 LegsSyncIncomplete。
+    """
+    v = s.get(key)
+    if v is None:
+        raise KeyError(key)
+    text = str(v)
+    if not text.strip():
+        raise ValueError(f"empty {key}")
+    return text
 
 
 async def apply_legs_in_session(
@@ -88,17 +102,26 @@ async def apply_legs_in_session(
         ).scalars()
     }
     for s in steps:
-        seq = int(s["stepSeq"])
+        # G1：公共必填字段（existing 更新 + new 插入都读）存在性 + 类型归一化统一包装，
+        # 缺失/畸形 → LegsSyncIncomplete（而非裸 KeyError/ValueError 逸出 order-reconcile worker，
+        # worker 仅捕获 LegsSyncIncomplete）。
+        try:
+            seq = int(s["stepSeq"])
+            sys_ref_no = _required_str(s, "sysRefNo")
+            new_status = _required_str(s, "status")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise LegsSyncIncomplete(
+                f"step common field missing/malformed {tenant_id}/{biz_seq_no}: {exc}"
+            ) from exc
         if seq in existing:
             leg = existing[seq]
-            new_status = str(s["status"])
             # ref 漂移告警：external_ref 不可变，不同时只告警不修改
-            if str(s["sysRefNo"]) != leg.external_ref:
+            if sys_ref_no != leg.external_ref:
                 logger.warning(
                     "external_ref drift: seq=%s old=%s new=%s",
                     seq,
                     leg.external_ref,
-                    s["sysRefNo"],
+                    sys_ref_no,
                 )
             # 终态防倒退：完全终态不可改；SUCCESS 只允许向 REVERSED 推进
             is_terminal_overwrite = (
@@ -113,21 +136,31 @@ async def apply_legs_in_session(
             else:
                 leg.status = new_status
         else:
+            # G1：新 leg 插入专属必填 + 类型归一化（stepType / amount / txnDate）统一包装。
+            # txnDate 缺失=上游 wedap 违约（契约必返），整单拒绝、不静默落 NULL。
+            try:
+                step_type = _required_str(s, "stepType")
+                amount = Decimal(str(s["amount"]))
+                txn_date = _required_str(s, "txnDate")
+            except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
+                raise LegsSyncIncomplete(
+                    f"new-leg field missing/malformed {tenant_id}/{biz_seq_no} seq={seq}: {exc}"
+                ) from exc
             session.add(
                 BankTxnLeg(
                     tenant_id=tenant_id,
                     order_id=order.id,
                     biz_seq_no=biz_seq_no,
                     external_system="WEDAP_BANK",
-                    external_ref=str(s["sysRefNo"]),
-                    step_type=str(s["stepType"]),
+                    external_ref=sys_ref_no,
+                    step_type=step_type,
                     step_seq=seq,
-                    amount=Decimal(str(s["amount"])),
+                    amount=amount,
                     currency=str(s.get("currencyCode", "USD")),
                     payer_account=s.get("payerAccount"),
                     payee_account=s.get("payeeAccount"),
-                    status=str(s["status"]),
-                    txn_date=s.get("txnDate"),
+                    status=new_status,
+                    txn_date=txn_date,
                 )
             )
     await session.flush()

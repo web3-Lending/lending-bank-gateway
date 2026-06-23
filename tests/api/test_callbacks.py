@@ -473,6 +473,7 @@ def test_after_ingest_enqueues_outbox_row(client: TestClient) -> None:
             "amount": "100.0000",
             "currencyCode": "USD",
             "status": "SUCCESS",
+            "txnDate": "20260611",
         }
     ]
     client.app.state.wedap = wedap  # type: ignore[union-attr]
@@ -541,6 +542,7 @@ def test_after_ingest_atomic_enqueue_failure_rolls_back_legs(client: TestClient)
             "amount": "100.0000",
             "currencyCode": "USD",
             "status": "SUCCESS",
+            "txnDate": "20260611",
         }
     ]
     client.app.state.wedap = wedap  # type: ignore[union-attr]
