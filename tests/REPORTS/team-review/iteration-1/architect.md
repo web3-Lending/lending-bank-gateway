@@ -63,6 +63,7 @@
 - **影响**: 跨服务隐性强耦合：gateway 的内部物理 schema 成了 recon 的外部契约，但无版本化、无 CI gate。schema 漂移→对账错账且难发现。
 - **Root cause**: 把「内部表」当「跨服务契约」用，却没给它契约级保护（视图/物化契约层/schema 版本/契约测试）。
 - **建议修复方向**: 为跨库直读提供专用稳定契约层（DB 视图或契约化只读表，固定列名/语义/版本号），gateway 内部表演进与该视图解耦；或统一收口到 HTTP 供数一条路径，废弃直读；无论哪条，补一个跨仓契约测试（recon 仓断言 gateway 契约形态）进 CI。
+- **✅ RESOLVED（2026-06-23 · FU-GW-LEG-CONTRACT-PREMISE-20260623-001）**: 本 finding 已闭环，但纠正了原前提——实测 recon **不下钻 leg**（C5 约束），跨库直读的是 order 级 `bank_txn_order` + `recon_result_*`，**非 `bank_txn_leg`**。故采用「废直读 HTTP + 跨仓契约测试」组合：废弃 `GET /api/v1/fiat-vault/transactions`（commit e3af8d6，原 fiat_vault.py 已删）；删指错表的 leg 跨库契约、改建 `bank_txn_order` 契约（commit 7d28261：gateway `tests/contract/test_bank_txn_order_contract.py` + recon vendored 契约 + 双向 CI gate）。leg 表降级为 gateway 内部聚合实现细节，无跨库消费方。
 
 ## Minor (4)
 
