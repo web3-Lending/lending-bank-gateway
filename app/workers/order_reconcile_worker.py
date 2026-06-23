@@ -23,9 +23,11 @@ from datetime import timedelta
 from typing import Any
 
 from sqlalchemy import and_, exists, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.domain.states import OrderStatus
+from app.models.order_alert import OrderStuckAlert
 from app.models.txn import BankTxnLeg, BankTxnOrder
 from app.services.legs import LegsSyncIncomplete, sync_legs_for
 from app.services.order_status_reconcile import resolve_terminal_via_status_query
@@ -130,7 +132,89 @@ async def reconcile_once(
             count += 1
         except LegsSyncIncomplete:
             logger.warning("order-reconcile incomplete %s/%s（待下轮重试）", tenant_id, biz_seq_no)
+    # G6：超 max_age 仍非终态的父单 → 去重告警（标记表 + 限频 ERROR），不静默放弃
+    await alert_stuck_orders(
+        factory, now=now, max_age_seconds=max_age_seconds, batch_limit=batch_limit
+    )
     return count
+
+
+async def _record_stuck_alert(
+    factory: async_sessionmaker[Any],
+    *,
+    tenant_id: str,
+    biz_seq_no: str,
+    biz_type: str | None,
+    now: dt.datetime,
+) -> bool:
+    """插入 stuck 告警标记；UNIQUE(tenant,biz) 命中（已告警过）→ 返 False。
+
+    INSERT + 捕获 IntegrityError 跨 SQLite/MySQL 可移植地实现「只告警一次」去重，
+    不依赖方言专属的 ON CONFLICT / INSERT IGNORE。
+    """
+    try:
+        async with factory() as session:
+            async with session.begin():
+                session.add(
+                    OrderStuckAlert(
+                        tenant_id=tenant_id,
+                        biz_seq_no=biz_seq_no,
+                        biz_type=biz_type,
+                        first_alerted_at=now,
+                    )
+                )
+        return True
+    except IntegrityError:
+        return False
+
+
+async def alert_stuck_orders(
+    factory: async_sessionmaker[Any],
+    *,
+    now: dt.datetime,
+    max_age_seconds: float,
+    batch_limit: int,
+) -> int:
+    """G6：超 max_age 仍非终态的父单 → 去重告警。返回本轮新增告警数。
+
+    这些单已超出 reconcile 候选窗（_select_candidates 不再补拉，原会静默放弃）。本函数把它们
+    显式记入 order_stuck_alert（唯一约束去重）并限频 ERROR（仅首次告警记一行），交人工处置。
+    """
+    min_created = now - timedelta(seconds=max_age_seconds)
+    async with factory() as session:
+        rows = (
+            await session.execute(
+                select(
+                    BankTxnOrder.tenant_id,
+                    BankTxnOrder.biz_seq_no,
+                    BankTxnOrder.biz_type,
+                )
+                .where(
+                    and_(
+                        BankTxnOrder.status.in_(_NON_TERMINAL),
+                        BankTxnOrder.created_at <= min_created,
+                    )
+                )
+                .limit(batch_limit)
+            )
+        ).all()
+    new_alerts = 0
+    for tenant_id, biz_seq_no, biz_type in rows:
+        if await _record_stuck_alert(
+            factory,
+            tenant_id=tenant_id,
+            biz_seq_no=biz_seq_no,
+            biz_type=biz_type,
+            now=now,
+        ):
+            new_alerts += 1
+            logger.error(
+                "order stuck unresolved over max_age %s/%s biz_type=%s（已记 order_stuck_alert）",
+                tenant_id,
+                biz_seq_no,
+                biz_type,
+            )
+    return new_alerts
 
 
 async def run_forever(  # pragma: no cover

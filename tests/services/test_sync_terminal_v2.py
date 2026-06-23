@@ -13,12 +13,13 @@ from app.domain.states import OrderStatus, map_wedap_txn_status
 from app.models.audit import AuditLog
 from app.models.base import Base
 from app.models.callback import CallbackOutbox
+from app.models.order_alert import OrderStuckAlert
 from app.models.txn import BankTxnLeg, BankTxnOrder
 from app.services.legs import LegsSyncIncomplete
 from app.services.order_finalize import finalize_terminal_in_session
 from app.services.order_status_reconcile import resolve_terminal_via_status_query
 from app.services.submit import SubmitRequest, submit_order
-from app.workers.order_reconcile_worker import reconcile_once
+from app.workers.order_reconcile_worker import alert_stuck_orders, reconcile_once
 
 
 @pytest.fixture()
@@ -425,3 +426,35 @@ async def test_reconcile_once_isolates_status_query_unexpected_error(factory) ->
         )
     assert count == 1  # 回落 leg 兜底成功
     m.assert_called_once()  # 走了 leg 路径
+
+
+# ---------------------------------------------------------------------------
+# G6：stuck-order 去重告警
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_alert_stuck_orders_dedups(factory) -> None:
+    """G6：超 max_age 非终态父单 → 首轮新增告警(+ERROR)；次轮 UNIQUE 去重不重复。"""
+    await _seed_order(factory, biz="DSB-STUCK", status="RESULT_UNKNOWN")
+    now = dt.datetime.now(dt.UTC) + dt.timedelta(days=10)  # 远超 max_age
+    n1 = await alert_stuck_orders(factory, now=now, max_age_seconds=604800.0, batch_limit=10)
+    assert n1 == 1
+    n2 = await alert_stuck_orders(factory, now=now, max_age_seconds=604800.0, batch_limit=10)
+    assert n2 == 0  # UNIQUE(tenant,biz) 去重
+    async with factory() as s:
+        alerts = (await s.execute(select(OrderStuckAlert))).scalars().all()
+    assert len(alerts) == 1
+    assert alerts[0].biz_seq_no == "DSB-STUCK" and alerts[0].biz_type == "DSB"
+
+
+@pytest.mark.asyncio
+async def test_alert_stuck_orders_skips_within_window_and_terminal(factory) -> None:
+    """G6：窗内非终态 / 终态单 不告警。"""
+    await _seed_order(factory, biz="DSB-FRESH", status="SUBMITTED")  # 窗内
+    await _seed_order(factory, biz="DSB-DONE2", status="SUCCEEDED")  # 终态
+    now = dt.datetime.now(dt.UTC)  # max_age 内
+    n = await alert_stuck_orders(factory, now=now, max_age_seconds=604800.0, batch_limit=10)
+    assert n == 0
+    async with factory() as s:
+        assert (await s.execute(select(OrderStuckAlert))).scalars().all() == []

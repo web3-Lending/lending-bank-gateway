@@ -89,3 +89,33 @@ def test_replay_pending_outbox_404(client: TestClient) -> None:
     r = client.post(f"/api/v1/admin/outbox/{oid}/replay", headers=HEADERS)
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "GW_404_OUTBOX"
+
+
+def test_list_stuck_orders(client: TestClient) -> None:
+    """G6：GET /admin/stuck-orders 返回 order_stuck_alert 列表。"""
+
+    async def _insert(engine: Any) -> None:
+        import datetime as dt
+
+        from sqlalchemy import insert
+
+        from app.models.order_alert import OrderStuckAlert
+
+        async with engine.connect() as conn:
+            await conn.execute(
+                insert(OrderStuckAlert).values(
+                    tenant_id="OCBC",
+                    biz_seq_no="DSB-STUCK-1",
+                    biz_type="DSB",
+                    first_alerted_at=dt.datetime.now(dt.UTC),
+                )
+            )
+            await conn.commit()
+
+    asyncio.run(_insert(client.app.state.engine))  # type: ignore[union-attr]
+    r = client.get("/api/v1/admin/stuck-orders", headers=HEADERS)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["success"] is True
+    assert data["data"]["count"] == 1
+    assert data["data"]["items"][0]["biz_seq_no"] == "DSB-STUCK-1"

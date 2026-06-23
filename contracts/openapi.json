@@ -425,6 +425,30 @@
         }
       }
     },
+    "/api/v1/admin/stuck-orders": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "List Stuck Orders",
+        "description": "G6：列出 order_stuck_alert（超 max_age 未收敛终态的父单告警），供运维处置。\n\n最多返回最近 200 条（按 first_alerted_at 倒序）。",
+        "operationId": "list_stuck_orders_api_v1_admin_stuck_orders_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response List Stuck Orders Api V1 Admin Stuck Orders Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/recon/notify": {
       "post": {
         "tags": [
