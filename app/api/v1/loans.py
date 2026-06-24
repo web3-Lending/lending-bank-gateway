@@ -113,7 +113,7 @@ async def p2p_disbursement(
     ids: dict[str, str] = Depends(require_headers),
 ) -> dict[str, Any]:
     assert_idempotency_key_matches(request, body.bizSeqNo)
-    amount = parse_amount(body.disbursementInfo.txnAmount)
+    amount = parse_amount(body.disbursementInfo.txnAmount, body.disbursementInfo.currencyCode)
     payload = body.model_dump(mode="json", exclude_none=True)
     validate_detail_consistency(
         payload,
@@ -143,7 +143,7 @@ async def p2p_repayment(
     ids: dict[str, str] = Depends(require_headers),
 ) -> dict[str, Any]:
     assert_idempotency_key_matches(request, body.bizSeqNo)
-    amount = parse_amount(body.repaymentInfo.txnAmount)
+    amount = parse_amount(body.repaymentInfo.txnAmount, body.repaymentInfo.currencyCode)
     payload = body.model_dump(mode="json", exclude_none=True)
     # lenders 明细金额字段用 wedap 真实的 txnAmount（lending 按占比拆分，sum==总额成立）；
     # 原 shareAmount 是 lending/wedap 都没有的字段，会让 sum 校验永远跳过（形同虚设）。

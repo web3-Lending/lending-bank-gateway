@@ -234,3 +234,63 @@ def test_parse_amount_rejects_over_4dp_scale_400(raw: str) -> None:
 def test_parse_amount_accepts_within_4dp_scale(raw: str) -> None:
     """G5：≤4dp（含指数表示 1E+3=1000）正常返回正数。"""
     assert parse_amount(raw) > 0
+
+
+# ── per-currency 精度护栏（FU-GW-PER-CURRENCY-SCALE）─────────────────────────
+# 带 currency 时按该币种 ISO-4217 小数位（USD/默认 2、JPY 0、BHD 3、CLF 4）校验
+# 规范化有效位（去尾零），拒亚单位超精度脏金额；不传 currency 时退回 G5 全局 ≤4dp。
+
+
+@pytest.mark.parametrize(
+    ("raw", "currency"),
+    [
+        ("100.5", "JPY"),  # JPY 0dp，任何小数非法
+        ("0.1", "JPY"),
+        ("1.235", "USD"),  # USD 2dp，3 位有效非法（亚分）
+        ("1.235", "EUR"),  # 默认 2dp（不在特例表）同理
+        ("1.2345", "BHD"),  # BHD 3dp，4 位有效非法
+        ("100.5", "jpy"),  # 大小写不敏感
+    ],
+)
+def test_parse_amount_rejects_over_currency_scale_400(raw: str, currency: str) -> None:
+    """带币种时超该币种精度 → 400，message 含 scale + 币种。"""
+    with pytest.raises(HTTPException) as exc_info:
+        parse_amount(raw, currency)
+    assert exc_info.value.status_code == 400
+    assert "scale" in exc_info.value.detail["message"]  # type: ignore[index]
+    assert currency.upper() in exc_info.value.detail["message"]  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    ("raw", "currency", "expected"),
+    [
+        ("100", "JPY", Decimal("100")),  # JPY 整数
+        ("100.0000", "JPY", Decimal("100.0000")),  # 上游补尾零，规范化后 0 位有效，放行
+        ("1.23", "USD", Decimal("1.23")),  # USD 2dp
+        ("100.0000", "USD", Decimal("100.0000")),  # USD 补尾零放行（关键防回归）
+        ("1.234", "BHD", Decimal("1.234")),  # BHD 3dp
+        ("1.2300", "BHD", Decimal("1.2300")),  # BHD 尾零规范化 2 位有效，放行
+        ("1.2345", "CLF", Decimal("1.2345")),  # CLF 4dp
+    ],
+)
+def test_parse_amount_accepts_within_currency_scale(
+    raw: str, currency: str, expected: Decimal
+) -> None:
+    """带币种且有效位 ≤ 该币种精度（含上游补尾零）正常返回原值。"""
+    assert parse_amount(raw, currency) == expected
+
+
+@pytest.mark.parametrize("currency", ["XYZ", "ZZZ"])
+def test_parse_amount_unknown_currency_defaults_2dp(currency: str) -> None:
+    """未识别币种按 ISO 默认 2dp 校验（gateway 仅法币，String(3)）。"""
+    assert parse_amount("1.23", currency) == Decimal("1.23")
+    with pytest.raises(HTTPException) as exc_info:
+        parse_amount("1.235", currency)
+    assert exc_info.value.status_code == 400
+
+
+def test_parse_amount_no_currency_keeps_global_4dp() -> None:
+    """不传 currency（如 distribute 内部聚合）退回 G5 全局原始 ≤4dp：尾零照算。"""
+    assert parse_amount("1.2345") == Decimal("1.2345")
+    with pytest.raises(HTTPException):
+        parse_amount("1.23000")  # 原始 5 位（含尾零）仍按 G5 拒
