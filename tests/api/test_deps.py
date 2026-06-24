@@ -294,3 +294,41 @@ def test_parse_amount_no_currency_keeps_global_4dp() -> None:
     assert parse_amount("1.2345") == Decimal("1.2345")
     with pytest.raises(HTTPException):
         parse_amount("1.23000")  # 原始 5 位（含尾零）仍按 G5 拒
+
+
+def test_parse_amount_uyi_is_zero_dp() -> None:
+    """ISO-4217 UYI（乌拉圭指数单位）为 0dp，须在 _CURRENCY_SCALE 内（codex finding 1）。"""
+    assert parse_amount("100", "UYI") == Decimal("100")
+    with pytest.raises(HTTPException) as exc_info:
+        parse_amount("1.5", "UYI")
+    assert exc_info.value.status_code == 400
+
+
+# ── 明细金额也走 per-currency 护栏（codex finding 2：明细绕过 guard）──────────
+
+
+def test_detail_amount_sub_currency_scale_rejected_400() -> None:
+    """明细 lendAmount 亚单位超精度（USD 0.615）即使 sum 对得上也 400，不透传 Wedap。"""
+    with pytest.raises(HTTPException) as exc_info:
+        validate_detail_consistency(
+            {"lenders": [{"lendAmount": "0.615"}, {"lendAmount": "0.615"}]},
+            total=Decimal("1.23"),
+            currency="USD",
+            detail_key="lenders",
+            amount_field="lendAmount",
+        )
+    assert exc_info.value.status_code == 400
+    assert "invalid lendAmount" in exc_info.value.detail["message"]  # type: ignore[index]
+
+
+def test_detail_amount_jpy_decimal_rejected_400() -> None:
+    """JPY 0dp 明细带小数 → 400（明细金额也按币种精度校验）。"""
+    with pytest.raises(HTTPException) as exc_info:
+        validate_detail_consistency(
+            {"lenders": [{"lendAmount": "60.5"}, {"lendAmount": "39.5"}]},
+            total=Decimal("100"),
+            currency="JPY",
+            detail_key="lenders",
+            amount_field="lendAmount",
+        )
+    assert exc_info.value.status_code == 400

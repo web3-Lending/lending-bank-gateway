@@ -57,6 +57,7 @@ _CURRENCY_SCALE: dict[str, int] = {
     "PYG": 0,
     "RWF": 0,
     "UGX": 0,
+    "UYI": 0,
     "VND": 0,
     "VUV": 0,
     "XAF": 0,
@@ -187,9 +188,11 @@ def validate_detail_consistency(
         if not isinstance(item, dict) or amount_field not in item:
             has_amount = False
             break
+        # 明细金额也走 per-currency 护栏（含 scale/positive/finite），拦亚单位超精度明细，
+        # 防 sum 对得上但单条明细带亚分透传 Wedap；失败统一收敛为通用「invalid item」消息。
         try:
-            amounts.append(Decimal(str(item[amount_field])))
-        except (InvalidOperation, ValueError, TypeError) as exc:
+            amounts.append(parse_amount(item[amount_field], currency))
+        except HTTPException as exc:
             raise HTTPException(
                 400,
                 detail={
