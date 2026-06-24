@@ -41,7 +41,45 @@ def require_headers(request: Request) -> dict[str, str]:
     }
 
 
-def parse_amount(raw: Any) -> Decimal:
+# per-currency 精度表（FU-GW-PER-CURRENCY-SCALE）：仅列 ISO-4217 偏离默认 2dp 的法币。
+# gateway 仅收法币（currency 列 String(3)，token 走 custody 不经此），故全部 ≤4dp，
+# Numeric(21,4) 列足以容纳——不需改列。未列币种按 _DEFAULT_CURRENCY_SCALE=2 校验。
+_CURRENCY_SCALE: dict[str, int] = {
+    # 0dp（无小数子单位）
+    "BIF": 0,
+    "CLP": 0,
+    "DJF": 0,
+    "GNF": 0,
+    "ISK": 0,
+    "JPY": 0,
+    "KMF": 0,
+    "KRW": 0,
+    "PYG": 0,
+    "RWF": 0,
+    "UGX": 0,
+    "UYI": 0,
+    "VND": 0,
+    "VUV": 0,
+    "XAF": 0,
+    "XOF": 0,
+    "XPF": 0,
+    # 3dp
+    "BHD": 3,
+    "IQD": 3,
+    "JOD": 3,
+    "KWD": 3,
+    "LYD": 3,
+    "OMR": 3,
+    "TND": 3,
+    # 4dp
+    "CLF": 4,
+    "UYW": 4,
+}
+_DEFAULT_CURRENCY_SCALE = 2  # ISO-4217 多数法币小数位
+_COLUMN_MAX_SCALE = 4  # Numeric(21,4) 列存储兜底（无币种上下文时用，等同原 G5）
+
+
+def parse_amount(raw: Any, currency: str | None = None) -> Decimal:
     try:
         value = Decimal(str(raw))
     except (InvalidOperation, ValueError, TypeError) as exc:
@@ -69,14 +107,26 @@ def parse_amount(raw: Any) -> Decimal:
                 "message": f"amount must be positive: {raw!r}",
             },
         )
-    # G5：scale（小数位）护栏——v1 全 4dp 法币，>4dp 输入会被 Numeric(21,4) 列静默 round，
-    # 显式拒为 400 不静默截断。value 已确保 finite（上方护栏），exponent 必为 int。
-    if -int(value.as_tuple().exponent) > 4:
+    # scale（小数位）护栏——超精度输入会被 Numeric(21,4) 列静默 round，显式拒为 400。
+    # value 已确保 finite（上方护栏），exponent 必为 int。
+    ccy = (currency or "").strip().upper()
+    if ccy:
+        # 带币种：按该币种 ISO 精度校验「规范化有效位」（normalize 去尾零，
+        # 容上游补零如 USD "100.0000"），只拦真·亚单位超精度（如 JPY 带小数）。
+        max_scale = _CURRENCY_SCALE.get(ccy, _DEFAULT_CURRENCY_SCALE)
+        actual_scale = max(0, -int(value.normalize().as_tuple().exponent))
+        scale_label = f"{max_scale} decimal places for {ccy}"
+    else:
+        # 无币种上下文（如 distribute 内部聚合）：退回 G5 全局原始 ≤4dp 列兜底。
+        max_scale = _COLUMN_MAX_SCALE
+        actual_scale = -int(value.as_tuple().exponent)
+        scale_label = "4 decimal places"
+    if actual_scale > max_scale:
         raise HTTPException(
             400,
             detail={
                 "code": "GW_400_VALIDATION",
-                "message": f"amount scale exceeds 4 decimal places: {raw!r}",
+                "message": f"amount scale exceeds {scale_label}: {raw!r}",
             },
         )
     return value
@@ -138,9 +188,11 @@ def validate_detail_consistency(
         if not isinstance(item, dict) or amount_field not in item:
             has_amount = False
             break
+        # 明细金额也走 per-currency 护栏（含 scale/positive/finite），拦亚单位超精度明细，
+        # 防 sum 对得上但单条明细带亚分透传 Wedap；失败统一收敛为通用「invalid item」消息。
         try:
-            amounts.append(Decimal(str(item[amount_field])))
-        except (InvalidOperation, ValueError, TypeError) as exc:
+            amounts.append(parse_amount(item[amount_field], currency))
+        except HTTPException as exc:
             raise HTTPException(
                 400,
                 detail={

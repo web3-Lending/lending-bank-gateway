@@ -113,7 +113,7 @@ async def collect_from_users(
             400,
             detail={"code": "GW_400_VALIDATION", "message": "missing txnAmount"},
         )
-    amount = parse_amount(raw_amount)
+    amount = parse_amount(raw_amount, body.currencyCode)
     # txnAmount 在场时 totalAmount 属旧形态噪声字段，不透传 wedap（避免注入伪字段 + 幂等漂移）
     if body.txnAmount and "totalAmount" in payload:
         payload.pop("totalAmount")
@@ -144,7 +144,7 @@ async def distribute_to_users(
     recipients = body.recipients or []
     amount = sum(
         (
-            parse_amount(str(r["distributeAmount"]))
+            parse_amount(str(r["distributeAmount"]), body.currencyCode)
             for r in recipients
             if r.get("distributeAmount") is not None
         ),
