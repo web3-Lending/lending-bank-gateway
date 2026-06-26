@@ -28,6 +28,7 @@ import app.models.order_alert  # noqa: F401, E402
 import app.models.query_audit  # noqa: F401, E402
 import app.models.recon  # noqa: F401, E402
 import app.models.txn  # noqa: F401, E402
+import app.models.wedap_delivery  # noqa: F401, E402
 from app.models.base import Base  # noqa: E402
 
 target_metadata = Base.metadata
