@@ -131,3 +131,19 @@ async def test_deliver_task_staging_checksum_mismatch_aborts():
         )
     s3.upload.assert_not_called()  # 校验失败不上传脏字节
     wedap.notify_batch_uploaded.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_enqueue_and_serialize_returns_response(tmp_path):
+    from app.services.wedap_delivery import enqueue_and_serialize
+
+    engine = build_engine(f"sqlite+aiosqlite:///{tmp_path}/t.db")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    resp = await enqueue_and_serialize(build_session_factory(engine), **_KW)
+    await engine.dispose()
+
+    assert resp["importBatchNo"] == "BATCH-LEN-20260624-001"
+    assert resp["requestId"] == "wedap-import-BATCH-LEN-20260624-001"
+    assert resp["status"] == "PENDING"
+    assert resp["taskId"] is not None

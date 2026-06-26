@@ -19,6 +19,7 @@ from app.api.v1.deposit import router as deposit_router
 from app.api.v1.health import router as health_router
 from app.api.v1.loans import router as loans_router
 from app.api.v1.recon_notify import router as recon_notify_router
+from app.api.v1.wedap_import_enqueue import router as wedap_import_enqueue_router
 from app.clients.s3 import S3FileClient
 from app.clients.wedap import WedapClient
 from app.core.config import Settings, get_settings
@@ -306,6 +307,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(admin_ops_router)
     app.include_router(recon_notify_router)
     app.include_router(deposit_router)
+    app.include_router(wedap_import_enqueue_router)
     return app
 
 

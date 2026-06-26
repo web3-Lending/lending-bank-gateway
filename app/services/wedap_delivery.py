@@ -14,6 +14,7 @@ import datetime as dt
 import hashlib
 import logging
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
@@ -25,6 +26,42 @@ from app.models.wedap_delivery import WedapImportDeliveryTask
 from app.services.wedap_import import deliver_batch
 
 logger = logging.getLogger(__name__)
+
+
+async def enqueue_and_serialize(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: str,
+    request_id: str,
+    import_batch_no: str,
+    data_type: str,
+    import_date: str,
+    staging_key: str,
+    file_checksum: str,
+    file_size: int,
+    total_count: int,
+) -> dict[str, Any]:
+    """开本地事务 enqueue 一条投递任务并序列化为响应 dict（端点编排下沉，便于直测）。"""
+    async with factory() as session:
+        async with session.begin():
+            task = await enqueue_delivery(
+                session,
+                tenant_id=tenant_id,
+                request_id=request_id,
+                import_batch_no=import_batch_no,
+                data_type=data_type,
+                import_date=import_date,
+                staging_key=staging_key,
+                file_checksum=file_checksum,
+                file_size=file_size,
+                total_count=total_count,
+            )
+        return {
+            "importBatchNo": task.import_batch_no,
+            "requestId": task.request_id,
+            "status": task.status,
+            "taskId": task.id,
+        }
 
 
 async def enqueue_delivery(
