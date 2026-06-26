@@ -7,14 +7,46 @@ dispatch_delivery_once / deliver_task 单测覆盖）。
 
 import asyncio
 import datetime as dt
+import logging
 from collections.abc import Awaitable, Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.clients.recon_callback import ReconCallbackClient
 from app.clients.s3 import S3FileClient
 from app.clients.wedap import WedapClient
 from app.models.wedap_delivery import WedapImportDeliveryTask
 from app.services.wedap_delivery import deliver_task, dispatch_delivery_once
+
+logger = logging.getLogger(__name__)
+
+
+def make_on_terminal(
+    recon_client: ReconCallbackClient,
+) -> Callable[[WedapImportDeliveryTask, str, str | None], Awaitable[None]]:
+    """绑定 recon 回执客户端 → dispatch on_terminal 闭包。
+
+    best-effort：回执失败只告警不抛（不回滚本地终态）；recon 侧 stuck-ENQUEUED 可观测兜底，
+    durable 重试（CallbackOutbox）后续硬化。
+    """
+
+    async def _on_terminal(task: WedapImportDeliveryTask, status: str, error: str | None) -> None:
+        try:
+            await recon_client.post_result(
+                tenant_id=task.tenant_id,
+                import_batch_no=task.import_batch_no,
+                status=status,
+                error=error,
+            )
+        except Exception as exc:  # noqa: BLE001 - 回执 best-effort，失败告警不阻断
+            logger.warning(
+                "wedap_delivery: 回执 recon 失败 batch=%s status=%s err=%s",
+                task.import_batch_no,
+                status,
+                exc,
+            )
+
+    return _on_terminal
 
 
 def make_deliver(
@@ -44,6 +76,8 @@ async def run_forever(  # pragma: no cover
     deliver: Callable[[WedapImportDeliveryTask], Awaitable[None]],
     max_attempts: int,
     interval_seconds: float = 5.0,
+    on_terminal: Callable[[WedapImportDeliveryTask, str, str | None], Awaitable[None]]
+    | None = None,
 ) -> None:
     """无限循环投递 wedap 任务，每轮间隔 interval_seconds 秒（lifespan 后台 task）。"""
     while True:
@@ -52,5 +86,6 @@ async def run_forever(  # pragma: no cover
             deliver=deliver,
             now=dt.datetime.now(dt.UTC),
             max_attempts=max_attempts,
+            on_terminal=on_terminal,
         )
         await asyncio.sleep(interval_seconds)

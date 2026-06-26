@@ -136,12 +136,15 @@ async def dispatch_delivery_once(
     now: dt.datetime,
     max_attempts: int = 5,
     base_seconds: float = 60.0,
+    on_terminal: Callable[[WedapImportDeliveryTask, str, str | None], Awaitable[None]]
+    | None = None,
 ) -> int:
     """扫一轮可投递任务并逐条投递，返回处理条数。
 
     可投递 = status=PENDING 且 (next_retry_at 为空 或 已到点)。投递动作 deliver 由调用方注入
     （取 staging 字节 + deliver_batch），本函数只管状态机：成功→DELIVERED；失败→attempts+1，
     未达上限回 PENDING + 退避，达上限→FAILED。外呼在事务外，更新各自独立短事务（与 outbox 一致）。
+    on_terminal（可选）在任务进终态（DELIVERED/FAILED）且已 commit 后触发，用于回执 recon。
     """
     async with factory() as snap_session:
         tasks = list(
@@ -174,6 +177,7 @@ async def dispatch_delivery_once(
                 error,
             )
 
+        terminal: str | None = None
         async with factory() as upd_session:
             row = await upd_session.get(WedapImportDeliveryTask, task.id)
             if row is None:  # pragma: no cover - 并发删除，正常不发生
@@ -183,14 +187,19 @@ async def dispatch_delivery_once(
                 row.status = "DELIVERED"
                 row.notified_at = now
                 row.last_error = None
+                terminal = "DELIVERED"
             elif row.attempts >= max_attempts:
                 row.status = "FAILED"
                 row.last_error = error
+                terminal = "FAILED"
             else:
                 row.status = "PENDING"
                 row.next_retry_at = compute_next_retry(now, row.attempts, base_seconds=base_seconds)
                 row.last_error = error
             await upd_session.commit()
+        # 终态已持久化后再回执 recon（回执失败不回滚本地状态，下轮幂等重发）
+        if terminal is not None and on_terminal is not None:
+            await on_terminal(task, terminal, error)
         processed += 1
 
     return processed

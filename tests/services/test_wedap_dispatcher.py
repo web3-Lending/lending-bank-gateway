@@ -135,3 +135,53 @@ async def test_dispatch_skips_delivered(factory):
     # 已 DELIVERED，再扫不重投
     n = await dispatch_delivery_once(factory, deliver=ok, now=NOW)
     assert n == 0
+
+
+@pytest.mark.asyncio
+async def test_dispatch_fires_on_terminal_for_delivered(factory):
+    await _seed(factory)
+    seen = []
+
+    async def deliver(task):
+        return None
+
+    async def on_terminal(task, status, error):
+        seen.append((task.import_batch_no, status, error))
+
+    await dispatch_delivery_once(factory, deliver=deliver, now=NOW, on_terminal=on_terminal)
+    assert seen == [("BATCH-LEN-20260624-001", "DELIVERED", None)]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_fires_on_terminal_for_failed_at_max(factory):
+    await _seed(factory)
+    seen = []
+
+    async def deliver(task):
+        raise RuntimeError("notify 5xx")
+
+    async def on_terminal(task, status, error):
+        seen.append((status, error))
+
+    await dispatch_delivery_once(
+        factory, deliver=deliver, now=NOW, max_attempts=1, on_terminal=on_terminal
+    )
+    assert seen == [("FAILED", "notify 5xx")]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_no_on_terminal_on_transient_retry(factory):
+    await _seed(factory)
+    seen = []
+
+    async def deliver(task):
+        raise RuntimeError("x")
+
+    async def on_terminal(task, status, error):
+        seen.append(status)
+
+    # 未达上限→回 PENDING 待重试，不触发 on_terminal
+    await dispatch_delivery_once(
+        factory, deliver=deliver, now=NOW, max_attempts=5, on_terminal=on_terminal
+    )
+    assert seen == []

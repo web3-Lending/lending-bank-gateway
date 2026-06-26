@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.models.wedap_delivery import WedapImportDeliveryTask
-from app.workers.wedap_delivery_dispatcher import make_deliver
+from app.workers.wedap_delivery_dispatcher import make_deliver, make_on_terminal
 
 _CONTENT = b'{"h":1}\n{"loanId":"L1"}\n'
 _CHECKSUM = hashlib.sha256(_CONTENT).hexdigest()
@@ -40,3 +40,27 @@ async def test_make_deliver_binds_buckets_and_clients():
     # wedap_bucket 绑定 → upload 用 wedap 桶
     assert s3.upload.call_args.kwargs["bucket"] == "wedap"
     wedap.notify_batch_uploaded.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_make_on_terminal_posts_result():
+    recon = AsyncMock()
+    recon.post_result = AsyncMock()
+    on_terminal = make_on_terminal(recon)
+    await on_terminal(_task(), "DELIVERED", None)
+    recon.post_result.assert_awaited_once_with(
+        tenant_id="WBTHK01",
+        import_batch_no="BATCH-LEN-20260624-001",
+        status="DELIVERED",
+        error=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_make_on_terminal_swallows_callback_failure():
+    recon = AsyncMock()
+    recon.post_result = AsyncMock(side_effect=RuntimeError("recon down"))
+    on_terminal = make_on_terminal(recon)
+    # 回执失败不抛（best-effort）
+    await on_terminal(_task(), "FAILED", "notify 5xx")
+    recon.post_result.assert_awaited_once()
