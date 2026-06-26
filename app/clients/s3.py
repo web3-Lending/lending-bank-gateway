@@ -37,3 +37,7 @@ class S3FileClient:
         """
         self._s3.put_object(Bucket=bucket, Key=key, Body=content)
         return hashlib.sha256(content).hexdigest()
+
+    def get_bytes(self, *, bucket: str, key: str) -> bytes:
+        """读取 S3 对象字节（recon→gateway staging 取数；dispatcher 用）。"""
+        return self._s3.get_object(Bucket=bucket, Key=key)["Body"].read()  # type: ignore[no-any-return]

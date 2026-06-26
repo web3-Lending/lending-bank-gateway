@@ -9,7 +9,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
+import hashlib
 import logging
 from collections.abc import Awaitable, Callable
 
@@ -17,7 +19,10 @@ from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.clients.s3 import S3FileClient
+from app.clients.wedap import WedapClient
 from app.models.wedap_delivery import WedapImportDeliveryTask
+from app.services.wedap_import import deliver_batch
 
 logger = logging.getLogger(__name__)
 
@@ -152,3 +157,40 @@ async def dispatch_delivery_once(
         processed += 1
 
     return processed
+
+
+class StagingChecksumMismatch(Exception):
+    """staging 取回字节的 SHA-256 与任务记录的 file_checksum 不符（staging 损坏/被改）。"""
+
+
+async def deliver_task(
+    task: WedapImportDeliveryTask,
+    *,
+    s3_client: S3FileClient,
+    wedap_client: WedapClient,
+    staging_bucket: str,
+    wedap_bucket: str,
+) -> None:
+    """生产投递动作：staging 取字节 → 校 checksum → deliver_batch（上传 wedap + 通知）。
+
+    供 dispatch_delivery_once 的 deliver 参数绑定。staging 读后先校 SHA-256 == 任务记录值，
+    防 staging 损坏把脏字节投给 wedap；deliver_batch 内部再校上传后 checksum（双重）。
+    """
+    content = await asyncio.to_thread(
+        s3_client.get_bytes, bucket=staging_bucket, key=task.staging_key
+    )
+    actual = hashlib.sha256(content).hexdigest()
+    if actual != task.file_checksum:
+        raise StagingChecksumMismatch(f"{actual} != {task.file_checksum}")
+    await deliver_batch(
+        s3_client=s3_client,
+        wedap_client=wedap_client,
+        bucket=wedap_bucket,
+        data_type=task.data_type,
+        import_date=task.import_date,
+        import_batch_no=task.import_batch_no,
+        content=content,
+        checksum=task.file_checksum,
+        file_size=task.file_size,
+        total_count=task.total_count,
+    )

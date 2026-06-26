@@ -54,3 +54,18 @@ def test_upload_puts_object_and_returns_sha256() -> None:  # type: ignore[no-unt
     stub.assert_no_pending_responses()
     assert checksum == hashlib.sha256(CONTENT).hexdigest()
     assert len(checksum) == 64
+
+
+def test_get_bytes_returns_object_body() -> None:  # type: ignore[no-untyped-def]
+    c = _client_with_stub(b"staging-jsonl-bytes")
+    assert c.get_bytes(bucket="b", key="k") == b"staging-jsonl-bytes"
+
+
+def test_upload_returns_sha256() -> None:  # type: ignore[no-untyped-def]
+    import hashlib as _h
+
+    c = S3FileClient(endpoint_url=None)
+    stub = Stubber(c._s3)
+    stub.add_response("put_object", {}, {"Bucket": "b", "Key": "k", "Body": b"x"})
+    stub.activate()
+    assert c.upload(bucket="b", key="k", content=b"x") == _h.sha256(b"x").hexdigest()
