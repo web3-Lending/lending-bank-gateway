@@ -40,3 +40,17 @@ def test_expected_md5_case_insensitive(tmp_path) -> None:  # type: ignore[no-unt
     c.download_verified(
         bucket="b", key="k", expected_md5=MD5.upper(), dest=str(tmp_path / "f.xlsx")
     )
+
+
+def test_upload_puts_object_and_returns_sha256() -> None:  # type: ignore[no-untyped-def]
+    c = S3FileClient(endpoint_url=None)
+    stub = Stubber(c._s3)
+    key = "wedap/import/interest-accrual/LEN/20260624/BATCH-LEN-20260624-001.jsonl"
+    stub.add_response("put_object", {}, {"Bucket": "wedap-bucket", "Key": key, "Body": CONTENT})
+    stub.activate()
+
+    checksum = c.upload(bucket="wedap-bucket", key=key, content=CONTENT)
+
+    stub.assert_no_pending_responses()
+    assert checksum == hashlib.sha256(CONTENT).hexdigest()
+    assert len(checksum) == 64

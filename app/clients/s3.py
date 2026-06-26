@@ -28,3 +28,12 @@ class S3FileClient:
         path = pathlib.Path(dest)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(body)
+
+    def upload(self, *, bucket: str, key: str, content: bytes) -> str:
+        """上传字节到 S3（wedap flow-import 导入文件），返回内容 SHA-256 小写 hex。
+
+        wedap fileChecksum 用 SHA-256（spec §4，区别于下载侧 md5 契约）；调用方可用
+        返回值与生成侧 BatchFile.checksum 比对，确保上传内容一致。
+        """
+        self._s3.put_object(Bucket=bucket, Key=key, Body=content)
+        return hashlib.sha256(content).hexdigest()
