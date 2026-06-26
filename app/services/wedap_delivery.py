@@ -10,12 +10,16 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
+from collections.abc import Awaitable, Callable
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models.wedap_delivery import WedapImportDeliveryTask
+
+logger = logging.getLogger(__name__)
 
 
 async def enqueue_delivery(
@@ -81,3 +85,70 @@ def compute_next_retry(
     """退避：next_retry_at = now + base * 2^(attempts-1)（指数退避，与 outbox 一致）。"""
     delay = base_seconds * (2 ** max(0, attempts - 1))
     return now + dt.timedelta(seconds=delay)
+
+
+async def dispatch_delivery_once(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    deliver: Callable[[WedapImportDeliveryTask], Awaitable[None]],
+    now: dt.datetime,
+    max_attempts: int = 5,
+    base_seconds: float = 60.0,
+) -> int:
+    """扫一轮可投递任务并逐条投递，返回处理条数。
+
+    可投递 = status=PENDING 且 (next_retry_at 为空 或 已到点)。投递动作 deliver 由调用方注入
+    （取 staging 字节 + deliver_batch），本函数只管状态机：成功→DELIVERED；失败→attempts+1，
+    未达上限回 PENDING + 退避，达上限→FAILED。外呼在事务外，更新各自独立短事务（与 outbox 一致）。
+    """
+    async with factory() as snap_session:
+        tasks = list(
+            (
+                await snap_session.execute(
+                    select(WedapImportDeliveryTask).where(
+                        WedapImportDeliveryTask.status == "PENDING",
+                        or_(
+                            WedapImportDeliveryTask.next_retry_at.is_(None),
+                            WedapImportDeliveryTask.next_retry_at <= now,
+                        ),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    processed = 0
+    for task in tasks:
+        error: str | None = None
+        try:
+            await deliver(task)
+        except Exception as exc:  # noqa: BLE001 - 投递失败统一进退避，错误存 last_error
+            error = str(exc)
+            logger.warning(
+                "wedap_delivery: 投递失败 batch=%s attempt=%s err=%s",
+                task.import_batch_no,
+                task.attempts + 1,
+                error,
+            )
+
+        async with factory() as upd_session:
+            row = await upd_session.get(WedapImportDeliveryTask, task.id)
+            if row is None:  # pragma: no cover - 并发删除，正常不发生
+                continue
+            row.attempts += 1
+            if error is None:
+                row.status = "DELIVERED"
+                row.notified_at = now
+                row.last_error = None
+            elif row.attempts >= max_attempts:
+                row.status = "FAILED"
+                row.last_error = error
+            else:
+                row.status = "PENDING"
+                row.next_retry_at = compute_next_retry(now, row.attempts, base_seconds=base_seconds)
+                row.last_error = error
+            await upd_session.commit()
+        processed += 1
+
+    return processed
