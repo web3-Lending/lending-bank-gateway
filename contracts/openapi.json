@@ -520,6 +520,50 @@
           }
         }
       }
+    },
+    "/api/v1/wedap/import/enqueue": {
+      "post": {
+        "tags": [
+          "wedap-import"
+        ],
+        "summary": "Enqueue Import",
+        "description": "交单一条投递任务（幂等）；返回 accepted + 任务态。编排下沉 service 便于直测。",
+        "operationId": "enqueue_import_api_v1_wedap_import_enqueue_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnqueueRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Enqueue Import Api V1 Wedap Import Enqueue Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -627,6 +671,61 @@
           "currencyCode"
         ],
         "title": "DistributeRequest"
+      },
+      "EnqueueRequest": {
+        "properties": {
+          "import_batch_no": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Import Batch No"
+          },
+          "data_type": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Data Type"
+          },
+          "import_date": {
+            "type": "string",
+            "maxLength": 8,
+            "minLength": 8,
+            "title": "Import Date"
+          },
+          "staging_key": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Staging Key"
+          },
+          "file_checksum": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "File Checksum"
+          },
+          "file_size": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "File Size"
+          },
+          "total_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Total Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "import_batch_no",
+          "data_type",
+          "import_date",
+          "staging_key",
+          "file_checksum",
+          "file_size",
+          "total_count"
+        ],
+        "title": "EnqueueRequest"
       },
       "HTTPValidationError": {
         "properties": {
