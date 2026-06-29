@@ -185,7 +185,9 @@ async def dispatch_delivery_once(
             row.attempts += 1
             if error is None:
                 row.status = "DELIVERED"
-                row.notified_at = now
+                row.notified_at = (
+                    now  # = wedap notify 成功时刻（非"已回执 recon"，回执是 on_terminal 另发）
+                )
                 row.last_error = None
                 terminal = "DELIVERED"
             elif row.attempts >= max_attempts:

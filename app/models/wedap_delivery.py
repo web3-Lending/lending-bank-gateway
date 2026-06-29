@@ -47,4 +47,5 @@ class WedapImportDeliveryTask(Base, TenantMixin, TimestampMixin):
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     next_retry_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
+    # wedap notify 成功时刻（南向投递完成），非 gateway→recon 回执时刻（回执由 on_terminal 另发）。
     notified_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
