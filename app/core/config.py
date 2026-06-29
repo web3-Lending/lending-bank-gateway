@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     wedap_delivery_enabled: bool = False  # wedap 投递 worker 开关（默认关，e2e/部署显式开）
     # gateway→recon 投递回执回写地址（§4.3）。
     recon_base_url: str = "http://lending-recon:8040"
+    # 回执 HMAC 共享密钥（= recon RECON_S2S_HMAC_SECRET）；空=local insecure 占位签名。
+    recon_callback_hmac_secret: str = ""
     callback_target_lifecycle_url: str = (
         "http://lending-lifecycel:9000/api/v1/bank/transaction-callback"
     )

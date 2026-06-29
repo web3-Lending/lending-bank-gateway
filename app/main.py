@@ -229,7 +229,10 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 wedap_bucket=settings.wedap_import_bucket,
             )
             wedap_on_terminal = wedap_delivery_dispatcher.make_on_terminal(
-                ReconCallbackClient(base_url=settings.recon_base_url)
+                ReconCallbackClient(
+                    base_url=settings.recon_base_url,
+                    hmac_secret=settings.recon_callback_hmac_secret or None,
+                )
             )
             tasks.append(
                 asyncio.create_task(
