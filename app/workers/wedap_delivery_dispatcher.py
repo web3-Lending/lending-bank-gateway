@@ -98,5 +98,7 @@ async def run_forever(  # pragma: no cover
         )
         # durable 回执：重发终态但未送达的回执（FU-WEDAP-CALLBACK-DURABLE）
         if on_terminal is not None:
-            await resend_pending_callbacks_once(factory, send=on_terminal)
+            await resend_pending_callbacks_once(
+                factory, send=on_terminal, now=dt.datetime.now(dt.UTC)
+            )
         await asyncio.sleep(interval_seconds)

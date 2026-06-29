@@ -24,7 +24,12 @@ async def factory(tmp_path):
 
 
 async def _insert(
-    factory, *, status="DELIVERED", callback_sent_at=None, batch="BATCH-LEN-20260624-001"
+    factory,
+    *,
+    status="DELIVERED",
+    callback_sent_at=None,
+    callback_locked_at=None,
+    batch="BATCH-LEN-20260624-001",
 ):
     async with factory() as s:
         s.add(
@@ -41,6 +46,7 @@ async def _insert(
                 status=status,
                 last_error=None,
                 callback_sent_at=callback_sent_at,
+                callback_locked_at=callback_locked_at,
             )
         )
         await s.commit()
@@ -119,8 +125,65 @@ async def test_resend_via_on_terminal_picks_unsent_terminal(factory):
     recon.post_result = AsyncMock()
     on_terminal = make_on_terminal(recon, factory)
 
-    n = await resend_pending_callbacks_once(factory, send=on_terminal)
+    n = await resend_pending_callbacks_once(factory, send=on_terminal, now=dt.datetime.now(dt.UTC))
 
     assert n == 1  # 只 B-UNSENT(终态+未送达);B-SENT 已送达跳过,B-PENDING 非终态跳过
     recon.post_result.assert_awaited_once()
     assert (await _get(factory, "B-UNSENT")).callback_sent_at is not None
+
+
+@pytest.mark.asyncio
+async def test_resend_claim_skips_freshly_locked(factory):
+    """已被别的实例 claim(callback_locked_at 新鲜)→ resend 跳过,不重发。"""
+    from app.services.wedap_delivery import resend_pending_callbacks_once
+
+    now = dt.datetime(2026, 6, 24, 12, 0, tzinfo=dt.UTC)
+    await _insert(
+        factory,
+        status="DELIVERED",
+        callback_sent_at=None,
+        callback_locked_at=now - dt.timedelta(seconds=10),
+        batch="B-LOCKED",
+    )
+    recon = AsyncMock()
+    recon.post_result = AsyncMock()
+    n = await resend_pending_callbacks_once(factory, send=make_on_terminal(recon, factory), now=now)
+    assert n == 0
+    recon.post_result.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resend_claim_reclaims_stale_lock(factory):
+    """残留锁(超时)→ 可重新 claim 重发。"""
+    from app.services.wedap_delivery import resend_pending_callbacks_once
+
+    now = dt.datetime(2026, 6, 24, 12, 0, tzinfo=dt.UTC)
+    await _insert(
+        factory,
+        status="DELIVERED",
+        callback_sent_at=None,
+        callback_locked_at=now - dt.timedelta(seconds=3600),
+        batch="B-STALE",
+    )
+    recon = AsyncMock()
+    recon.post_result = AsyncMock()
+    n = await resend_pending_callbacks_once(factory, send=make_on_terminal(recon, factory), now=now)
+    assert n == 1
+    recon.post_result.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_resend_skips_when_claim_lost(factory, monkeypatch):
+    """scan 到但 claim 竞败(别的实例抢先)→ continue 跳过不重发。"""
+    from app.services import wedap_delivery as _wd
+    from app.services.wedap_delivery import resend_pending_callbacks_once
+
+    await _insert(factory, status="DELIVERED", callback_sent_at=None, batch="B-RACE")
+    monkeypatch.setattr(_wd, "_claim_callback", AsyncMock(return_value=False))
+    recon = AsyncMock()
+    recon.post_result = AsyncMock()
+    n = await resend_pending_callbacks_once(
+        factory, send=make_on_terminal(recon, factory), now=dt.datetime(2026, 6, 24, tzinfo=dt.UTC)
+    )
+    assert n == 0
+    recon.post_result.assert_not_awaited()

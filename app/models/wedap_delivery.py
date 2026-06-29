@@ -55,3 +55,6 @@ class WedapImportDeliveryTask(Base, TenantMixin, TimestampMixin):
     # gateway→recon 回执送达时刻（FU-WEDAP-CALLBACK-DURABLE）：终态 + 此列为空 = 回执未送达，
     # resend_pending_callbacks_once 重发兜底，消除 recon 永久卡 ENQUEUED。
     callback_sent_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    # 回执重发原子 claim 时刻：resend 锁定未送达回执后才重发，多实例只一个抢到；
+    # 残留锁超时由 claim WHERE(锁空或超时)回收。codex 复评 P1。
+    callback_locked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
