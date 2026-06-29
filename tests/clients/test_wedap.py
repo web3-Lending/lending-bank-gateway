@@ -476,3 +476,86 @@ async def test_get_user_info_missing_data_returns_empty() -> None:
         tenant_id="OCBC", request_id="r", params={"userId": "U001"}
     )
     assert resp == {}
+
+
+# ---------------------------------------------------------------------------
+# notify_batch_uploaded (flow-import)
+# ---------------------------------------------------------------------------
+
+NOTIFY_PATH = f"{BASE}/bank/api/v1/import/batch-uploaded"
+
+
+def _import_client() -> WedapClient:
+    return WedapClient(base_url=BASE, timeout_seconds=1.0, import_api_key="KEY123")
+
+
+def _payload() -> dict:
+    return {
+        "dataType": "interest-accrual",
+        "channelId": "LEN",
+        "importBatchNo": "BATCH-LEN-20260624-001",
+        "importDate": "20260624",
+        "fileChecksum": "a" * 64,
+        "fileSize": 1234,
+    }
+
+
+@respx.mock
+async def test_notify_batch_uploaded_accepted() -> None:
+    respx.post(NOTIFY_PATH).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "status": "ACCEPTED",
+                "processingId": "P1",
+                "resultFilePath": "s3://r",
+                "message": None,
+            },
+        )
+    )
+    resp = await _import_client().notify_batch_uploaded(payload=_payload())
+    assert resp["status"] == "ACCEPTED"
+    assert resp["processingId"] == "P1"
+
+
+@respx.mock
+async def test_notify_duplicate_batch_returns_body() -> None:
+    respx.post(NOTIFY_PATH).mock(
+        return_value=httpx.Response(200, json={"status": "DUPLICATE_BATCH", "processingId": "P1"})
+    )
+    resp = await _import_client().notify_batch_uploaded(payload=_payload())
+    assert resp["status"] == "DUPLICATE_BATCH"
+
+
+@respx.mock
+async def test_notify_400_checksum_mismatch_returns_body_not_raise() -> None:
+    """400 校验类错误返回 body（status 载明），不抛——调用方据此修复重传。"""
+    respx.post(NOTIFY_PATH).mock(
+        return_value=httpx.Response(400, json={"status": "CHECKSUM_MISMATCH", "message": "bad"})
+    )
+    resp = await _import_client().notify_batch_uploaded(payload=_payload())
+    assert resp["status"] == "CHECKSUM_MISMATCH"
+
+
+@respx.mock
+async def test_notify_401_apikey_rejected_raises() -> None:
+    respx.post(NOTIFY_PATH).mock(return_value=httpx.Response(401, json={"status": "UNAUTHORIZED"}))
+    with pytest.raises(WedapError) as exc:
+        await _import_client().notify_batch_uploaded(payload=_payload())
+    assert exc.value.code == "401"
+
+
+@respx.mock
+async def test_notify_5xx_raises() -> None:
+    respx.post(NOTIFY_PATH).mock(return_value=httpx.Response(503, text="unavailable"))
+    with pytest.raises(httpx.HTTPStatusError):
+        await _import_client().notify_batch_uploaded(payload=_payload())
+
+
+@respx.mock
+async def test_notify_sends_apikey_header() -> None:
+    route = respx.post(NOTIFY_PATH).mock(
+        return_value=httpx.Response(200, json={"status": "ACCEPTED"})
+    )
+    await _import_client().notify_batch_uploaded(payload=_payload())
+    assert route.calls.last.request.headers["apikey"] == "KEY123"

@@ -11,6 +11,15 @@ class Settings(BaseSettings):
     wedap_timeout_seconds: float = 10.0
     bank_timezone: str = "Asia/Hong_Kong"
     s3_endpoint_url: str | None = None
+    # wedap flow-import 投递（§4.3）：staging（recon 写/gateway 读）+ 导入 bucket（待 wedap 凭证）。
+    wedap_staging_bucket: str = "lending-wedap-staging"
+    wedap_import_bucket: str = "wedap-flow-import"
+    wedap_import_api_key: str = ""  # wedap flow-import notify apikey（FLOW_IMPORT_API_KEYS 之一）
+    wedap_delivery_interval_seconds: float = 5.0
+    wedap_delivery_max_attempts: int = 5
+    wedap_delivery_enabled: bool = False  # wedap 投递 worker 开关（默认关，e2e/部署显式开）
+    # gateway→recon 投递回执回写地址（§4.3）。
+    recon_base_url: str = "http://lending-recon:8040"
     callback_target_lifecycle_url: str = (
         "http://lending-lifecycel:9000/api/v1/bank/transaction-callback"
     )

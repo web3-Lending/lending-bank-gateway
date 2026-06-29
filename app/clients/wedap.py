@@ -15,9 +15,16 @@ class WedapClient:
     幂等靠上层 RESULT_UNKNOWN 收敛。
     """
 
-    def __init__(self, *, base_url: str, timeout_seconds: float) -> None:
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        timeout_seconds: float,
+        import_api_key: str | None = None,
+    ) -> None:
         self._base = base_url.rstrip("/")
         self._timeout = timeout_seconds
+        self._import_api_key = import_api_key
 
     def _headers(self, tenant_id: str, request_id: str) -> dict[str, str]:
         return {
@@ -213,3 +220,33 @@ class WedapClient:
             request_id=request_id,
             params=params,
         )
+
+    async def notify_batch_uploaded(self, *, payload: dict[str, Any]) -> dict[str, Any]:
+        """通知 wedap 批次文件已上传 S3（flow-import，spec §5）。
+
+        与南向资金接口不同契约：``apikey`` 头鉴权、响应非 ``{code,data}`` envelope，
+        而是 ``{status, processingId, resultFilePath, message}``。
+        payload 必填 dataType/channelId/importBatchNo/importDate/fileChecksum/fileSize，
+        可选 payloadSchemaVersion/totalCount/replacesBatchNo。
+
+        HTTP 状态处理：
+          - 200/400 → 返回响应体（``status`` 字段载明 ACCEPTED/DUPLICATE_BATCH/
+            CHECKSUM_MISMATCH/INVALID_PARAM 等，调用方据此决定重传/修复，**不抛**）。
+          - 401 → apikey 失败 → raise WedapError("401")。
+          - 5xx → 服务端错误 → raise（可重试）。
+        """
+        headers = {
+            "apikey": self._import_api_key or "",
+            "Content-Type": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            r = await client.post(
+                f"{self._base}/bank/api/v1/import/batch-uploaded",
+                json=payload,
+                headers=headers,
+            )
+        if r.status_code == 401:
+            raise WedapError("401", "import apikey rejected")
+        if r.status_code >= 500:
+            r.raise_for_status()
+        return dict(r.json())

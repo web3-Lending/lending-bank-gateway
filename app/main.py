@@ -19,6 +19,7 @@ from app.api.v1.deposit import router as deposit_router
 from app.api.v1.health import router as health_router
 from app.api.v1.loans import router as loans_router
 from app.api.v1.recon_notify import router as recon_notify_router
+from app.api.v1.wedap_import_enqueue import router as wedap_import_enqueue_router
 from app.clients.s3 import S3FileClient
 from app.clients.wedap import WedapClient
 from app.core.config import Settings, get_settings
@@ -217,6 +218,36 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 name="order-reconcile-worker",
             )
         )
+        if settings.wedap_delivery_enabled:
+            from app.clients.recon_callback import ReconCallbackClient
+            from app.workers import wedap_delivery_dispatcher
+
+            wedap_deliver = wedap_delivery_dispatcher.make_deliver(
+                S3FileClient(endpoint_url=settings.s3_endpoint_url),
+                app.state.wedap,
+                staging_bucket=settings.wedap_staging_bucket,
+                wedap_bucket=settings.wedap_import_bucket,
+            )
+            wedap_on_terminal = wedap_delivery_dispatcher.make_on_terminal(
+                ReconCallbackClient(base_url=settings.recon_base_url)
+            )
+            tasks.append(
+                asyncio.create_task(
+                    supervised(
+                        "wedap-delivery-dispatcher",
+                        lambda: wedap_delivery_dispatcher.run_forever(
+                            worker_factory,
+                            deliver=wedap_deliver,
+                            max_attempts=settings.wedap_delivery_max_attempts,
+                            interval_seconds=settings.wedap_delivery_interval_seconds,
+                            on_terminal=wedap_on_terminal,
+                        ),
+                        restart_delay_seconds=settings.worker_restart_delay_seconds,
+                    ),
+                    name="wedap-delivery-dispatcher",
+                )
+            )
+
         logger.info(
             "worker tasks started (dedicated pool): outbox_interval=%.1fs recon_interval=%.1fs",
             settings.outbox_interval_seconds,
@@ -293,6 +324,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.wedap = WedapClient(
         base_url=settings.wedap_base_url,
         timeout_seconds=settings.wedap_timeout_seconds,
+        import_api_key=settings.wedap_import_api_key,
     )
     # outbox_targets 供 dispatcher worker（T24）读取；key=target 名，value=目标 URL
     app.state.outbox_targets = {
@@ -306,6 +338,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(admin_ops_router)
     app.include_router(recon_notify_router)
     app.include_router(deposit_router)
+    app.include_router(wedap_import_enqueue_router)
     return app
 
 
