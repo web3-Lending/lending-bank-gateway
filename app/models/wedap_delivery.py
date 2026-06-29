@@ -47,5 +47,8 @@ class WedapImportDeliveryTask(Base, TenantMixin, TimestampMixin):
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     next_retry_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
+    # 原子 claim 时刻：dispatch 把 PENDING→SENDING 时置；多副本并发只一个抢到，
+    # 崩溃残留的 SENDING 由 reclaim（locked_at 超时）回 PENDING 重试。
+    locked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     # wedap notify 成功时刻（南向投递完成），非 gateway→recon 回执时刻（回执由 on_terminal 另发）。
     notified_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))

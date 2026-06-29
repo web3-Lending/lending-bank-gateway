@@ -16,7 +16,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -129,6 +129,38 @@ def compute_next_retry(
     return now + dt.timedelta(seconds=delay)
 
 
+async def _reclaim_stale_sending(
+    factory: async_sessionmaker[AsyncSession], *, now: dt.datetime, claim_timeout_seconds: float
+) -> None:
+    """崩溃残留的 SENDING（locked_at 超时）回 PENDING 重试（多副本 claim 防卡死）。"""
+    cutoff = now - dt.timedelta(seconds=claim_timeout_seconds)
+    async with factory() as session:
+        await session.execute(
+            update(WedapImportDeliveryTask)
+            .where(
+                WedapImportDeliveryTask.status == "SENDING",
+                WedapImportDeliveryTask.locked_at < cutoff,
+            )
+            .values(status="PENDING", locked_at=None)
+        )
+        await session.commit()
+
+
+async def _claim(factory: async_sessionmaker[AsyncSession], task_id: int, now: dt.datetime) -> bool:
+    """原子 claim：PENDING→SENDING WHERE status='PENDING'。返回是否抢到（rowcount=1）。"""
+    async with factory() as session:
+        result = await session.execute(
+            update(WedapImportDeliveryTask)
+            .where(
+                WedapImportDeliveryTask.id == task_id,
+                WedapImportDeliveryTask.status == "PENDING",
+            )
+            .values(status="SENDING", locked_at=now)
+        )
+        await session.commit()
+        return bool(result.rowcount == 1)  # type: ignore[attr-defined]  # CursorResult.rowcount
+
+
 async def dispatch_delivery_once(
     factory: async_sessionmaker[AsyncSession],
     *,
@@ -136,16 +168,19 @@ async def dispatch_delivery_once(
     now: dt.datetime,
     max_attempts: int = 5,
     base_seconds: float = 60.0,
+    claim_timeout_seconds: float = 300.0,
     on_terminal: Callable[[WedapImportDeliveryTask, str, str | None], Awaitable[None]]
     | None = None,
 ) -> int:
-    """扫一轮可投递任务并逐条投递，返回处理条数。
+    """扫一轮可投递任务并逐条投递，返回处理条数（=成功 claim 并处理的条数）。
 
-    可投递 = status=PENDING 且 (next_retry_at 为空 或 已到点)。投递动作 deliver 由调用方注入
-    （取 staging 字节 + deliver_batch），本函数只管状态机：成功→DELIVERED；失败→attempts+1，
-    未达上限回 PENDING + 退避，达上限→FAILED。外呼在事务外，更新各自独立短事务（与 outbox 一致）。
-    on_terminal（可选）在任务进终态（DELIVERED/FAILED）且已 commit 后触发，用于回执 recon。
+    并发安全（codex 终审）：先 reclaim 崩溃残留 SENDING；snapshot PENDING 后对每条做原子 claim
+    （PENDING→SENDING），只有抢到的副本继续 deliver，避免多副本重复南向投递。投递动作 deliver
+    由调用方注入；状态机：成功→DELIVERED；失败→attempts+1，未达上限回 PENDING+退避，达上限→FAILED；
+    终态/重排均清 locked_at。外呼在事务外，更新各自独立短事务。on_terminal 终态 commit 后触发回执。
     """
+    await _reclaim_stale_sending(factory, now=now, claim_timeout_seconds=claim_timeout_seconds)
+
     async with factory() as snap_session:
         tasks = list(
             (
@@ -165,6 +200,10 @@ async def dispatch_delivery_once(
 
     processed = 0
     for task in tasks:
+        # 原子 claim：抢不到（别的副本先抢）→ 跳过，绝不重复投递。
+        if not await _claim(factory, task.id, now):
+            continue
+
         error: str | None = None
         try:
             await deliver(task)
@@ -183,6 +222,7 @@ async def dispatch_delivery_once(
             if row is None:  # pragma: no cover - 并发删除，正常不发生
                 continue
             row.attempts += 1
+            row.locked_at = None  # 退出 SENDING，释放 claim
             if error is None:
                 row.status = "DELIVERED"
                 row.notified_at = (

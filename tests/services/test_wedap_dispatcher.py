@@ -1,11 +1,18 @@
 import datetime as dt
+from unittest.mock import AsyncMock
 
 import pytest
 
 from app.core.db import build_engine, build_session_factory
 from app.models.base import Base
 from app.models.wedap_delivery import WedapImportDeliveryTask
-from app.services.wedap_delivery import dispatch_delivery_once, enqueue_delivery
+from app.services import wedap_delivery as _mod
+from app.services.wedap_delivery import (
+    _claim,
+    _reclaim_stale_sending,
+    dispatch_delivery_once,
+    enqueue_delivery,
+)
 
 NOW = dt.datetime(2026, 6, 24, 0, 0, tzinfo=dt.UTC)
 
@@ -185,3 +192,68 @@ async def test_dispatch_no_on_terminal_on_transient_retry(factory):
         factory, deliver=deliver, now=NOW, max_attempts=5, on_terminal=on_terminal
     )
     assert seen == []
+
+
+async def _insert(factory, *, status, locked_at=None, import_batch_no="BATCH-LEN-20260624-902"):
+    async with factory() as s:
+        s.add(
+            WedapImportDeliveryTask(
+                tenant_id="WBTHK01",
+                request_id=f"wedap-import-{import_batch_no}",
+                import_batch_no=import_batch_no,
+                data_type="interest-accrual",
+                import_date="20260624",
+                staging_key="k",
+                file_checksum="a" * 64,
+                file_size=1,
+                total_count=1,
+                status=status,
+                locked_at=locked_at,
+            )
+        )
+        await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_claim_atomic_second_claim_loses(factory):
+    """原子 claim：第一次 PENDING→SENDING 成功，第二次(已 SENDING)失败。"""
+    await _insert(factory, status="PENDING")
+    task = await _get_task(factory, "BATCH-LEN-20260624-902")
+    assert await _claim(factory, task.id, NOW) is True
+    assert (await _get_task(factory, "BATCH-LEN-20260624-902")).status == "SENDING"
+    assert await _claim(factory, task.id, NOW) is False  # 已被抢
+
+
+@pytest.mark.asyncio
+async def test_dispatch_skips_when_claim_lost(factory, monkeypatch):
+    """claim 抢不到(别的副本先抢)→ 跳过,不投递。"""
+    await _seed(factory)
+    monkeypatch.setattr(_mod, "_claim", AsyncMock(return_value=False))
+    called = []
+
+    async def deliver(task):
+        called.append(task.import_batch_no)
+
+    n = await dispatch_delivery_once(factory, deliver=deliver, now=NOW)
+    assert n == 0
+    assert called == []  # 没抢到不投递
+
+
+@pytest.mark.asyncio
+async def test_reclaim_stale_sending_back_to_pending(factory):
+    """崩溃残留 SENDING(locked_at 超时)→ reclaim 回 PENDING。"""
+    stale = NOW - dt.timedelta(seconds=3600)
+    await _insert(factory, status="SENDING", locked_at=stale)
+    await _reclaim_stale_sending(factory, now=NOW, claim_timeout_seconds=300)
+    row = await _get_task(factory, "BATCH-LEN-20260624-902")
+    assert row.status == "PENDING"
+    assert row.locked_at is None
+
+
+@pytest.mark.asyncio
+async def test_reclaim_keeps_fresh_sending(factory):
+    """新鲜 SENDING(未超时)→ 不 reclaim。"""
+    fresh = NOW - dt.timedelta(seconds=10)
+    await _insert(factory, status="SENDING", locked_at=fresh)
+    await _reclaim_stale_sending(factory, now=NOW, claim_timeout_seconds=300)
+    assert (await _get_task(factory, "BATCH-LEN-20260624-902")).status == "SENDING"
