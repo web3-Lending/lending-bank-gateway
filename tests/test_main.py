@@ -276,3 +276,33 @@ class TestWorkerLogging:
         create_app()
         create_app()
         assert len(self._stdout_handlers()) == 1
+
+
+def test_lifespan_wedap_delivery_worker_started(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GW_WEDAP_DELIVERY_ENABLED=true → lifespan 额外起 wedap-delivery-dispatcher worker。"""
+    get_settings.cache_clear()
+    monkeypatch.setenv("GW_WORKERS_ENABLED", "true")
+    monkeypatch.setenv("GW_WEDAP_DELIVERY_ENABLED", "true")
+
+    started = {"outbox": False, "recon": False, "order": False, "wedap": False}
+
+    def _stub(key: str):
+        async def _fake(*_a: object, **_k: object) -> None:
+            started[key] = True
+            await asyncio.sleep(9999)
+
+        return _fake
+
+    with (
+        patch("app.workers.outbox_dispatcher.run_forever", side_effect=_stub("outbox")),
+        patch("app.workers.recon_worker.run_forever", side_effect=_stub("recon")),
+        patch("app.workers.order_reconcile_worker.run_forever", side_effect=_stub("order")),
+        patch(
+            "app.workers.wedap_delivery_dispatcher.run_forever", side_effect=_stub("wedap")
+        ),
+    ):
+        with TestClient(create_app()):
+            pass
+
+    assert started["wedap"]  # wedap 投递 worker 已起
+    get_settings.cache_clear()
