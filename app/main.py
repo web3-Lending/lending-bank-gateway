@@ -232,7 +232,8 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 ReconCallbackClient(
                     base_url=settings.recon_base_url,
                     hmac_secret=settings.recon_callback_hmac_secret or None,
-                )
+                ),
+                worker_factory,
             )
             tasks.append(
                 asyncio.create_task(

@@ -282,3 +282,46 @@ async def deliver_task(
         file_size=task.file_size,
         total_count=task.total_count,
     )
+
+
+async def mark_callback_sent(
+    factory: async_sessionmaker[AsyncSession], task_id: int, now: dt.datetime
+) -> None:
+    """原子标记 gateway→recon 回执已送达（callback_sent_at），消除 recon 卡 ENQUEUED。"""
+    async with factory() as session:
+        await session.execute(
+            update(WedapImportDeliveryTask)
+            .where(WedapImportDeliveryTask.id == task_id)
+            .values(callback_sent_at=now)
+        )
+        await session.commit()
+
+
+async def resend_pending_callbacks_once(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    send: Callable[[WedapImportDeliveryTask, str, str | None], Awaitable[None]],
+    limit: int = 100,
+) -> int:
+    """重发未送达回执（终态 DELIVERED/FAILED 且 callback_sent_at 为空）→ durable 兜底。返回处理数。
+
+    send 由调用方注入（post_result 成功后 mark_callback_sent）；本函数只负责扫待重发集。
+    """
+    async with factory() as snap:
+        tasks = list(
+            (
+                await snap.execute(
+                    select(WedapImportDeliveryTask)
+                    .where(
+                        WedapImportDeliveryTask.status.in_(("DELIVERED", "FAILED")),
+                        WedapImportDeliveryTask.callback_sent_at.is_(None),
+                    )
+                    .limit(limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    for task in tasks:
+        await send(task, task.status, task.last_error)
+    return len(tasks)

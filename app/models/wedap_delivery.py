@@ -52,3 +52,6 @@ class WedapImportDeliveryTask(Base, TenantMixin, TimestampMixin):
     locked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     # wedap notify 成功时刻（南向投递完成），非 gateway→recon 回执时刻（回执由 on_terminal 另发）。
     notified_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    # gateway→recon 回执送达时刻（FU-WEDAP-CALLBACK-DURABLE）：终态 + 此列为空 = 回执未送达，
+    # resend_pending_callbacks_once 重发兜底，消除 recon 永久卡 ENQUEUED。
+    callback_sent_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
