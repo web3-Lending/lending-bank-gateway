@@ -16,18 +16,24 @@ from app.clients.recon_callback import ReconCallbackClient
 from app.clients.s3 import S3FileClient
 from app.clients.wedap import WedapClient
 from app.models.wedap_delivery import WedapImportDeliveryTask
-from app.services.wedap_delivery import deliver_task, dispatch_delivery_once
+from app.services.wedap_delivery import (
+    deliver_task,
+    dispatch_delivery_once,
+    mark_callback_sent,
+    resend_pending_callbacks_once,
+)
 
 logger = logging.getLogger(__name__)
 
 
 def make_on_terminal(
     recon_client: ReconCallbackClient,
+    factory: async_sessionmaker[AsyncSession],
 ) -> Callable[[WedapImportDeliveryTask, str, str | None], Awaitable[None]]:
-    """绑定 recon 回执客户端 → dispatch on_terminal 闭包。
+    """绑定 recon 回执客户端 → dispatch on_terminal 闭包（FU-WEDAP-CALLBACK-DURABLE）。
 
-    best-effort：回执失败只告警不抛（不回滚本地终态）；recon 侧 stuck-ENQUEUED 可观测兜底，
-    durable 重试（CallbackOutbox）后续硬化。
+    回执成功 → mark_callback_sent 标记送达；失败 → 告警不抛、callback_sent_at 留空，由
+    resend_pending_callbacks_once 重发兜底，消除 recon 永久卡 ENQUEUED。
     """
 
     async def _on_terminal(task: WedapImportDeliveryTask, status: str, error: str | None) -> None:
@@ -38,13 +44,15 @@ def make_on_terminal(
                 status=status,
                 error=error,
             )
-        except Exception as exc:  # noqa: BLE001 - 回执 best-effort，失败告警不阻断
+        except Exception as exc:  # noqa: BLE001 - 回执失败不抛，留 callback_sent_at 空待重发
             logger.warning(
-                "wedap_delivery: 回执 recon 失败 batch=%s status=%s err=%s",
+                "wedap_delivery: 回执 recon 失败 batch=%s status=%s err=%s（待重发）",
                 task.import_batch_no,
                 status,
                 exc,
             )
+            return
+        await mark_callback_sent(factory, task.id, dt.datetime.now(dt.UTC))
 
     return _on_terminal
 
@@ -88,4 +96,9 @@ async def run_forever(  # pragma: no cover
             max_attempts=max_attempts,
             on_terminal=on_terminal,
         )
+        # durable 回执：重发终态但未送达的回执（FU-WEDAP-CALLBACK-DURABLE）
+        if on_terminal is not None:
+            await resend_pending_callbacks_once(
+                factory, send=on_terminal, now=dt.datetime.now(dt.UTC)
+            )
         await asyncio.sleep(interval_seconds)

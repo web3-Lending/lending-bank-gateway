@@ -282,3 +282,88 @@ async def deliver_task(
         file_size=task.file_size,
         total_count=task.total_count,
     )
+
+
+async def mark_callback_sent(
+    factory: async_sessionmaker[AsyncSession], task_id: int, now: dt.datetime
+) -> None:
+    """原子标记 gateway→recon 回执已送达（callback_sent_at），消除 recon 卡 ENQUEUED；同时清锁。"""
+    async with factory() as session:
+        await session.execute(
+            update(WedapImportDeliveryTask)
+            .where(WedapImportDeliveryTask.id == task_id)
+            .values(callback_sent_at=now, callback_locked_at=None)
+        )
+        await session.commit()
+
+
+async def _claim_callback(
+    factory: async_sessionmaker[AsyncSession],
+    task_id: int,
+    now: dt.datetime,
+    *,
+    lock_timeout_seconds: float,
+) -> bool:
+    """原子 claim 一条未送达回执供重发（codex 复评 P1）：set callback_locked_at=now WHERE
+    callback_sent_at 为空 且(锁空或超时)。多实例并发只一个 rowcount=1 抢到。返回是否抢到。"""
+    cutoff = now - dt.timedelta(seconds=lock_timeout_seconds)
+    async with factory() as session:
+        result = await session.execute(
+            update(WedapImportDeliveryTask)
+            .where(
+                WedapImportDeliveryTask.id == task_id,
+                WedapImportDeliveryTask.callback_sent_at.is_(None),
+                or_(
+                    WedapImportDeliveryTask.callback_locked_at.is_(None),
+                    WedapImportDeliveryTask.callback_locked_at < cutoff,
+                ),
+            )
+            .values(callback_locked_at=now)
+        )
+        await session.commit()
+        return bool(result.rowcount == 1)  # type: ignore[attr-defined]  # CursorResult.rowcount
+
+
+async def resend_pending_callbacks_once(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    send: Callable[[WedapImportDeliveryTask, str, str | None], Awaitable[None]],
+    now: dt.datetime,
+    limit: int = 100,
+    lock_timeout_seconds: float = 300.0,
+) -> int:
+    """重发未送达回执（终态 DELIVERED/FAILED 且 callback_sent_at 为空）→ durable 兜底。返回重发数。
+
+    并发安全（codex 复评 P1）：每条先原子 claim（callback_locked_at）抢到才重发，多实例只一个
+    命中；send 成功 mark_callback_sent（callback_sent_at 置位、排除后续扫描），失败留锁，残留锁
+    超时（lock_timeout_seconds）由下轮 claim 重新抢占。send 由调用方注入（best-effort）。
+    """
+    async with factory() as snap:
+        tasks = list(
+            (
+                await snap.execute(
+                    select(WedapImportDeliveryTask)
+                    .where(
+                        WedapImportDeliveryTask.status.in_(("DELIVERED", "FAILED")),
+                        WedapImportDeliveryTask.callback_sent_at.is_(None),
+                        or_(
+                            WedapImportDeliveryTask.callback_locked_at.is_(None),
+                            WedapImportDeliveryTask.callback_locked_at
+                            < now - dt.timedelta(seconds=lock_timeout_seconds),
+                        ),
+                    )
+                    .limit(limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    resent = 0
+    for task in tasks:
+        if not await _claim_callback(
+            factory, task.id, now, lock_timeout_seconds=lock_timeout_seconds
+        ):
+            continue
+        await send(task, task.status, task.last_error)
+        resent += 1
+    return resent
