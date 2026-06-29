@@ -4,6 +4,7 @@ import hashlib
 import pathlib
 
 import boto3  # type: ignore[import-untyped]
+from botocore.config import Config  # type: ignore[import-untyped]
 
 
 class Md5Mismatch(Exception):
@@ -11,10 +12,29 @@ class Md5Mismatch(Exception):
 
 
 class S3FileClient:
-    """同步 S3 下载封装——调用方在 asyncio.to_thread 中执行（worker 上下文）。"""
+    """同步 S3 下载封装——调用方在 asyncio.to_thread 中执行（worker 上下文）。
 
-    def __init__(self, *, endpoint_url: str | None) -> None:
-        self._s3 = boto3.client("s3", endpoint_url=endpoint_url)
+    显式 connect/read 超时 + 重试上限（FU-WEDAP-S3-TIMEOUT）：远端 S3 卡死时不再
+    无限占用 worker 线程拖住 dispatcher 轮转。
+    """
+
+    def __init__(
+        self,
+        *,
+        endpoint_url: str | None,
+        connect_timeout: float = 5.0,
+        read_timeout: float = 10.0,
+        max_attempts: int = 3,
+    ) -> None:
+        self._s3 = boto3.client(
+            "s3",
+            endpoint_url=endpoint_url,
+            config=Config(
+                connect_timeout=connect_timeout,
+                read_timeout=read_timeout,
+                retries={"max_attempts": max_attempts, "mode": "standard"},
+            ),
+        )
 
     def download_verified(self, *, bucket: str, key: str, expected_md5: str, dest: str) -> None:
         """下载 → md5 校验 → 校验通过才落地存档；不符抛 Md5Mismatch 不写文件。

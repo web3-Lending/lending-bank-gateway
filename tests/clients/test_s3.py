@@ -69,3 +69,13 @@ def test_upload_returns_sha256() -> None:  # type: ignore[no-untyped-def]
     stub.add_response("put_object", {}, {"Bucket": "b", "Key": "k", "Body": b"x"})
     stub.activate()
     assert c.upload(bucket="b", key="k", content=b"x") == _h.sha256(b"x").hexdigest()
+
+
+def test_client_has_explicit_timeouts_and_retries() -> None:  # type: ignore[no-untyped-def]
+    c = S3FileClient(endpoint_url=None, connect_timeout=3.0, read_timeout=7.0, max_attempts=4)
+    cfg = c._s3.meta.config
+    assert cfg.connect_timeout == 3.0
+    assert cfg.read_timeout == 7.0
+    # botocore standard 模式把 max_attempts=4 规范成 total_max_attempts=5（+1 初次）
+    assert cfg.retries["total_max_attempts"] == 5
+    assert cfg.retries["mode"] == "standard"
