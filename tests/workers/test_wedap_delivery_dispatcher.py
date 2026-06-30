@@ -422,3 +422,34 @@ async def test_make_collect_post_skips_non_int_line_no(bad_line_no):
     recon.post_line_results.assert_awaited_once()
     lr = recon.post_line_results.await_args.kwargs["line_results"]
     assert len(lr) == 1 and lr[0]["line_no"] == 7  # 非 int lineNo 行被剔除
+
+
+@pytest.mark.asyncio
+async def test_make_collect_post_sanitizes_bad_field_types():
+    """error_code/message/dedup_key 坏类型/超长被规范化, 不让 recon 422（codex 四轮 HIGH）。"""
+    from app.services.wedap_import_result import BadLine, ImportResult
+
+    recon = AsyncMock()
+    recon.post_line_results = AsyncMock()
+    _, post = make_collect(MagicMock(), recon, wedap_bucket="wedap")
+    bad = BadLine(
+        line_no=2,
+        line_status="DUPLICATE",
+        error_message=[],  # type: ignore[arg-type]  非 str
+        error_code="X" * 100,  # 超 recon max_length=64
+        dedup_key="not-a-dict",  # type: ignore[arg-type]  非 dict
+    )
+    result = ImportResult(
+        import_status="PARTIAL",
+        ingested_count=0,
+        duplicate_count=1,
+        line_error_count=0,
+        bad_lines=[bad],
+    )
+
+    await post(_task(), result)
+
+    lr = recon.post_line_results.await_args.kwargs["line_results"][0]
+    assert lr["error_code"] == "X" * 64  # 截到 64
+    assert lr["error_message"] is None  # 非 str→null
+    assert lr["dedup_key"] is None  # 非 dict→null

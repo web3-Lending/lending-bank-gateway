@@ -135,6 +135,9 @@ def make_collect(
             )
         if not recordable:  # 全 INGESTED 或全不可消化 → 无可逐行记
             return
+        # 规范化 recon LineResultItem 全字段：parse_result 原样取 wedap 值、类型注解不生效，坏
+        # 类型/超长会让整批 recon 422 永久重试。error_code 非 str→null·截 recon max_length=64，
+        # error_message 非 str→null，dedup_key 非 dict→null（codex 四轮 HIGH，堵死字段级毒丸）。
         await recon_client.post_line_results(
             tenant_id=task.tenant_id,
             import_batch_no=task.import_batch_no,
@@ -143,9 +146,9 @@ def make_collect(
                 {
                     "line_no": b.line_no,
                     "line_status": b.line_status,
-                    "error_code": b.error_code,
-                    "error_message": b.error_message,
-                    "dedup_key": b.dedup_key,
+                    "error_code": b.error_code[:64] if isinstance(b.error_code, str) else None,
+                    "error_message": b.error_message if isinstance(b.error_message, str) else None,
+                    "dedup_key": b.dedup_key if isinstance(b.dedup_key, dict) else None,
                 }
                 for b in recordable
             ],
