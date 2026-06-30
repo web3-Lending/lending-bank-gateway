@@ -63,6 +63,39 @@ def test_parse_partial_collects_only_non_ingested():
     assert result.bad_lines[1].error_message == "bad json"
 
 
+def test_parse_reads_error_code_and_dedup_key():
+    """errorCode(8 值枚举)+ 结构化 dedupKey 须解析进 BadLine（DLQ 分类/回映用）。"""
+    raw = json.dumps(
+        {
+            "importStatus": "PARTIAL",
+            "ingestedCount": 1,
+            "duplicateCount": 1,
+            "lineErrorCount": 1,
+            "lineResults": [
+                {"lineNo": 2, "lineStatus": "INGESTED"},
+                {
+                    "lineNo": 3,
+                    "lineStatus": "DUPLICATE",
+                    "dedupKey": {"loanId": "LOAN-1", "asOfDate": "20260630"},
+                },
+                {
+                    "lineNo": 4,
+                    "lineStatus": "LINE_PARSE_ERROR",
+                    "errorCode": "REQUIRED_FIELD_MISSING",
+                    "errorMessage": "missing principal",
+                },
+            ],
+        }
+    ).encode()
+    result = parse_result(raw)
+    dup, err = result.bad_lines
+    assert dup.line_status == "DUPLICATE"
+    assert dup.dedup_key == {"loanId": "LOAN-1", "asOfDate": "20260630"}
+    assert err.line_status == "LINE_PARSE_ERROR"
+    assert err.error_code == "REQUIRED_FIELD_MISSING"
+    assert err.dedup_key is None  # 失败行 dedupKey 为 null，回映靠 lineNo+manifest
+
+
 def test_parse_failed_status():
     raw = json.dumps({"importStatus": "FAILED", "ingestedCount": 0, "lineErrorCount": 5}).encode()
     result = parse_result(raw)

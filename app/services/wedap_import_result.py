@@ -28,6 +28,10 @@ class BadLine:
     line_no: int | None
     line_status: str
     error_message: str | None
+    # wedap LineResult.errorCode（8 值枚举）；DLQ 按它分类，成功/DUPLICATE 行 null。
+    error_code: str | None = None
+    # 结构化去重键；LINE_PARSE_ERROR 行 null（失败行回映靠 lineNo+manifest）。
+    dedup_key: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -64,6 +68,8 @@ def parse_result(raw: bytes) -> ImportResult:
             line_no=item.get("lineNo"),
             line_status=str(item.get("lineStatus")),
             error_message=item.get("errorMessage"),
+            error_code=item.get("errorCode"),
+            dedup_key=item.get("dedupKey"),
         )
         for item in (body.get("lineResults") or [])
         if str(item.get("lineStatus")) != "INGESTED"
