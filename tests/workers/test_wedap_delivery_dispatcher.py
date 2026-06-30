@@ -290,3 +290,76 @@ async def test_make_collect_post_skips_when_all_ingested():
     await post(_task(), result)
 
     recon.post_line_results.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_make_collect_fetch_notfound_returns_none():
+    """部分 S3 兼容实现返回 NotFound 而非 NoSuchKey → 也当未就绪 None（codex P1 LOW-1）。"""
+    from botocore.exceptions import ClientError
+
+    s3 = MagicMock()
+    s3.get_bytes = MagicMock(side_effect=ClientError({"Error": {"Code": "NotFound"}}, "GetObject"))
+    fetch, _ = make_collect(s3, AsyncMock(), wedap_bucket="wedap")
+
+    assert await fetch(_task()) is None
+
+
+@pytest.mark.asyncio
+async def test_make_collect_post_skips_null_line_no():
+    """null lineNo 行跳过不回传，避免 recon line_no:int 422 死循环（codex P1 HIGH-3）。"""
+    from app.services.wedap_import_result import BadLine, ImportResult
+
+    recon = AsyncMock()
+    recon.post_line_results = AsyncMock()
+    _, post = make_collect(MagicMock(), recon, wedap_bucket="wedap")
+    result = ImportResult(
+        import_status="PARTIAL",
+        ingested_count=0,
+        duplicate_count=1,
+        line_error_count=1,
+        bad_lines=[
+            BadLine(
+                line_no=None,
+                line_status="LINE_PARSE_ERROR",
+                error_message="broken",
+                error_code="INVALID_JSON",
+            ),
+            BadLine(
+                line_no=5, line_status="DUPLICATE", error_message=None, dedup_key={"txnId": "T1"}
+            ),
+        ],
+    )
+
+    await post(_task(), result)
+
+    recon.post_line_results.assert_awaited_once()
+    lr = recon.post_line_results.await_args.kwargs["line_results"]
+    assert len(lr) == 1 and lr[0]["line_no"] == 5  # null lineNo 行被剔除
+
+
+@pytest.mark.asyncio
+async def test_make_collect_post_all_null_line_no_skips_send():
+    """全为 null lineNo → 无可逐行记，不发 recon（codex P1 HIGH-3）。"""
+    from app.services.wedap_import_result import BadLine, ImportResult
+
+    recon = AsyncMock()
+    recon.post_line_results = AsyncMock()
+    _, post = make_collect(MagicMock(), recon, wedap_bucket="wedap")
+    result = ImportResult(
+        import_status="FAILED",
+        ingested_count=0,
+        duplicate_count=0,
+        line_error_count=1,
+        bad_lines=[
+            BadLine(
+                line_no=None,
+                line_status="LINE_PARSE_ERROR",
+                error_message="x",
+                error_code="INVALID_JSON",
+            ),
+        ],
+    )
+
+    await post(_task(), result)
+
+    recon.post_line_results.assert_not_awaited()

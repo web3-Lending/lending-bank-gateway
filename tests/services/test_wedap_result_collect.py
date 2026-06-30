@@ -157,3 +157,35 @@ async def test_collect_fetch_error_releases_lock_no_crash(factory):
     row = await _get(factory)
     assert row.result_collected_at is None
     assert row.result_locked_at is None  # 锁释放，待下轮重试
+
+
+@pytest.mark.asyncio
+async def test_mark_result_collected_ownership_guard(factory):
+    """锁被别的实例重抢(result_locked_at != 本轮 claimed_at) → mark no-op 返 False，不冒名置位。"""
+    from app.services.wedap_delivery import mark_result_collected
+
+    other = dt.datetime(2026, 6, 30, 15, 0, tzinfo=dt.UTC)
+    await _insert(factory, result_locked_at=other)
+    row = await _get(factory)
+
+    marked = await mark_result_collected(factory, row.id, _NOW)  # _NOW != other
+
+    assert marked is False
+    row2 = await _get(factory)
+    assert row2.result_collected_at is None  # 没被冒名置位
+    assert row2.result_locked_at is not None  # 别人的锁没被清
+
+
+@pytest.mark.asyncio
+async def test_release_result_lock_ownership_guard(factory):
+    """release 只清自己的锁；锁已被别的实例重抢时 no-op，不清掉新 owner。"""
+    from app.services.wedap_delivery import _release_result_lock
+
+    other = dt.datetime(2026, 6, 30, 15, 0, tzinfo=dt.UTC)
+    await _insert(factory, result_locked_at=other)
+    row = await _get(factory)
+
+    await _release_result_lock(factory, row.id, _NOW)  # _NOW != other
+
+    row2 = await _get(factory)
+    assert row2.result_locked_at is not None  # 别人的锁没被清掉

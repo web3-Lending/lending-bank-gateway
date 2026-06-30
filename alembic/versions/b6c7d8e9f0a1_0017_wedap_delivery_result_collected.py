@@ -32,8 +32,15 @@ def upgrade() -> None:
         "wedap_import_delivery_task",
         sa.Column("result_locked_at", sa.DateTime(timezone=True), nullable=True),
     )
+    # collect_results_once 扫描路径 (status=DELIVERED, result_collected_at IS NULL)（codex P1 MEDIUM-2）
+    op.create_index(
+        "ix_wedap_delivery_result_scan",
+        "wedap_import_delivery_task",
+        ["status", "result_collected_at"],
+    )
 
 
 def downgrade() -> None:
+    op.drop_index("ix_wedap_delivery_result_scan", table_name="wedap_import_delivery_task")
     op.drop_column("wedap_import_delivery_task", "result_locked_at")
     op.drop_column("wedap_import_delivery_task", "result_collected_at")

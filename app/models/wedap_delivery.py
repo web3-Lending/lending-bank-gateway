@@ -31,6 +31,8 @@ class WedapImportDeliveryTask(Base, TenantMixin, TimestampMixin):
         UniqueConstraint("tenant_id", "request_id", name="uq_wedap_delivery_request"),
         # dispatcher 按 (status, next_retry_at) 扫待投递任务。
         Index("ix_wedap_delivery_status_retry", "status", "next_retry_at"),
+        # collect_results_once 扫 (DELIVERED, result_collected_at IS NULL)（codex P1 MEDIUM-2）。
+        Index("ix_wedap_delivery_result_scan", "status", "result_collected_at"),
     )
 
     id: Mapped[int] = mapped_column(_BIG_PK, primary_key=True, autoincrement=True)

@@ -93,7 +93,7 @@ def make_collect(
 ) -> tuple[_ResultFetch, _ResultPost]:
     """绑定 S3(拉 _result.json) + recon(转投 line-results) → collect_results_once 的 fetch/post。
 
-    fetch: 按 result_key 拉 wedap 写回的 _result.json；NoSuchKey/404 = 未就绪 → None。
+    fetch: 按 result_key 拉 wedap 写回的 _result.json；NoSuchKey/NotFound/404 = 未就绪 → None。
     post: 逐条异常行（DUPLICATE/LINE_PARSE_ERROR）转投 recon；全 INGESTED 则跳过不发。
     """
 
@@ -107,12 +107,23 @@ def make_collect(
             return await asyncio.to_thread(s3_client.get_bytes, bucket=wedap_bucket, key=key)
         except ClientError as exc:
             code = str(exc.response.get("Error", {}).get("Code"))
-            if code in ("NoSuchKey", "404"):
+            # 对象不存在=未就绪（不同 S3 兼容实现返回码不一）；其余(NoSuchBucket/AccessDenied)为真错
+            if code in ("NoSuchKey", "NotFound", "404"):
                 return None  # _result.json 未就绪（wedap 仍在处理）
             raise
 
     async def _post(task: WedapImportDeliveryTask, result: ImportResult) -> None:
-        if not result.bad_lines:  # 全 INGESTED → 无异常行可记
+        # null lineNo 的行（结构性损坏）Phase 1 无 manifest 无法逐行回映 → 跳过 + 告警（避免
+        # 下沉 recon line_no:int 422 死循环；批/文件级错误表留 Phase 2，codex P1 HIGH-3）。
+        recordable = [b for b in result.bad_lines if b.line_no is not None]
+        skipped = len(result.bad_lines) - len(recordable)
+        if skipped:
+            logger.warning(
+                "wedap_delivery: batch=%s 有 %d 条 lineNo=null 异常行跳过回传（Phase 2 批级回映）",
+                task.import_batch_no,
+                skipped,
+            )
+        if not recordable:  # 全 INGESTED 或全为 null lineNo → 无可逐行记
             return
         await recon_client.post_line_results(
             tenant_id=task.tenant_id,
@@ -126,7 +137,7 @@ def make_collect(
                     "error_message": b.error_message,
                     "dedup_key": b.dedup_key,
                 }
-                for b in result.bad_lines
+                for b in recordable
             ],
         )
 

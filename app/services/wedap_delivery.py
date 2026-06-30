@@ -397,28 +397,47 @@ async def _claim_result(
         return bool(result.rowcount == 1)  # type: ignore[attr-defined]  # CursorResult.rowcount
 
 
-async def _release_result_lock(factory: async_sessionmaker[AsyncSession], task_id: int) -> None:
-    """result 未就绪(404)时立即释放 claim 锁，让下轮尽快重试（不等锁超时）。"""
+async def _release_result_lock(
+    factory: async_sessionmaker[AsyncSession], task_id: int, claimed_at: dt.datetime
+) -> None:
+    """释放本轮 claim 的锁（result 未就绪/失败时立即放，不等超时）。
+
+    ownership guard：仅当 result_locked_at == 本轮 claim 时间戳且未置位才清，锁已被别的
+    实例重抢（超时后）时 no-op，绝不清掉新 owner 的锁（codex P1 HIGH-1）。
+    """
     async with factory() as session:
         await session.execute(
             update(WedapImportDeliveryTask)
-            .where(WedapImportDeliveryTask.id == task_id)
+            .where(
+                WedapImportDeliveryTask.id == task_id,
+                WedapImportDeliveryTask.result_locked_at == claimed_at,
+                WedapImportDeliveryTask.result_collected_at.is_(None),
+            )
             .values(result_locked_at=None)
         )
         await session.commit()
 
 
 async def mark_result_collected(
-    factory: async_sessionmaker[AsyncSession], task_id: int, now: dt.datetime
-) -> None:
-    """原子标记 _result.json 已回收并转投 recon（result_collected_at），停止轮询；清锁。"""
+    factory: async_sessionmaker[AsyncSession], task_id: int, claimed_at: dt.datetime
+) -> bool:
+    """标记 _result.json 已回收并转投 recon（result_collected_at=claimed_at），停轮询清锁。
+
+    ownership guard：仅当 result_locked_at == 本轮 claim 时间戳且未置位才置；锁已被别的实例
+    重抢时 no-op 返回 False，不覆盖新 owner（codex P1 HIGH-1）。返回是否本轮真正置位。
+    """
     async with factory() as session:
-        await session.execute(
+        result = await session.execute(
             update(WedapImportDeliveryTask)
-            .where(WedapImportDeliveryTask.id == task_id)
-            .values(result_collected_at=now, result_locked_at=None)
+            .where(
+                WedapImportDeliveryTask.id == task_id,
+                WedapImportDeliveryTask.result_locked_at == claimed_at,
+                WedapImportDeliveryTask.result_collected_at.is_(None),
+            )
+            .values(result_collected_at=claimed_at, result_locked_at=None)
         )
         await session.commit()
+        return bool(result.rowcount == 1)  # type: ignore[attr-defined]  # CursorResult.rowcount
 
 
 async def collect_results_once(
@@ -466,7 +485,7 @@ async def collect_results_once(
         try:
             raw = await fetch(task)
             if raw is None:  # _result.json 未就绪 → 释放锁，下轮重试
-                await _release_result_lock(factory, task.id)
+                await _release_result_lock(factory, task.id, now)
                 continue
             await post(task, parse_result(raw))
         except Exception as exc:  # noqa: BLE001 - 单条失败不崩循环；释放锁待下轮重试（post 幂等）
@@ -475,8 +494,8 @@ async def collect_results_once(
                 task.import_batch_no,
                 exc,
             )
-            await _release_result_lock(factory, task.id)
+            await _release_result_lock(factory, task.id, now)
             continue
-        await mark_result_collected(factory, task.id, now)
-        collected += 1
+        if await mark_result_collected(factory, task.id, now):  # 仅本轮真置位才计数
+            collected += 1
     return collected
