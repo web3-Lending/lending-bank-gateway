@@ -13,6 +13,7 @@ import asyncio
 import datetime as dt
 import hashlib
 import logging
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -374,11 +375,12 @@ async def _claim_result(
     factory: async_sessionmaker[AsyncSession],
     task_id: int,
     now: dt.datetime,
+    token: str,
     *,
     lock_timeout_seconds: float,
 ) -> bool:
-    """原子 claim 一条待回收结果供拉取+转投：set result_locked_at=now WHERE result_collected_at
-    为空 且(锁空或超时)。多实例并发只一个 rowcount=1 抢到。返回是否抢到。"""
+    """原子 claim 一条待回收结果：set result_locked_at=now + result_lock_token=token WHERE
+    result_collected_at 为空 且(锁空或超时)。多实例并发只一个 rowcount=1 抢到。返回是否抢到。"""
     cutoff = now - dt.timedelta(seconds=lock_timeout_seconds)
     async with factory() as session:
         result = await session.execute(
@@ -391,50 +393,51 @@ async def _claim_result(
                     WedapImportDeliveryTask.result_locked_at < cutoff,
                 ),
             )
-            .values(result_locked_at=now)
+            .values(result_locked_at=now, result_lock_token=token)
         )
         await session.commit()
         return bool(result.rowcount == 1)  # type: ignore[attr-defined]  # CursorResult.rowcount
 
 
 async def _release_result_lock(
-    factory: async_sessionmaker[AsyncSession], task_id: int, claimed_at: dt.datetime
+    factory: async_sessionmaker[AsyncSession], task_id: int, token: str
 ) -> None:
     """释放本轮 claim 的锁（result 未就绪/失败时立即放，不等超时）。
 
-    ownership guard：仅当 result_locked_at == 本轮 claim 时间戳且未置位才清，锁已被别的
-    实例重抢（超时后）时 no-op，绝不清掉新 owner 的锁（codex P1 HIGH-1）。
+    ownership guard：仅当 result_lock_token == 本轮 token 且未置位才清；锁已被别的实例重抢
+    （超时后换了 token）时 no-op，绝不清掉新 owner 的锁（codex P1 二轮 HIGH-1，token 防 MySQL
+    DATETIME 截微秒致时间戳等值永不匹配）。
     """
     async with factory() as session:
         await session.execute(
             update(WedapImportDeliveryTask)
             .where(
                 WedapImportDeliveryTask.id == task_id,
-                WedapImportDeliveryTask.result_locked_at == claimed_at,
+                WedapImportDeliveryTask.result_lock_token == token,
                 WedapImportDeliveryTask.result_collected_at.is_(None),
             )
-            .values(result_locked_at=None)
+            .values(result_locked_at=None, result_lock_token=None)
         )
         await session.commit()
 
 
 async def mark_result_collected(
-    factory: async_sessionmaker[AsyncSession], task_id: int, claimed_at: dt.datetime
+    factory: async_sessionmaker[AsyncSession], task_id: int, token: str, now: dt.datetime
 ) -> bool:
-    """标记 _result.json 已回收并转投 recon（result_collected_at=claimed_at），停轮询清锁。
+    """标记 _result.json 已回收并转投 recon（result_collected_at=now），停轮询清锁。
 
-    ownership guard：仅当 result_locked_at == 本轮 claim 时间戳且未置位才置；锁已被别的实例
-    重抢时 no-op 返回 False，不覆盖新 owner（codex P1 HIGH-1）。返回是否本轮真正置位。
+    ownership guard：仅当 result_lock_token == 本轮 token 且未置位才置；锁已被别的实例重抢时
+    no-op 返回 False，不覆盖新 owner（codex P1 二轮 HIGH-1）。返回是否本轮真正置位。
     """
     async with factory() as session:
         result = await session.execute(
             update(WedapImportDeliveryTask)
             .where(
                 WedapImportDeliveryTask.id == task_id,
-                WedapImportDeliveryTask.result_locked_at == claimed_at,
+                WedapImportDeliveryTask.result_lock_token == token,
                 WedapImportDeliveryTask.result_collected_at.is_(None),
             )
-            .values(result_collected_at=claimed_at, result_locked_at=None)
+            .values(result_collected_at=now, result_locked_at=None, result_lock_token=None)
         )
         await session.commit()
         return bool(result.rowcount == 1)  # type: ignore[attr-defined]  # CursorResult.rowcount
@@ -478,14 +481,15 @@ async def collect_results_once(
         )
     collected = 0
     for task in tasks:
+        token = uuid.uuid4().hex  # 本轮 ownership token，mark/release 按它确认锁仍属本轮
         if not await _claim_result(
-            factory, task.id, now, lock_timeout_seconds=lock_timeout_seconds
+            factory, task.id, now, token, lock_timeout_seconds=lock_timeout_seconds
         ):
             continue
         try:
             raw = await fetch(task)
             if raw is None:  # _result.json 未就绪 → 释放锁，下轮重试
-                await _release_result_lock(factory, task.id, now)
+                await _release_result_lock(factory, task.id, token)
                 continue
             await post(task, parse_result(raw))
         except Exception as exc:  # noqa: BLE001 - 单条失败不崩循环；释放锁待下轮重试（post 幂等）
@@ -494,8 +498,8 @@ async def collect_results_once(
                 task.import_batch_no,
                 exc,
             )
-            await _release_result_lock(factory, task.id, now)
+            await _release_result_lock(factory, task.id, token)
             continue
-        if await mark_result_collected(factory, task.id, now):  # 仅本轮真置位才计数
+        if await mark_result_collected(factory, task.id, token, now):  # 仅本轮真置位才计数
             collected += 1
     return collected

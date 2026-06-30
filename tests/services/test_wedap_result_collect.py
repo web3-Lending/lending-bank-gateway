@@ -53,6 +53,7 @@ async def _insert(
     status="DELIVERED",
     result_collected_at=None,
     result_locked_at=None,
+    result_lock_token=None,
     batch="BATCH-LEN-20260630-001",
 ):
     async with factory() as s:
@@ -70,6 +71,7 @@ async def _insert(
                 status=status,
                 result_collected_at=result_collected_at,
                 result_locked_at=result_locked_at,
+                result_lock_token=result_lock_token,
             )
         )
         await s.commit()
@@ -161,31 +163,54 @@ async def test_collect_fetch_error_releases_lock_no_crash(factory):
 
 @pytest.mark.asyncio
 async def test_mark_result_collected_ownership_guard(factory):
-    """锁被别的实例重抢(result_locked_at != 本轮 claimed_at) → mark no-op 返 False，不冒名置位。"""
+    """锁被别的实例重抢(result_lock_token != 本轮 token) → mark no-op 返 False，不冒名置位。"""
     from app.services.wedap_delivery import mark_result_collected
 
-    other = dt.datetime(2026, 6, 30, 15, 0, tzinfo=dt.UTC)
-    await _insert(factory, result_locked_at=other)
+    await _insert(
+        factory,
+        result_locked_at=dt.datetime(2026, 6, 30, 15, 0, tzinfo=dt.UTC),
+        result_lock_token="tok-b",  # noqa: S106
+    )
     row = await _get(factory)
 
-    marked = await mark_result_collected(factory, row.id, _NOW)  # _NOW != other
+    marked = await mark_result_collected(factory, row.id, "tok-a", _NOW)  # token 不匹配
 
     assert marked is False
     row2 = await _get(factory)
     assert row2.result_collected_at is None  # 没被冒名置位
-    assert row2.result_locked_at is not None  # 别人的锁没被清
+    assert row2.result_lock_token == "tok-b"  # noqa: S105  别人的锁 token 没被覆盖
 
 
 @pytest.mark.asyncio
 async def test_release_result_lock_ownership_guard(factory):
-    """release 只清自己的锁；锁已被别的实例重抢时 no-op，不清掉新 owner。"""
+    """release 只清自己的锁；锁已被别的实例重抢(token 不同)时 no-op，不清掉新 owner。"""
     from app.services.wedap_delivery import _release_result_lock
 
-    other = dt.datetime(2026, 6, 30, 15, 0, tzinfo=dt.UTC)
-    await _insert(factory, result_locked_at=other)
+    await _insert(
+        factory,
+        result_locked_at=dt.datetime(2026, 6, 30, 15, 0, tzinfo=dt.UTC),
+        result_lock_token="tok-b",  # noqa: S106
+    )
     row = await _get(factory)
 
-    await _release_result_lock(factory, row.id, _NOW)  # _NOW != other
+    await _release_result_lock(factory, row.id, "tok-a")  # token 不匹配
 
     row2 = await _get(factory)
     assert row2.result_locked_at is not None  # 别人的锁没被清掉
+    assert row2.result_lock_token == "tok-b"  # noqa: S105
+
+
+@pytest.mark.asyncio
+async def test_mark_result_collected_matching_token_succeeds(factory):
+    """token 匹配(正常单实例路径) → mark 成功置位返 True，不受 MySQL 时间戳截微秒影响。"""
+    from app.services.wedap_delivery import mark_result_collected
+
+    await _insert(factory, result_locked_at=_NOW, result_lock_token="t-123")  # noqa: S106
+    row = await _get(factory)
+
+    marked = await mark_result_collected(factory, row.id, "t-123", _NOW)
+
+    assert marked is True
+    row2 = await _get(factory)
+    assert row2.result_collected_at is not None
+    assert row2.result_lock_token is None  # 置位时清 token

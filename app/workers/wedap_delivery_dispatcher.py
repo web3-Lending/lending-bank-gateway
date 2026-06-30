@@ -83,6 +83,8 @@ def make_deliver(
 
 _ResultFetch = Callable[[WedapImportDeliveryTask], Awaitable[bytes | None]]
 _ResultPost = Callable[[WedapImportDeliveryTask, ImportResult], Awaitable[None]]
+# recon 入口 LineResultItem.line_status 的 Literal 三值；非此集的行不投 recon（防 422 死循环）
+_VALID_LINE_STATUS = ("INGESTED", "DUPLICATE", "LINE_PARSE_ERROR")
 
 
 def make_collect(
@@ -113,17 +115,22 @@ def make_collect(
             raise
 
     async def _post(task: WedapImportDeliveryTask, result: ImportResult) -> None:
-        # null lineNo 的行（结构性损坏）Phase 1 无 manifest 无法逐行回映 → 跳过 + 告警（避免
-        # 下沉 recon line_no:int 422 死循环；批/文件级错误表留 Phase 2，codex P1 HIGH-3）。
-        recordable = [b for b in result.bad_lines if b.line_no is not None]
+        # 只投 recon 能消化的行：lineNo 非空 + lineStatus 是三值枚举。null lineNo（结构性损坏）/
+        # 非法 lineStatus（缺失变 "None"/大小写漂移/未知枚举）都跳过 + 告警，避免下沉 recon 入口
+        # 422（line_no:int / Literal）形成永久重试；批级回映留 Phase 2（codex HIGH-3+二轮）。
+        recordable = [
+            b
+            for b in result.bad_lines
+            if b.line_no is not None and b.line_status in _VALID_LINE_STATUS
+        ]
         skipped = len(result.bad_lines) - len(recordable)
         if skipped:
             logger.warning(
-                "wedap_delivery: batch=%s 有 %d 条 lineNo=null 异常行跳过回传（Phase 2 批级回映）",
+                "wedap_delivery: batch=%s 有 %d 条异常行(null lineNo / 非法 lineStatus)跳过回传",
                 task.import_batch_no,
                 skipped,
             )
-        if not recordable:  # 全 INGESTED 或全为 null lineNo → 无可逐行记
+        if not recordable:  # 全 INGESTED 或全不可消化 → 无可逐行记
             return
         await recon_client.post_line_results(
             tenant_id=task.tenant_id,

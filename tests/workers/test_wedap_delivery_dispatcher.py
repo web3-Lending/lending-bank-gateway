@@ -293,6 +293,35 @@ async def test_make_collect_post_skips_when_all_ingested():
 
 
 @pytest.mark.asyncio
+async def test_make_collect_post_skips_invalid_line_status():
+    """非法 lineStatus 跳过不回传，避免 recon Literal 422 死循环（codex 二轮 MEDIUM-1）。"""
+    from app.services.wedap_import_result import BadLine, ImportResult
+
+    recon = AsyncMock()
+    recon.post_line_results = AsyncMock()
+    _, post = make_collect(MagicMock(), recon, wedap_bucket="wedap")
+    result = ImportResult(
+        import_status="PARTIAL",
+        ingested_count=0,
+        duplicate_count=1,
+        line_error_count=1,
+        bad_lines=[
+            BadLine(line_no=2, line_status="None", error_message="missing status"),  # 非法
+            BadLine(line_no=3, line_status="duplicate", error_message="大小写漂移"),  # 非法
+            BadLine(
+                line_no=4, line_status="DUPLICATE", error_message=None, dedup_key={"txnId": "T1"}
+            ),  # 合法
+        ],
+    )
+
+    await post(_task(), result)
+
+    recon.post_line_results.assert_awaited_once()
+    lr = recon.post_line_results.await_args.kwargs["line_results"]
+    assert len(lr) == 1 and lr[0]["line_no"] == 4  # 只剩合法三值枚举行
+
+
+@pytest.mark.asyncio
 async def test_make_collect_fetch_notfound_returns_none():
     """部分 S3 兼容实现返回 NotFound 而非 NoSuchKey → 也当未就绪 None（codex P1 LOW-1）。"""
     from botocore.exceptions import ClientError

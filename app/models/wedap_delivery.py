@@ -66,3 +66,7 @@ class WedapImportDeliveryTask(Base, TenantMixin, TimestampMixin):
     # 结果回收原子 claim 时刻：多实例并发只一个抢到拉取+转投；result 未就绪(404)立即释放锁，
     # 残留锁超时由 claim WHERE(锁空或超时)回收。
     result_locked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    # 结果回收 ownership token（UUID hex）：claim 时写入，mark/release 按 token 等值匹配确认
+    # 锁仍属本轮。用字符串而非 result_locked_at 时间戳——MySQL DATETIME 默认无 fsp 截微秒，
+    # 时间戳等值会永不匹配致正常路径 mark rowcount=0 死循环（codex P1 二轮 HIGH-1）。
+    result_lock_token: Mapped[str | None] = mapped_column(String(32))

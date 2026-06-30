@@ -32,6 +32,12 @@ def upgrade() -> None:
         "wedap_import_delivery_task",
         sa.Column("result_locked_at", sa.DateTime(timezone=True), nullable=True),
     )
+    # ownership token（UUID hex）：mark/release 按 token 匹配，避 MySQL DATETIME 截微秒时间戳
+    # 等值永不匹配（codex P1 二轮 HIGH-1）
+    op.add_column(
+        "wedap_import_delivery_task",
+        sa.Column("result_lock_token", sa.String(length=32), nullable=True),
+    )
     # collect_results_once 扫描路径 (status=DELIVERED, result_collected_at IS NULL)（codex P1 MEDIUM-2）
     op.create_index(
         "ix_wedap_delivery_result_scan",
@@ -42,5 +48,6 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_index("ix_wedap_delivery_result_scan", table_name="wedap_import_delivery_task")
+    op.drop_column("wedap_import_delivery_task", "result_lock_token")
     op.drop_column("wedap_import_delivery_task", "result_locked_at")
     op.drop_column("wedap_import_delivery_task", "result_collected_at")
