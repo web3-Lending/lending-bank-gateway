@@ -214,3 +214,35 @@ async def test_mark_result_collected_matching_token_succeeds(factory):
     row2 = await _get(factory)
     assert row2.result_collected_at is not None
     assert row2.result_lock_token is None  # 置位时清 token
+
+
+@pytest.mark.asyncio
+async def test_collect_skips_when_claim_lost(factory, monkeypatch):
+    """scan 到但 claim 竞败(别实例抢先)→ continue 跳过，不拉取。"""
+    from app.services import wedap_delivery as _wd
+
+    await _insert(factory)
+    monkeypatch.setattr(_wd, "_claim_result", AsyncMock(return_value=False))
+    fetch = AsyncMock()
+    post = AsyncMock()
+
+    n = await collect_results_once(factory, fetch=fetch, post=post, now=_NOW)
+
+    assert n == 0
+    fetch.assert_not_awaited()  # claim 没抢到 → 不拉 _result.json
+
+
+@pytest.mark.asyncio
+async def test_collect_mark_lost_not_counted(factory, monkeypatch):
+    """post 成功但 mark 竞败(锁被别实例重抢)→ 不计数(503->483 分支)。"""
+    from app.services import wedap_delivery as _wd
+
+    await _insert(factory)
+    monkeypatch.setattr(_wd, "mark_result_collected", AsyncMock(return_value=False))
+    fetch = AsyncMock(return_value=_RESULT_JSON)
+    post = AsyncMock()
+
+    n = await collect_results_once(factory, fetch=fetch, post=post, now=_NOW)
+
+    assert n == 0  # mark 返 False → 不计数
+    post.assert_awaited_once()  # post 已调，只是置位竞败
