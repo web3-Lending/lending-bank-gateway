@@ -115,18 +115,21 @@ def make_collect(
             raise
 
     async def _post(task: WedapImportDeliveryTask, result: ImportResult) -> None:
-        # 只投 recon 能消化的行：lineNo 非空 + lineStatus 是三值枚举。null lineNo（结构性损坏）/
-        # 非法 lineStatus（缺失变 "None"/大小写漂移/未知枚举）都跳过 + 告警，避免下沉 recon 入口
-        # 422（line_no:int / Literal）形成永久重试；批级回映留 Phase 2（codex HIGH-3+二轮）。
+        # 只投 recon 能消化的行：lineNo 是真 int + lineStatus 是三值枚举。parse_result 原样取
+        # lineNo，wedap 发 null/{}/"bad"/5.5/bool 等非 int 坏值都会触发 recon line_no:int / Literal
+        # 422 → 释放锁永久重试，故此处按 recon contract 完整预校验跳过 + 告警；批级回映留 Phase 2
+        # （bool 是 int 子类须显式排除；codex HIGH-3 + 二/三轮）。
         recordable = [
             b
             for b in result.bad_lines
-            if b.line_no is not None and b.line_status in _VALID_LINE_STATUS
+            if isinstance(b.line_no, int)
+            and not isinstance(b.line_no, bool)
+            and b.line_status in _VALID_LINE_STATUS
         ]
         skipped = len(result.bad_lines) - len(recordable)
         if skipped:
             logger.warning(
-                "wedap_delivery: batch=%s 有 %d 条异常行(null lineNo / 非法 lineStatus)跳过回传",
+                "wedap_delivery: batch=%s 有 %d 条异常行(非法 lineNo / 非法 lineStatus)跳过回传",
                 task.import_batch_no,
                 skipped,
             )

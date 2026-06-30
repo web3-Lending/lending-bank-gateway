@@ -392,3 +392,33 @@ async def test_make_collect_post_all_null_line_no_skips_send():
     await post(_task(), result)
 
     recon.post_line_results.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_line_no", [{}, [], "bad", 5.5, True])
+async def test_make_collect_post_skips_non_int_line_no(bad_line_no):
+    """lineNo 非 int(dict/list/str/float/bool)→跳过，避免 recon 422（codex 三轮 HIGH）。"""
+    from app.services.wedap_import_result import BadLine, ImportResult
+
+    recon = AsyncMock()
+    recon.post_line_results = AsyncMock()
+    _, post = make_collect(MagicMock(), recon, wedap_bucket="wedap")
+    bad = BadLine(
+        line_no=bad_line_no,  # type: ignore[arg-type]
+        line_status="DUPLICATE",
+        error_message=None,
+    )
+    good = BadLine(line_no=7, line_status="DUPLICATE", error_message=None, dedup_key={"txnId": "T"})
+    result = ImportResult(
+        import_status="PARTIAL",
+        ingested_count=0,
+        duplicate_count=2,
+        line_error_count=0,
+        bad_lines=[bad, good],
+    )
+
+    await post(_task(), result)
+
+    recon.post_line_results.assert_awaited_once()
+    lr = recon.post_line_results.await_args.kwargs["line_results"]
+    assert len(lr) == 1 and lr[0]["line_no"] == 7  # 非 int lineNo 行被剔除
