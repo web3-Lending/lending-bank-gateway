@@ -14,10 +14,12 @@ import hmac
 import json
 import time
 import uuid
+from typing import Any
 
 import httpx
 
 _CALLBACK_PATH = "/api/v1/wedap-export/delivery-callback"
+_LINE_RESULTS_PATH = "/api/v1/wedap-export/line-results"
 _CALLER = "lending-bank-gateway"
 _UNSIGNED = "0" * 64  # hmac_secret 未配时占位（recon insecure 不校验签名）
 
@@ -27,9 +29,9 @@ def build_callback_request_id(import_batch_no: str) -> str:
     return f"wedap-delivery-result-{import_batch_no}"
 
 
-def _sign(secret: str, *, timestamp: str, nonce: str, body_sha256: str) -> str:
-    """HMAC-SHA256(secret, POST\\npath\\ntimestamp\\nnonce\\nbody_sha256)（对齐 recon 验签）。"""
-    msg = f"POST\n{_CALLBACK_PATH}\n{timestamp}\n{nonce}\n{body_sha256}".encode()
+def _sign(secret: str, path: str, *, timestamp: str, nonce: str, body_sha256: str) -> str:
+    """HMAC-SHA256(secret, POST\\npath\\ntimestamp\\nnonce\\nbody_sha256)（按真实请求 path 签）。"""
+    msg = f"POST\n{path}\n{timestamp}\n{nonce}\n{body_sha256}".encode()
     return hmac.new(secret.encode(), msg, hashlib.sha256).hexdigest()
 
 
@@ -59,7 +61,13 @@ class ReconCallbackClient:
         nonce = uuid.uuid4().hex
         body_sha256 = hashlib.sha256(body_bytes).hexdigest()
         signature = (
-            _sign(self._hmac_secret, timestamp=timestamp, nonce=nonce, body_sha256=body_sha256)
+            _sign(
+                self._hmac_secret,
+                _CALLBACK_PATH,
+                timestamp=timestamp,
+                nonce=nonce,
+                body_sha256=body_sha256,
+            )
             if self._hmac_secret
             else _UNSIGNED
         )
@@ -75,4 +83,47 @@ class ReconCallbackClient:
         }
         async with httpx.AsyncClient(base_url=self._base_url, timeout=self._timeout) as client:
             resp = await client.post(_CALLBACK_PATH, content=body_bytes, headers=headers)
+            resp.raise_for_status()
+
+    async def post_line_results(
+        self,
+        *,
+        tenant_id: str,
+        import_batch_no: str,
+        data_type: str,
+        line_results: list[dict[str, Any]],
+    ) -> None:
+        """回传逐条 lineResult 给 recon（签 line-results path）；非 2xx 抛 HTTPStatusError。"""
+        body = {
+            "import_batch_no": import_batch_no,
+            "data_type": data_type,
+            "line_results": line_results,
+        }
+        body_bytes = json.dumps(body, separators=(",", ":")).encode()
+        timestamp = str(int(time.time()))
+        nonce = uuid.uuid4().hex
+        body_sha256 = hashlib.sha256(body_bytes).hexdigest()
+        signature = (
+            _sign(
+                self._hmac_secret,
+                _LINE_RESULTS_PATH,
+                timestamp=timestamp,
+                nonce=nonce,
+                body_sha256=body_sha256,
+            )
+            if self._hmac_secret
+            else _UNSIGNED
+        )
+        headers = {
+            "X-Caller-Service": _CALLER,
+            "X-Tenant-Id": tenant_id,
+            "X-Request-Id": f"wedap-line-results-{import_batch_no}",
+            "X-Timestamp": timestamp,
+            "X-Nonce": nonce,
+            "X-Body-SHA256": body_sha256,
+            "X-Signature": signature,
+            "Content-Type": "application/json",
+        }
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=self._timeout) as client:
+            resp = await client.post(_LINE_RESULTS_PATH, content=body_bytes, headers=headers)
             resp.raise_for_status()
