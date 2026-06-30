@@ -235,6 +235,15 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 ),
                 worker_factory,
             )
+            # result 回收（Phase1）：拉 wedap 写回的 _result.json → 转投 recon line-results
+            wedap_result_fetch, wedap_result_post = wedap_delivery_dispatcher.make_collect(
+                S3FileClient(endpoint_url=settings.s3_endpoint_url),
+                ReconCallbackClient(
+                    base_url=settings.recon_base_url,
+                    hmac_secret=settings.recon_callback_hmac_secret or None,
+                ),
+                wedap_bucket=settings.wedap_import_bucket,
+            )
             tasks.append(
                 asyncio.create_task(
                     supervised(
@@ -245,6 +254,8 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                             max_attempts=settings.wedap_delivery_max_attempts,
                             interval_seconds=settings.wedap_delivery_interval_seconds,
                             on_terminal=wedap_on_terminal,
+                            result_fetch=wedap_result_fetch,
+                            result_post=wedap_result_post,
                         ),
                         restart_delay_seconds=settings.worker_restart_delay_seconds,
                     ),

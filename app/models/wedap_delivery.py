@@ -31,6 +31,8 @@ class WedapImportDeliveryTask(Base, TenantMixin, TimestampMixin):
         UniqueConstraint("tenant_id", "request_id", name="uq_wedap_delivery_request"),
         # dispatcher 按 (status, next_retry_at) 扫待投递任务。
         Index("ix_wedap_delivery_status_retry", "status", "next_retry_at"),
+        # collect_results_once 扫 (DELIVERED, result_collected_at IS NULL)（codex P1 MEDIUM-2）。
+        Index("ix_wedap_delivery_result_scan", "status", "result_collected_at"),
     )
 
     id: Mapped[int] = mapped_column(_BIG_PK, primary_key=True, autoincrement=True)
@@ -58,3 +60,13 @@ class WedapImportDeliveryTask(Base, TenantMixin, TimestampMixin):
     # 回执重发原子 claim 时刻：resend 锁定未送达回执后才重发，多实例只一个抢到；
     # 残留锁超时由 claim WHERE(锁空或超时)回收。codex 复评 P1。
     callback_locked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    # wedap 写回 _result.json 已回收并转投 recon line-results 的时刻（result 回收 Phase1）：
+    # status=DELIVERED + 此列为空 = 结果未回收，collect_results_once 轮询拉取兜底。
+    result_collected_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    # 结果回收原子 claim 时刻：多实例并发只一个抢到拉取+转投；result 未就绪(404)立即释放锁，
+    # 残留锁超时由 claim WHERE(锁空或超时)回收。
+    result_locked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    # 结果回收 ownership token（UUID hex）：claim 时写入，mark/release 按 token 等值匹配确认
+    # 锁仍属本轮。用字符串而非 result_locked_at 时间戳——MySQL DATETIME 默认无 fsp 截微秒，
+    # 时间戳等值会永不匹配致正常路径 mark rowcount=0 死循环（codex P1 二轮 HIGH-1）。
+    result_lock_token: Mapped[str | None] = mapped_column(String(32))
