@@ -8,7 +8,7 @@ from sqlalchemy import select
 from app.core.db import build_engine, build_session_factory
 from app.models.base import Base
 from app.models.wedap_delivery import WedapImportDeliveryTask
-from app.workers.wedap_delivery_dispatcher import make_deliver, make_on_terminal
+from app.workers.wedap_delivery_dispatcher import make_collect, make_deliver, make_on_terminal
 
 _CONTENT = b'{"h":1}\n{"loanId":"L1"}\n'
 _CHECKSUM = hashlib.sha256(_CONTENT).hexdigest()
@@ -187,3 +187,106 @@ async def test_resend_skips_when_claim_lost(factory, monkeypatch):
     )
     assert n == 0
     recon.post_result.assert_not_awaited()
+
+
+def _task(batch="BATCH-LEN-20260630-001"):
+    return WedapImportDeliveryTask(
+        tenant_id="WBTHK01",
+        request_id=f"wedap-import-{batch}",
+        import_batch_no=batch,
+        data_type="loan-detail",
+        import_date="20260630",
+        staging_key="staging/k.jsonl",
+        file_checksum="a" * 64,
+        file_size=10,
+        total_count=3,
+        status="DELIVERED",
+    )
+
+
+@pytest.mark.asyncio
+async def test_make_collect_fetch_404_returns_none():
+    """_result.json 未就绪(NoSuchKey/404)→ fetch 返 None（不当异常）。"""
+    from botocore.exceptions import ClientError
+
+    s3 = MagicMock()
+    s3.get_bytes = MagicMock(side_effect=ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject"))
+    fetch, _ = make_collect(s3, AsyncMock(), wedap_bucket="wedap")
+
+    assert await fetch(_task()) is None
+
+
+@pytest.mark.asyncio
+async def test_make_collect_fetch_other_error_raises():
+    """非 404 的 S3 错误(如 AccessDenied)→ 抛出（不静默吞）。"""
+    from botocore.exceptions import ClientError
+
+    s3 = MagicMock()
+    s3.get_bytes = MagicMock(
+        side_effect=ClientError({"Error": {"Code": "AccessDenied"}}, "GetObject")
+    )
+    fetch, _ = make_collect(s3, AsyncMock(), wedap_bucket="wedap")
+
+    with pytest.raises(ClientError):
+        await fetch(_task())
+
+
+@pytest.mark.asyncio
+async def test_make_collect_post_maps_bad_lines_to_recon():
+    """post 把 bad_lines 映成 line_results 字典转投 recon.post_line_results。"""
+    from app.services.wedap_import_result import BadLine, ImportResult
+
+    recon = AsyncMock()
+    recon.post_line_results = AsyncMock()
+    _, post = make_collect(MagicMock(), recon, wedap_bucket="wedap")
+    result = ImportResult(
+        import_status="PARTIAL",
+        ingested_count=1,
+        duplicate_count=1,
+        line_error_count=1,
+        bad_lines=[
+            BadLine(
+                line_no=2,
+                line_status="DUPLICATE",
+                error_message=None,
+                dedup_key={"loanId": "L1", "asOfDate": "20260630"},
+            ),
+            BadLine(
+                line_no=3,
+                line_status="LINE_PARSE_ERROR",
+                error_message="bad date",
+                error_code="INVALID_DATE_FORMAT",
+            ),
+        ],
+    )
+
+    await post(_task(), result)
+
+    recon.post_line_results.assert_awaited_once()
+    kw = recon.post_line_results.await_args.kwargs
+    assert kw["import_batch_no"] == "BATCH-LEN-20260630-001"
+    assert kw["data_type"] == "loan-detail"
+    assert len(kw["line_results"]) == 2
+    assert kw["line_results"][0]["dedup_key"] == {"loanId": "L1", "asOfDate": "20260630"}
+    assert kw["line_results"][1]["error_code"] == "INVALID_DATE_FORMAT"
+
+
+@pytest.mark.asyncio
+async def test_make_collect_post_skips_when_all_ingested():
+    """全 INGESTED(无 bad_lines)→ 不发 recon（无异常行可记）。"""
+    from app.services.wedap_import_result import ImportResult
+
+    recon = AsyncMock()
+    recon.post_line_results = AsyncMock()
+    _, post = make_collect(MagicMock(), recon, wedap_bucket="wedap")
+    result = ImportResult(
+        import_status="SUCCESS",
+        ingested_count=3,
+        duplicate_count=0,
+        line_error_count=0,
+        bad_lines=[],
+    )
+
+    await post(_task(), result)
+
+    recon.post_line_results.assert_not_awaited()

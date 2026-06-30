@@ -24,6 +24,7 @@ from app.clients.s3 import S3FileClient
 from app.clients.wedap import WedapClient
 from app.models.wedap_delivery import WedapImportDeliveryTask
 from app.services.wedap_import import deliver_batch
+from app.services.wedap_import_result import ImportResult, parse_result
 
 logger = logging.getLogger(__name__)
 
@@ -367,3 +368,115 @@ async def resend_pending_callbacks_once(
         await send(task, task.status, task.last_error)
         resent += 1
     return resent
+
+
+async def _claim_result(
+    factory: async_sessionmaker[AsyncSession],
+    task_id: int,
+    now: dt.datetime,
+    *,
+    lock_timeout_seconds: float,
+) -> bool:
+    """原子 claim 一条待回收结果供拉取+转投：set result_locked_at=now WHERE result_collected_at
+    为空 且(锁空或超时)。多实例并发只一个 rowcount=1 抢到。返回是否抢到。"""
+    cutoff = now - dt.timedelta(seconds=lock_timeout_seconds)
+    async with factory() as session:
+        result = await session.execute(
+            update(WedapImportDeliveryTask)
+            .where(
+                WedapImportDeliveryTask.id == task_id,
+                WedapImportDeliveryTask.result_collected_at.is_(None),
+                or_(
+                    WedapImportDeliveryTask.result_locked_at.is_(None),
+                    WedapImportDeliveryTask.result_locked_at < cutoff,
+                ),
+            )
+            .values(result_locked_at=now)
+        )
+        await session.commit()
+        return bool(result.rowcount == 1)  # type: ignore[attr-defined]  # CursorResult.rowcount
+
+
+async def _release_result_lock(factory: async_sessionmaker[AsyncSession], task_id: int) -> None:
+    """result 未就绪(404)时立即释放 claim 锁，让下轮尽快重试（不等锁超时）。"""
+    async with factory() as session:
+        await session.execute(
+            update(WedapImportDeliveryTask)
+            .where(WedapImportDeliveryTask.id == task_id)
+            .values(result_locked_at=None)
+        )
+        await session.commit()
+
+
+async def mark_result_collected(
+    factory: async_sessionmaker[AsyncSession], task_id: int, now: dt.datetime
+) -> None:
+    """原子标记 _result.json 已回收并转投 recon（result_collected_at），停止轮询；清锁。"""
+    async with factory() as session:
+        await session.execute(
+            update(WedapImportDeliveryTask)
+            .where(WedapImportDeliveryTask.id == task_id)
+            .values(result_collected_at=now, result_locked_at=None)
+        )
+        await session.commit()
+
+
+async def collect_results_once(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    fetch: Callable[[WedapImportDeliveryTask], Awaitable[bytes | None]],
+    post: Callable[[WedapImportDeliveryTask, ImportResult], Awaitable[None]],
+    now: dt.datetime,
+    limit: int = 100,
+    lock_timeout_seconds: float = 300.0,
+) -> int:
+    """回收 _result.json（DELIVERED 且 result_collected_at 空）→ 转投 recon。返回回收数。
+
+    并发安全：每条先原子 claim（result_locked_at）抢到才拉取，多实例只一个命中。fetch 返回
+    None = _result.json 未就绪（wedap 仍在处理）→ 立即释放锁待下轮；返回字节 → parse_result
+    解析、post 转投 recon 逐条异常行、mark_result_collected 置位排除后续扫描。fetch/post 由
+    dispatcher 注入（绑 S3/recon 客户端），保持本服务纯逻辑可测。
+    """
+    async with factory() as snap:
+        tasks = list(
+            (
+                await snap.execute(
+                    select(WedapImportDeliveryTask)
+                    .where(
+                        WedapImportDeliveryTask.status == "DELIVERED",
+                        WedapImportDeliveryTask.result_collected_at.is_(None),
+                        or_(
+                            WedapImportDeliveryTask.result_locked_at.is_(None),
+                            WedapImportDeliveryTask.result_locked_at
+                            < now - dt.timedelta(seconds=lock_timeout_seconds),
+                        ),
+                    )
+                    .limit(limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    collected = 0
+    for task in tasks:
+        if not await _claim_result(
+            factory, task.id, now, lock_timeout_seconds=lock_timeout_seconds
+        ):
+            continue
+        try:
+            raw = await fetch(task)
+            if raw is None:  # _result.json 未就绪 → 释放锁，下轮重试
+                await _release_result_lock(factory, task.id)
+                continue
+            await post(task, parse_result(raw))
+        except Exception as exc:  # noqa: BLE001 - 单条失败不崩循环；释放锁待下轮重试（post 幂等）
+            logger.warning(
+                "wedap_delivery: 回收 _result.json 失败 batch=%s err=%s（释放锁待重试）",
+                task.import_batch_no,
+                exc,
+            )
+            await _release_result_lock(factory, task.id)
+            continue
+        await mark_result_collected(factory, task.id, now)
+        collected += 1
+    return collected

@@ -58,3 +58,9 @@ class WedapImportDeliveryTask(Base, TenantMixin, TimestampMixin):
     # 回执重发原子 claim 时刻：resend 锁定未送达回执后才重发，多实例只一个抢到；
     # 残留锁超时由 claim WHERE(锁空或超时)回收。codex 复评 P1。
     callback_locked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    # wedap 写回 _result.json 已回收并转投 recon line-results 的时刻（result 回收 Phase1）：
+    # status=DELIVERED + 此列为空 = 结果未回收，collect_results_once 轮询拉取兜底。
+    result_collected_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    # 结果回收原子 claim 时刻：多实例并发只一个抢到拉取+转投；result 未就绪(404)立即释放锁，
+    # 残留锁超时由 claim WHERE(锁空或超时)回收。
+    result_locked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
