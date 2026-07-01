@@ -289,7 +289,11 @@ class WedapClient:
 
         # 1) 网关拒绝唯一锚点：success 字段存在且为 false（APISIX/error-response 契约）。
         if body.get("success") is False:
-            err = body.get("error") or {}
+            err = body.get("error")
+            if not isinstance(
+                err, dict
+            ):  # error 可能是字符串/缺失 → 兜底空 dict，防 .get 抛 AttributeError
+                err = {}
             raise WedapGatewayRejected(r.status_code, err.get("code"), err.get("message"))
         # 2) 上游应用层 401（无 success 字段，Spring 形态）→ apikey 未对齐。
         if r.status_code == 401:

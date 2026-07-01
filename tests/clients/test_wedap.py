@@ -625,6 +625,18 @@ async def test_notify_missing_status_raises() -> None:
 
 
 @respx.mock
+async def test_notify_gateway_rejection_error_non_dict_falls_back() -> None:
+    # codex: error 若是字符串(非 dict) → 不应 AttributeError，code/message 走兜底。
+    respx.post(NOTIFY_PATH).mock(
+        return_value=httpx.Response(400, json={"success": False, "error": "boom"})
+    )
+    with pytest.raises(WedapGatewayRejected) as exc:
+        await _import_client().notify_batch_uploaded(payload=_payload())
+    assert exc.value.http_status == 400
+    assert exc.value.code == "GATEWAY_REJECTED"
+
+
+@respx.mock
 @pytest.mark.parametrize("bad_body", [[1, 2], None, "plain-string", 42])
 async def test_notify_non_dict_body_raises(bad_body) -> None:
     # codex P2：list / null / 标量体 → body={} → status 缺失 → 抛（不被误当受理成功）。

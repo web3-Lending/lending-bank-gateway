@@ -116,7 +116,7 @@ def make_collect(
             raise
 
     async def _post(task: WedapImportDeliveryTask, result: ImportResult) -> None:
-        # 只投 recon 能消化的行：lineNo 是真 int + lineStatus 是三值枚举。parse_result 原样取
+        # 只投 recon 能消化的行：lineNo 是真 int + lineStatus 是四值枚举。parse_result 原样取
         # lineNo，wedap 发 null/{}/"bad"/5.5/bool 等非 int 坏值都会触发 recon line_no:int / Literal
         # 422 → 释放锁永久重试，故此处按 recon contract 完整预校验跳过 + 告警；批级回映留 Phase 2
         # （bool 是 int 子类须显式排除；codex HIGH-3 + 二/三轮）。
