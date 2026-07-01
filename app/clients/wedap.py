@@ -2,6 +2,7 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import time
 import uuid
 from typing import Any
@@ -23,6 +24,15 @@ def _hmac_sign(secret: str, *, method: str, path: str, timestamp: str, body: str
         sign_str += f"\n{body}"
     digest = hmac.new(secret.encode(), sign_str.encode(), hashlib.sha256).digest()
     return base64.b64encode(digest).decode()
+
+
+def _header_safe(value: object, *, max_len: int = 80) -> str:
+    """把业务号清洗成 header-safe 值（防 CR/LF/非 ASCII 造成非法 header / 注入）。
+
+    非 ``[A-Za-z0-9._:-]`` 一律替换为 ``-``，并截断到 ``max_len``。正常业务号
+    （如 ``BATCH-LEN-20260624-001``）保持原样，异常输入不再进 header 原文。
+    """
+    return re.sub(r"[^A-Za-z0-9._:-]", "-", str(value))[:max_len]
 
 
 # web2-core BatchUploadedResponse.Status 的 7 值枚举（ADR-0001 §外部错误契约）。
@@ -307,7 +317,9 @@ class WedapClient:
         # anti-replay 缺则 400）。签名密钥未配 = 直连 baffle 模式，不加签名头（向后兼容）。
         if self._import_signing_secret:
             timestamp = str(int(time.time()))
-            headers["X-Request-Id"] = f"wedap-import-{payload.get('importBatchNo', '')}"
+            headers["X-Request-Id"] = (
+                f"wedap-import-{_header_safe(payload.get('importBatchNo', ''))}"
+            )
             headers["X-Timestamp"] = timestamp
             headers["X-Nonce"] = uuid.uuid4().hex
             headers["X-Signature"] = _hmac_sign(

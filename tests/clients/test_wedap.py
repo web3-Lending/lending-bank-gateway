@@ -738,3 +738,26 @@ async def test_notify_no_signature_headers_when_secret_empty() -> None:
     req = route.calls.last.request
     assert "X-Signature" not in req.headers
     assert "X-Nonce" not in req.headers
+
+
+def test_header_safe_sanitizes_unsafe_chars() -> None:
+    from app.clients.wedap import _header_safe
+
+    assert _header_safe("BATCH-LEN-20260624-001") == "BATCH-LEN-20260624-001"  # 正常值原样
+    assert _header_safe("a\r\nb\tc 日本") == "a--b-c---"  # CR/LF/tab/空格/非ASCII → -（: 保留）
+    assert len(_header_safe("x" * 200)) == 80  # 截断
+
+
+@respx.mock
+async def test_notify_sanitizes_batch_no_in_request_id_header() -> None:
+    # codex P1：importBatchNo 含 CR/LF/非ASCII 时,X-Request-Id 不得注入非法 header。
+    route = respx.post(NOTIFY_PATH).mock(
+        return_value=httpx.Response(200, json={"status": "ACCEPTED"})
+    )
+    payload = {**_payload(), "importBatchNo": "EVIL\r\nX-Injected: 1\t日本"}
+    await _signed_client().notify_batch_uploaded(payload=payload)
+    req = route.calls.last.request
+    rid = req.headers["X-Request-Id"]
+    assert "\r" not in rid and "\n" not in rid and "\t" not in rid
+    assert rid.startswith("wedap-import-EVIL--X-Injected:-1")  # : 保留,CR/LF/tab/非ASCII → -
+    assert "X-Injected" not in req.headers  # 注入的头名没被当成真头
