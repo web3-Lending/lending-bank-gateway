@@ -5,7 +5,12 @@ import httpx
 import pytest
 import respx
 
-from app.clients.wedap import WedapClient, WedapError
+from app.clients.wedap import (
+    KNOWN_BATCH_STATUS,
+    WedapClient,
+    WedapError,
+    WedapGatewayRejected,
+)
 
 FIX = pathlib.Path(__file__).parent.parent / "fixtures" / "wedap"
 
@@ -559,3 +564,103 @@ async def test_notify_sends_apikey_header() -> None:
     )
     await _import_client().notify_batch_uploaded(payload=_payload())
     assert route.calls.last.request.headers["apikey"] == "KEY123"
+
+
+# --- 网关拒绝锚点(success=false) + 7 值 status 全覆盖(ADR-0001 §外部错误契约) ---
+
+
+@respx.mock
+async def test_notify_gateway_rejection_success_false_400_raises() -> None:
+    respx.post(NOTIFY_PATH).mock(
+        return_value=httpx.Response(
+            400,
+            json={"success": False, "error": {"code": "MISSING_REQUEST_ID", "message": "x"}},
+        )
+    )
+    with pytest.raises(WedapGatewayRejected) as exc:
+        await _import_client().notify_batch_uploaded(payload=_payload())
+    assert exc.value.http_status == 400
+    assert exc.value.code == "MISSING_REQUEST_ID"
+
+
+@respx.mock
+async def test_notify_gateway_rejection_success_false_401_is_gateway_not_plain_401() -> None:
+    # APISIX key-auth 拒绝: HTTP 401 但带 success:false → 归网关拒绝(WedapGatewayRejected),
+    # 非上游应用层 401(WedapError)。error 缺 message → 覆盖 message 兜底分支。
+    respx.post(NOTIFY_PATH).mock(
+        return_value=httpx.Response(401, json={"success": False, "error": {"code": "UNAUTHORIZED"}})
+    )
+    with pytest.raises(WedapGatewayRejected) as exc:
+        await _import_client().notify_batch_uploaded(payload=_payload())
+    assert exc.value.http_status == 401
+
+
+@respx.mock
+async def test_notify_gateway_rejection_429_no_error_dict_falls_back() -> None:
+    # success:false 但无 error dict → code/message 走兜底(GATEWAY_REJECTED)。
+    respx.post(NOTIFY_PATH).mock(return_value=httpx.Response(429, json={"success": False}))
+    with pytest.raises(WedapGatewayRejected) as exc:
+        await _import_client().notify_batch_uploaded(payload=_payload())
+    assert exc.value.http_status == 429
+    assert exc.value.code == "GATEWAY_REJECTED"
+
+
+@respx.mock
+async def test_notify_unknown_status_raises_not_silent_delivered() -> None:
+    # codex P1：未识别 status 若只 warn+return 会被 dispatch 记 DELIVERED（误当受理成功）→ 改抛。
+    respx.post(NOTIFY_PATH).mock(return_value=httpx.Response(200, json={"status": "WEIRD_UNSEEN"}))
+    with pytest.raises(WedapError) as exc:
+        await _import_client().notify_batch_uploaded(payload=_payload())
+    assert exc.value.code == "UNKNOWN_STATUS"
+    assert "WEIRD_UNSEEN" in str(exc.value)
+
+
+@respx.mock
+async def test_notify_missing_status_raises() -> None:
+    # 200 但无 status 字段（且无 success）→ 无法确认受理 → 抛，不静默 DELIVERED。
+    respx.post(NOTIFY_PATH).mock(return_value=httpx.Response(200, json={}))
+    with pytest.raises(WedapError) as exc:
+        await _import_client().notify_batch_uploaded(payload=_payload())
+    assert exc.value.code == "UNKNOWN_STATUS"
+
+
+@respx.mock
+async def test_notify_gateway_rejection_error_non_dict_falls_back() -> None:
+    # codex: error 若是字符串(非 dict) → 不应 AttributeError，code/message 走兜底。
+    respx.post(NOTIFY_PATH).mock(
+        return_value=httpx.Response(400, json={"success": False, "error": "boom"})
+    )
+    with pytest.raises(WedapGatewayRejected) as exc:
+        await _import_client().notify_batch_uploaded(payload=_payload())
+    assert exc.value.http_status == 400
+    assert exc.value.code == "GATEWAY_REJECTED"
+
+
+@respx.mock
+@pytest.mark.parametrize("bad_body", [[1, 2], None, "plain-string", 42])
+async def test_notify_non_dict_body_raises(bad_body) -> None:
+    # codex P2：list / null / 标量体 → body={} → status 缺失 → 抛（不被误当受理成功）。
+    respx.post(NOTIFY_PATH).mock(return_value=httpx.Response(200, json=bad_body))
+    with pytest.raises(WedapError) as exc:
+        await _import_client().notify_batch_uploaded(payload=_payload())
+    assert exc.value.code == "UNKNOWN_STATUS"
+
+
+@respx.mock
+@pytest.mark.parametrize("status", sorted(KNOWN_BATCH_STATUS))
+async def test_notify_all_seven_known_statuses_return_body(status: str) -> None:
+    respx.post(NOTIFY_PATH).mock(return_value=httpx.Response(200, json={"status": status}))
+    resp = await _import_client().notify_batch_uploaded(payload=_payload())
+    assert resp["status"] == status
+
+
+def test_known_batch_status_is_the_seven_web2core_values() -> None:
+    assert KNOWN_BATCH_STATUS == {
+        "ACCEPTED",
+        "DUPLICATE_BATCH",
+        "DUPLICATE_BATCH_CONFLICT",
+        "FILE_NOT_FOUND",
+        "CHECKSUM_MISMATCH",
+        "INVALID_PARAM",
+        "REPLACES_BATCH_NOT_FOUND",
+    }

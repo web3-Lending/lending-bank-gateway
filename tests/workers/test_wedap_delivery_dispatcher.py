@@ -272,6 +272,38 @@ async def test_make_collect_post_maps_bad_lines_to_recon():
 
 
 @pytest.mark.asyncio
+async def test_make_collect_post_forwards_contract_invalid():
+    """ADR-0001 §北向回收：CONTRACT_INVALID 现在转投 recon（旧行为是静默跳过→漏账）。"""
+    from app.services.wedap_import_result import BadLine, ImportResult
+
+    recon = AsyncMock()
+    recon.post_line_results = AsyncMock()
+    _, post = make_collect(MagicMock(), recon, wedap_bucket="wedap")
+    result = ImportResult(
+        import_status="PARTIAL",
+        ingested_count=0,
+        duplicate_count=0,
+        line_error_count=1,
+        bad_lines=[
+            BadLine(
+                line_no=7,
+                line_status="CONTRACT_INVALID",
+                error_message="parsed contract rejected",
+                error_code="CONTRACT_MISMATCH",
+            ),
+        ],
+    )
+
+    await post(_task(), result)
+
+    recon.post_line_results.assert_awaited_once()
+    lines = recon.post_line_results.await_args.kwargs["line_results"]
+    assert len(lines) == 1
+    assert lines[0]["line_status"] == "CONTRACT_INVALID"
+    assert lines[0]["error_code"] == "CONTRACT_MISMATCH"
+
+
+@pytest.mark.asyncio
 async def test_make_collect_post_skips_when_all_ingested():
     """全 INGESTED(无 bad_lines)→ 不发 recon（无异常行可记）。"""
     from app.services.wedap_import_result import ImportResult
