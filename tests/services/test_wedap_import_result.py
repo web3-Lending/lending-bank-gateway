@@ -3,9 +3,50 @@
 import json
 
 from app.services.wedap_import_result import (
+    KNOWN_LINE_ERROR_CODE,
     build_result_key,
     parse_result,
 )
+
+
+def test_known_line_error_code_is_the_nine_web2core_values():
+    # ADR-0001 P5：web2-core ErrorCode 是 9 值(非旧注释的 8 值)。
+    assert KNOWN_LINE_ERROR_CODE == {
+        "INVALID_JSON",
+        "DEDUP_KEY_MISSING",
+        "REQUIRED_FIELD_MISSING",
+        "INVALID_NUMBER",
+        "INVALID_DATE_FORMAT",
+        "INVALID_ENUM",
+        "UNSUPPORTED_SCHEMA_VERSION",
+        "CONTRACT_SHAPE_MISMATCH",
+        "UNKNOWN_PARSE_ERROR",
+    }
+
+
+def test_parse_result_faithfully_passes_all_nine_error_codes():
+    # errorCode 原样透传(含全部 9 值 + CONTRACT_INVALID 行)，不因枚举校验丢弃。
+    lines = [
+        {"lineNo": i, "lineStatus": "LINE_PARSE_ERROR", "errorCode": code}
+        for i, code in enumerate(sorted(KNOWN_LINE_ERROR_CODE), start=1)
+    ]
+    lines.append(
+        {"lineNo": 99, "lineStatus": "CONTRACT_INVALID", "errorCode": "CONTRACT_SHAPE_MISMATCH"}
+    )
+    raw = json.dumps(
+        {
+            "importStatus": "FAILED",
+            "ingestedCount": 0,
+            "duplicateCount": 0,
+            "lineErrorCount": len(lines),
+            "lineResults": lines,
+        }
+    ).encode()
+    result = parse_result(raw)
+    got = {(b.line_status, b.error_code) for b in result.bad_lines}
+    for code in KNOWN_LINE_ERROR_CODE:
+        assert ("LINE_PARSE_ERROR", code) in got
+    assert ("CONTRACT_INVALID", "CONTRACT_SHAPE_MISMATCH") in got
 
 
 def test_build_result_key():
