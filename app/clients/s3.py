@@ -4,6 +4,7 @@ import hashlib
 import pathlib
 
 import boto3  # type: ignore[import-untyped]
+import httpx
 from botocore.config import Config  # type: ignore[import-untyped]
 
 
@@ -35,6 +36,10 @@ class S3FileClient:
                 retries={"max_attempts": max_attempts, "mode": "standard"},
             ),
         )
+        # presigned URL 走 HTTP，不经 boto3；复用 connect/read 超时避免卡死 worker。
+        self._http_timeout = httpx.Timeout(
+            connect=connect_timeout, read=read_timeout, write=read_timeout, pool=connect_timeout
+        )
 
     def download_verified(self, *, bucket: str, key: str, expected_md5: str, dest: str) -> None:
         """下载 → md5 校验 → 校验通过才落地存档；不符抛 Md5Mismatch 不写文件。
@@ -61,3 +66,21 @@ class S3FileClient:
     def get_bytes(self, *, bucket: str, key: str) -> bytes:
         """读取 S3 对象字节（recon→gateway staging 取数；dispatcher 用）。"""
         return self._s3.get_object(Bucket=bucket, Key=key)["Body"].read()  # type: ignore[no-any-return]
+
+    # ---- ADR-0001 P4：presigned URL 上传/下载（lending 无需长期 wedap S3 凭证）----
+
+    def upload_via_presigned_put(self, *, url: str, content: bytes) -> str:
+        """经 wedap 颁发的 presigned PUT URL 上传导入文件（HTTP PUT，无需 S3 凭证）。
+
+        返回内容 SHA-256 小写 hex（同 upload()，供与生成侧 checksum 比对）。非 2xx 抛
+        httpx.HTTPStatusError（URL 过期/越权/不匹配签名前缀由 S3 判定）。
+        """
+        resp = httpx.put(url, content=content, timeout=self._http_timeout)
+        resp.raise_for_status()
+        return hashlib.sha256(content).hexdigest()
+
+    def get_bytes_via_presigned_get(self, *, url: str) -> bytes:
+        """经 wedap 颁发的 presigned GET URL 读取 result 文件（HTTP GET，无需 S3 凭证）。"""
+        resp = httpx.get(url, timeout=self._http_timeout)
+        resp.raise_for_status()
+        return resp.content

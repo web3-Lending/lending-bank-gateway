@@ -3,7 +3,9 @@
 import hashlib
 import io
 
+import httpx
 import pytest
+import respx
 from botocore.stub import Stubber
 
 from app.clients.s3 import Md5Mismatch, S3FileClient
@@ -79,3 +81,40 @@ def test_client_has_explicit_timeouts_and_retries() -> None:  # type: ignore[no-
     # botocore standard 模式把 max_attempts=4 规范成 total_max_attempts=5（+1 初次）
     assert cfg.retries["total_max_attempts"] == 5
     assert cfg.retries["mode"] == "standard"
+
+
+# ---- ADR-0001 P4：presigned URL 上传/下载（HTTP，无需 S3 凭证）----
+
+_PUT_URL = "https://s3.example/wedap/import/loan-detail/LEN/20260701/B1.jsonl?X-Amz-Signature=abc"
+_GET_URL = (
+    "https://s3.example/wedap/result/loan-detail/LEN/20260701/B1_result.json?X-Amz-Signature=xyz"
+)
+
+
+@respx.mock
+def test_upload_via_presigned_put_ok() -> None:
+    route = respx.put(_PUT_URL).mock(return_value=httpx.Response(200))
+    sha = S3FileClient(endpoint_url=None).upload_via_presigned_put(url=_PUT_URL, content=CONTENT)
+    assert sha == hashlib.sha256(CONTENT).hexdigest()
+    assert route.calls.last.request.content == CONTENT  # 字节原样 PUT
+
+
+@respx.mock
+def test_upload_via_presigned_put_non_2xx_raises() -> None:
+    respx.put(_PUT_URL).mock(return_value=httpx.Response(403, text="expired"))
+    with pytest.raises(httpx.HTTPStatusError):
+        S3FileClient(endpoint_url=None).upload_via_presigned_put(url=_PUT_URL, content=CONTENT)
+
+
+@respx.mock
+def test_get_bytes_via_presigned_get_ok() -> None:
+    respx.get(_GET_URL).mock(return_value=httpx.Response(200, content=b"result-json-bytes"))
+    body = S3FileClient(endpoint_url=None).get_bytes_via_presigned_get(url=_GET_URL)
+    assert body == b"result-json-bytes"
+
+
+@respx.mock
+def test_get_bytes_via_presigned_get_non_2xx_raises() -> None:
+    respx.get(_GET_URL).mock(return_value=httpx.Response(404, text="not found"))
+    with pytest.raises(httpx.HTTPStatusError):
+        S3FileClient(endpoint_url=None).get_bytes_via_presigned_get(url=_GET_URL)
