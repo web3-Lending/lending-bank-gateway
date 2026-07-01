@@ -260,11 +260,14 @@ async def deliver_task(
     wedap_client: WedapClient,
     staging_bucket: str,
     wedap_bucket: str,
+    presigned_enabled: bool = False,
 ) -> None:
     """生产投递动作：staging 取字节 → 校 checksum → deliver_batch（上传 wedap + 通知）。
 
-    供 dispatch_delivery_once 的 deliver 参数绑定。staging 读后先校 SHA-256 == 任务记录值，
-    防 staging 损坏把脏字节投给 wedap；deliver_batch 内部再校上传后 checksum（双重）。
+    供 dispatch_delivery_once 的 deliver 参数绑定。staging 读（lending 自有 bucket，boto3）后先校
+    SHA-256 == 任务记录值，防 staging 损坏把脏字节投给 wedap；deliver_batch 内部再校上传后
+    checksum（双重）。presigned_enabled 透传给 deliver_batch，决定 wedap 侧上传走 presigned PUT
+    还是 boto3 直传（staging 读始终 boto3，不受影响）。
     """
     content = await asyncio.to_thread(
         s3_client.get_bytes, bucket=staging_bucket, key=task.staging_key
@@ -283,6 +286,7 @@ async def deliver_task(
         checksum=task.file_checksum,
         file_size=task.file_size,
         total_count=task.total_count,
+        presigned_enabled=presigned_enabled,
     )
 
 
