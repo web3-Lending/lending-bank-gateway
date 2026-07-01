@@ -97,7 +97,8 @@ def make_collect(
     """绑定 S3(拉 _result.json) + recon(转投 line-results) → collect_results_once 的 fetch/post。
 
     fetch: 按 result_key 拉 wedap 写回的 _result.json；NoSuchKey/NotFound/404 = 未就绪 → None。
-    post: 逐条异常行（DUPLICATE/LINE_PARSE_ERROR）转投 recon；全 INGESTED 则跳过不发。
+    post: 逐条异常行（DUPLICATE/LINE_PARSE_ERROR/CONTRACT_INVALID）转投 recon；
+          全 INGESTED 则跳过不发。
     """
 
     async def _fetch(task: WedapImportDeliveryTask) -> bytes | None:
