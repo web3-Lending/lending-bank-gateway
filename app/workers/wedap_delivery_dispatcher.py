@@ -83,8 +83,9 @@ def make_deliver(
 
 _ResultFetch = Callable[[WedapImportDeliveryTask], Awaitable[bytes | None]]
 _ResultPost = Callable[[WedapImportDeliveryTask, ImportResult], Awaitable[None]]
-# recon 入口 LineResultItem.line_status 的 Literal 三值；非此集的行不投 recon（防 422 死循环）
-_VALID_LINE_STATUS = ("INGESTED", "DUPLICATE", "LINE_PARSE_ERROR")
+# recon 入口 LineResultItem.line_status 的 Literal 四值（ADR-0001 §北向回收：recon 已扩
+# CONTRACT_INVALID，见 lending-recon 0039）；非此集的行不投 recon（防非法枚举 422 死循环）。
+_VALID_LINE_STATUS = ("INGESTED", "DUPLICATE", "LINE_PARSE_ERROR", "CONTRACT_INVALID")
 
 
 def make_collect(
