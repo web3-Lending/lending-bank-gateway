@@ -1,5 +1,4 @@
 import json
-import logging
 import pathlib
 
 import httpx
@@ -607,12 +606,32 @@ async def test_notify_gateway_rejection_429_no_error_dict_falls_back() -> None:
 
 
 @respx.mock
-async def test_notify_unknown_status_warns_but_returns(caplog: pytest.LogCaptureFixture) -> None:
+async def test_notify_unknown_status_raises_not_silent_delivered() -> None:
+    # codex P1：未识别 status 若只 warn+return 会被 dispatch 记 DELIVERED（误当受理成功）→ 改抛。
     respx.post(NOTIFY_PATH).mock(return_value=httpx.Response(200, json={"status": "WEIRD_UNSEEN"}))
-    with caplog.at_level(logging.WARNING):
-        resp = await _import_client().notify_batch_uploaded(payload=_payload())
-    assert resp["status"] == "WEIRD_UNSEEN"
-    assert any("WEIRD_UNSEEN" in r.message for r in caplog.records)
+    with pytest.raises(WedapError) as exc:
+        await _import_client().notify_batch_uploaded(payload=_payload())
+    assert exc.value.code == "UNKNOWN_STATUS"
+    assert "WEIRD_UNSEEN" in str(exc.value)
+
+
+@respx.mock
+async def test_notify_missing_status_raises() -> None:
+    # 200 但无 status 字段（且无 success）→ 无法确认受理 → 抛，不静默 DELIVERED。
+    respx.post(NOTIFY_PATH).mock(return_value=httpx.Response(200, json={}))
+    with pytest.raises(WedapError) as exc:
+        await _import_client().notify_batch_uploaded(payload=_payload())
+    assert exc.value.code == "UNKNOWN_STATUS"
+
+
+@respx.mock
+@pytest.mark.parametrize("bad_body", [[1, 2], None, "plain-string", 42])
+async def test_notify_non_dict_body_raises(bad_body) -> None:
+    # codex P2：list / null / 标量体 → body={} → status 缺失 → 抛（不被误当受理成功）。
+    respx.post(NOTIFY_PATH).mock(return_value=httpx.Response(200, json=bad_body))
+    with pytest.raises(WedapError) as exc:
+        await _import_client().notify_batch_uploaded(payload=_payload())
+    assert exc.value.code == "UNKNOWN_STATUS"
 
 
 @respx.mock

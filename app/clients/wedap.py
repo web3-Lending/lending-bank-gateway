@@ -1,12 +1,10 @@
-import logging
 from typing import Any
 
 import httpx
 
-log = logging.getLogger(__name__)
-
 # web2-core BatchUploadedResponse.Status 的 7 值枚举（ADR-0001 §外部错误契约）。
-# lending 须对这 7 值全覆盖分支；未识别 status 告警不静默（防误当受理成功）。
+# lending 须对这 7 值全覆盖分支；未识别 / 缺失 status 直接抛 WedapError（不静默返回，
+# 否则会被 dispatch_delivery_once 当作正常返回记为 DELIVERED → 误当受理成功）。
 KNOWN_BATCH_STATUS = frozenset(
     {
         "ACCEPTED",
@@ -30,7 +28,10 @@ class WedapGatewayRejected(WedapError):
     """网关（APISIX）拒绝：响应带 ``success=false``。区别于上游应用层 401 / 业务响应。
 
     ADR-0001 §外部错误契约：lending 唯一可靠的"网关拒绝"锚点 = ``success`` 字段为 ``false``。
-    ``http_status`` 供上层按错误契约表分类重试（401/403/400 不重试；429/502/503 退避重试）。
+    ``http_status`` 承载网关拒绝的 HTTP 码，供上层按错误契约表分类重试（401/403/400 不重试；
+    429/502/503 退避重试）——分类目前尚未接入 dispatch_delivery_once（当前统一退避重试到上限），
+    见 FU（P1b 重试策略）。注意本类是 WedapError 子类，调用方若按错误契约分流，须先 ``except
+    WedapGatewayRejected`` 再 ``except WedapError``，否则网关拒绝会被后者吞掉。
     """
 
     def __init__(self, http_status: int, code: str | None, message: str | None) -> None:
@@ -266,8 +267,8 @@ class WedapClient:
             （唯一可靠锚点；含 401 key-auth 等 APISIX 内置/自定义插件拒绝）。
           - HTTP 401 且无 success 字段 → 上游应用层 401（apikey 未对齐）→ raise WedapError("401")。
           - 5xx → 服务端错误 → raise（可重试）。
-          - 其余（200/400 业务响应）→ 返回响应体；``status`` 须属 7 值枚举，
-            未识别则告警不静默（防误当受理成功）。
+          - 其余（200/400 业务响应）→ ``status`` 须属 7 值枚举则返回响应体；
+            缺失 / 未识别 status → raise WedapError（不静默返回，否则会被上层记为 DELIVERED）。
         """
         headers = {
             "apikey": self._import_api_key or "",
@@ -280,9 +281,11 @@ class WedapClient:
                 headers=headers,
             )
         try:
-            body = dict(r.json())
+            raw = r.json()
         except ValueError:
-            body = {}  # 5xx / 非 JSON 错误体（如网关纯文本 503）
+            raw = None  # 5xx / 非 JSON 错误体（如网关纯文本 503）
+        # 仅 dict 体可解析；list / null / 标量一律视作无体（后续按 status 缺失处理）。
+        body = raw if isinstance(raw, dict) else {}
 
         # 1) 网关拒绝唯一锚点：success 字段存在且为 false（APISIX/error-response 契约）。
         if body.get("success") is False:
@@ -294,12 +297,13 @@ class WedapClient:
         # 3) 服务端错误 → raise（可重试）。
         if r.status_code >= 500:
             r.raise_for_status()
-        # 4) 业务响应：按 7 值 status 解析；未识别 status 告警不静默（防误当受理成功）。
+        # 4) 业务响应：status 须属 7 值枚举才算合法受理响应；缺失 / 未识别 → 抛（不静默）。
+        #    否则 body={} 或未知 status 会正常返回 → dispatch 记 DELIVERED → 误当受理成功。
         status = body.get("status")
         if status not in KNOWN_BATCH_STATUS:
-            log.warning(
-                "notify_batch_uploaded: unknown wedap batch status: %r (batch=%s)",
-                status,
-                payload.get("importBatchNo"),
+            raise WedapError(
+                "UNKNOWN_STATUS",
+                f"unrecognized/missing wedap batch status: {status!r} "
+                f"(batch={payload.get('importBatchNo')})",
             )
         return body
