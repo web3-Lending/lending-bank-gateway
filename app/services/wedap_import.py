@@ -24,8 +24,8 @@ class UploadChecksumMismatch(Exception):
 
 
 def build_s3_key(*, data_type: str, import_date: str, import_batch_no: str) -> str:
-    """`wedap/import/{dataType}/LEN/{importDate}/{importBatchNo}.jsonl`（spec §4）。"""
-    return f"wedap/import/{data_type}/{CHANNEL_ID}/{import_date}/{import_batch_no}.jsonl"
+    """`lending/import/{dataType}/LEN/{importDate}/{importBatchNo}.jsonl`（spec §4）。"""
+    return f"lending/import/{data_type}/{CHANNEL_ID}/{import_date}/{import_batch_no}.jsonl"
 
 
 async def deliver_batch(

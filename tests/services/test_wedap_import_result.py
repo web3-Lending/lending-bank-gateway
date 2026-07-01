@@ -55,7 +55,9 @@ def test_build_result_key():
         import_date="20260624",
         import_batch_no="BATCH-LEN-20260624-001",
     )
-    assert key == ("wedap/result/interest-accrual/LEN/20260624/BATCH-LEN-20260624-001_result.json")
+    assert key == (
+        "lending/result/interest-accrual/LEN/20260624/BATCH-LEN-20260624-001_result.json"
+    )
 
 
 def test_parse_success_no_bad_lines():
