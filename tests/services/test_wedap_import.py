@@ -20,7 +20,7 @@ def test_build_s3_key():
         import_date="20260624",
         import_batch_no="BATCH-LEN-20260624-001",
     )
-    assert key == "wedap/import/interest-accrual/LEN/20260624/BATCH-LEN-20260624-001.jsonl"
+    assert key == "lending/import/interest-accrual/LEN/20260624/BATCH-LEN-20260624-001.jsonl"
 
 
 def _s3(uploaded_checksum: str) -> MagicMock:
@@ -59,7 +59,7 @@ async def test_deliver_uploads_then_notifies():
 
     s3.upload.assert_called_once_with(
         bucket="wedap-bucket",
-        key="wedap/import/interest-accrual/LEN/20260624/BATCH-LEN-20260624-001.jsonl",
+        key="lending/import/interest-accrual/LEN/20260624/BATCH-LEN-20260624-001.jsonl",
         content=CONTENT,
     )
     assert resp["status"] == "ACCEPTED"

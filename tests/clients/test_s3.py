@@ -47,7 +47,7 @@ def test_expected_md5_case_insensitive(tmp_path) -> None:  # type: ignore[no-unt
 def test_upload_puts_object_and_returns_sha256() -> None:  # type: ignore[no-untyped-def]
     c = S3FileClient(endpoint_url=None)
     stub = Stubber(c._s3)
-    key = "wedap/import/interest-accrual/LEN/20260624/BATCH-LEN-20260624-001.jsonl"
+    key = "lending/import/interest-accrual/LEN/20260624/BATCH-LEN-20260624-001.jsonl"
     stub.add_response("put_object", {}, {"Bucket": "wedap-bucket", "Key": key, "Body": CONTENT})
     stub.activate()
 
@@ -85,9 +85,9 @@ def test_client_has_explicit_timeouts_and_retries() -> None:  # type: ignore[no-
 
 # ---- ADR-0001 P4：presigned URL 上传/下载（HTTP，无需 S3 凭证）----
 
-_PUT_URL = "https://s3.example/wedap/import/loan-detail/LEN/20260701/B1.jsonl?X-Amz-Signature=abc"
+_PUT_URL = "https://s3.example/lending/import/loan-detail/LEN/20260701/B1.jsonl?X-Amz-Signature=abc"
 _GET_URL = (
-    "https://s3.example/wedap/result/loan-detail/LEN/20260701/B1_result.json?X-Amz-Signature=xyz"
+    "https://s3.example/lending/result/loan-detail/LEN/20260701/B1_result.json?X-Amz-Signature=xyz"
 )
 
 

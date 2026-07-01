@@ -1,6 +1,6 @@
 """wedap flow-import 结果回收：解析 wedap 写回 S3 的结果文件（spec §7）。
 
-结果文件路径：``{bucket}/wedap/result/{dataType}/{channelId}/{importDate}/{importBatchNo}_result.json``
+结果文件路径：``{bucket}/lending/result/{dataType}/{channelId}/{importDate}/{importBatchNo}_result.json``
 内容关注：importStatus(SUCCESS/PARTIAL/FAILED) + ingested/duplicate/lineError 计数 +
 lineResults[]（逐行 lineStatus + errorMessage）。PARTIAL/FAILED 时据 lineResults 定位
 坏行，修正后走修复重传（新 importBatchNo + replacesBatchNo）。
@@ -73,8 +73,8 @@ class ImportResult:
 
 
 def build_result_key(*, data_type: str, import_date: str, import_batch_no: str) -> str:
-    """`wedap/result/{dataType}/LEN/{importDate}/{importBatchNo}_result.json`（spec §7）。"""
-    return f"wedap/result/{data_type}/{CHANNEL_ID}/{import_date}/{import_batch_no}_result.json"
+    """`lending/result/{dataType}/LEN/{importDate}/{importBatchNo}_result.json`（spec §7）。"""
+    return f"lending/result/{data_type}/{CHANNEL_ID}/{import_date}/{import_batch_no}_result.json"
 
 
 def parse_result(raw: bytes) -> ImportResult:
