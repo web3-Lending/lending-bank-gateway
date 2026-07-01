@@ -353,6 +353,128 @@ async def test_make_collect_post_skips_invalid_line_status():
     assert len(lr) == 1 and lr[0]["line_no"] == 4  # 只剩合法三值枚举行
 
 
+# --- presigned 结果读取分支（ADR-0001 P4）：request_presign → get_bytes_via_presigned_get ---
+
+
+@pytest.mark.asyncio
+async def test_make_deliver_passes_presigned_enabled():
+    """presigned_enabled=True → deliver_task 走 presigned PUT（request_presign + presigned）。"""
+    s3 = MagicMock()
+    s3.get_bytes = MagicMock(return_value=_CONTENT)  # staging 读始终 boto3
+    s3.upload_via_presigned_put = MagicMock(return_value=_CHECKSUM)
+    s3.upload = MagicMock()
+    wedap = AsyncMock()
+    wedap.request_presign = AsyncMock(return_value="https://s3.ex/put?sig=a")
+    wedap.notify_batch_uploaded = AsyncMock(return_value={"status": "ACCEPTED"})
+
+    task = _task(batch="BATCH-LEN-20260624-001")
+    task.staging_key = "staging/k.jsonl"
+    task.file_checksum = _CHECKSUM
+    task.file_size = len(_CONTENT)
+    task.data_type = "interest-accrual"
+    task.import_date = "20260624"
+
+    deliver = make_deliver(
+        s3, wedap, staging_bucket="stg", wedap_bucket="wedap", presigned_enabled=True
+    )
+    await deliver(task)
+
+    wedap.request_presign.assert_awaited_once()
+    assert wedap.request_presign.await_args.kwargs["operation"] == "UPLOAD"
+    s3.upload_via_presigned_put.assert_called_once()
+    s3.upload.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_make_collect_presigned_fetch_gets_via_url():
+    """presigned_enabled=True → request_presign(RESULT) → get_bytes_via_presigned_get。"""
+    s3 = MagicMock()
+    s3.get_bytes_via_presigned_get = MagicMock(return_value=b'{"importStatus":"SUCCESS"}')
+    s3.get_bytes = MagicMock()  # 不应被调用
+    wedap = AsyncMock()
+    wedap.request_presign = AsyncMock(return_value="https://s3.ex/get?sig=a")
+    fetch, _ = make_collect(
+        s3, AsyncMock(), wedap_bucket="wedap", wedap_client=wedap, presigned_enabled=True
+    )
+
+    raw = await fetch(_task())
+
+    assert raw == b'{"importStatus":"SUCCESS"}'
+    wedap.request_presign.assert_awaited_once()
+    kw = wedap.request_presign.await_args.kwargs
+    assert kw["operation"] == "RESULT"
+    assert kw["channel_id"] == "LEN"
+    s3.get_bytes_via_presigned_get.assert_called_once_with(url="https://s3.ex/get?sig=a")
+    s3.get_bytes.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_make_collect_presigned_fetch_404_returns_none():
+    """presigned GET 404 = _result.json 未就绪 → None（与 boto3 语义一致）。"""
+    import httpx
+
+    s3 = MagicMock()
+    s3.get_bytes_via_presigned_get = MagicMock(
+        side_effect=httpx.HTTPStatusError(
+            "not found",
+            request=httpx.Request("GET", "https://s3.ex/get"),
+            response=httpx.Response(404),
+        )
+    )
+    wedap = AsyncMock()
+    wedap.request_presign = AsyncMock(return_value="https://s3.ex/get?sig=a")
+    fetch, _ = make_collect(
+        s3, AsyncMock(), wedap_bucket="wedap", wedap_client=wedap, presigned_enabled=True
+    )
+
+    assert await fetch(_task()) is None
+
+
+@pytest.mark.asyncio
+async def test_make_collect_presigned_fetch_403_raises():
+    """presigned GET 403（越权/URL 过期）为真错 → 抛（不当未就绪）。"""
+    import httpx
+
+    s3 = MagicMock()
+    s3.get_bytes_via_presigned_get = MagicMock(
+        side_effect=httpx.HTTPStatusError(
+            "forbidden",
+            request=httpx.Request("GET", "https://s3.ex/get"),
+            response=httpx.Response(403),
+        )
+    )
+    wedap = AsyncMock()
+    wedap.request_presign = AsyncMock(return_value="https://s3.ex/get?sig=a")
+    fetch, _ = make_collect(
+        s3, AsyncMock(), wedap_bucket="wedap", wedap_client=wedap, presigned_enabled=True
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await fetch(_task())
+
+
+def test_make_collect_presigned_without_wedap_client_raises():
+    """presigned_enabled=True 但没传 wedap_client → 构造期 ValueError（配置错误早暴露）。"""
+    with pytest.raises(ValueError, match="wedap_client"):
+        make_collect(MagicMock(), AsyncMock(), wedap_bucket="wedap", presigned_enabled=True)
+
+
+@pytest.mark.asyncio
+async def test_make_collect_boto3_branch_default_no_presign():
+    """默认 presigned_enabled=False → boto3 get_bytes，不申请 presign（现网行为不变）。"""
+    s3 = MagicMock()
+    s3.get_bytes = MagicMock(return_value=b'{"importStatus":"SUCCESS"}')
+    wedap = AsyncMock()
+    wedap.request_presign = AsyncMock()
+    fetch, _ = make_collect(s3, AsyncMock(), wedap_bucket="wedap", wedap_client=wedap)
+
+    raw = await fetch(_task())
+
+    assert raw == b'{"importStatus":"SUCCESS"}'
+    s3.get_bytes.assert_called_once()
+    wedap.request_presign.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_make_collect_fetch_notfound_returns_none():
     """部分 S3 兼容实现返回 NotFound 而非 NoSuchKey → 也当未就绪 None（codex P1 LOW-1）。"""

@@ -41,12 +41,33 @@ async def deliver_batch(
     file_size: int,
     total_count: int,
     replaces_batch_no: str | None = None,
+    presigned_enabled: bool = False,
 ) -> dict[str, Any]:
-    """上传 + 通知一次性投递，返回 wedap 通知响应。"""
-    key = build_s3_key(
-        data_type=data_type, import_date=import_date, import_batch_no=import_batch_no
-    )
-    uploaded = await asyncio.to_thread(s3_client.upload, bucket=bucket, key=key, content=content)
+    """上传 + 通知一次性投递，返回 wedap 通知响应。
+
+    上传路径二选一（ADR-0001 P4）：
+      - presigned_enabled=False（默认）：boto3 直传 ``bucket`` + build_s3_key（需 wedap S3 凭证）。
+      - presigned_enabled=True：向 web2-core 申请 presigned PUT URL 再 HTTP PUT（无需长期凭证）。
+    两路径上传后都校验返回的内容 SHA-256 == 生成侧 checksum（防上传损坏），一致才 notify。
+    """
+    if presigned_enabled:
+        url = await wedap_client.request_presign(
+            operation="UPLOAD",
+            data_type=data_type,
+            channel_id=CHANNEL_ID,
+            import_date=import_date,
+            import_batch_no=import_batch_no,
+        )
+        uploaded = await asyncio.to_thread(
+            s3_client.upload_via_presigned_put, url=url, content=content
+        )
+    else:
+        key = build_s3_key(
+            data_type=data_type, import_date=import_date, import_batch_no=import_batch_no
+        )
+        uploaded = await asyncio.to_thread(
+            s3_client.upload, bucket=bucket, key=key, content=content
+        )
     if uploaded != checksum:
         raise UploadChecksumMismatch(f"{uploaded} != {checksum}")
 

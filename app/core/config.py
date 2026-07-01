@@ -21,6 +21,13 @@ class Settings(BaseSettings):
     wedap_delivery_interval_seconds: float = 5.0
     wedap_delivery_max_attempts: int = 5
     wedap_delivery_enabled: bool = False  # wedap 投递 worker 开关（默认关，e2e/部署显式开）
+    wedap_presigned_enabled: bool = False
+    """预签名投递/读取开关（GW_WEDAP_PRESIGNED_ENABLED · ADR-0001 P4）。
+
+    默认 False = 现有 boto3 直传/直读（需长期 wedap S3 凭证），现网行为不变。
+    True = 投递上传先向 web2-core 申请 presigned PUT URL 再 HTTP PUT，结果读取先申请
+    presigned GET URL 再 HTTP GET，lending 无需长期 wedap S3 凭证。
+    """
     # gateway→recon 投递回执回写地址（§4.3）。
     recon_base_url: str = "http://lending-recon:8040"
     # 回执 HMAC 共享密钥（= recon RECON_S2S_HMAC_SECRET）；空=local insecure 占位签名。

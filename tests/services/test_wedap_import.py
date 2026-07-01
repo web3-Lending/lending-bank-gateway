@@ -97,3 +97,56 @@ async def test_upload_checksum_mismatch_raises_and_skips_notify():
     with pytest.raises(UploadChecksumMismatch):
         await _deliver(s3, wedap)
     wedap.notify_batch_uploaded.assert_not_called()  # 上传损坏不通知
+
+
+# --- presigned 分支（ADR-0001 P4）：request_presign → upload_via_presigned_put ---
+
+
+def _presigned_s3(uploaded_checksum: str) -> MagicMock:
+    s3 = MagicMock()
+    s3.upload = MagicMock()  # 不应被调用（presigned 分支）
+    s3.upload_via_presigned_put = MagicMock(return_value=uploaded_checksum)
+    return s3
+
+
+def _presigned_wedap(status: str = "ACCEPTED", url: str = "https://s3.ex/put?sig=a") -> AsyncMock:
+    w = _wedap(status)
+    w.request_presign = AsyncMock(return_value=url)
+    return w
+
+
+@pytest.mark.asyncio
+async def test_deliver_presigned_requests_url_then_puts():
+    s3, wedap = _presigned_s3(CHECKSUM), _presigned_wedap("ACCEPTED")
+    resp = await _deliver(s3, wedap, presigned_enabled=True)
+
+    wedap.request_presign.assert_awaited_once()
+    kw = wedap.request_presign.await_args.kwargs
+    assert kw["operation"] == "UPLOAD"
+    assert kw["data_type"] == "interest-accrual"
+    assert kw["channel_id"] == "LEN"
+    assert kw["import_date"] == "20260624"
+    assert kw["import_batch_no"] == "BATCH-LEN-20260624-001"
+    # presigned PUT 到申请到的 url，boto3 upload 不被调用
+    s3.upload_via_presigned_put.assert_called_once_with(
+        url="https://s3.ex/put?sig=a", content=CONTENT
+    )
+    s3.upload.assert_not_called()
+    assert resp["status"] == "ACCEPTED"
+
+
+@pytest.mark.asyncio
+async def test_deliver_presigned_checksum_mismatch_raises_and_skips_notify():
+    s3, wedap = _presigned_s3("b" * 64), _presigned_wedap()  # 上传后 checksum 不符
+    with pytest.raises(UploadChecksumMismatch):
+        await _deliver(s3, wedap, presigned_enabled=True)
+    wedap.notify_batch_uploaded.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_deliver_boto3_branch_does_not_call_presign():
+    """默认 presigned_enabled=False → 走 boto3 upload，不申请 presign（现网行为不变）。"""
+    s3, wedap = _s3(CHECKSUM), _presigned_wedap()
+    await _deliver(s3, wedap)  # 不传 presigned_enabled → 默认 False
+    s3.upload.assert_called_once()
+    wedap.request_presign.assert_not_awaited()

@@ -227,6 +227,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 app.state.wedap,
                 staging_bucket=settings.wedap_staging_bucket,
                 wedap_bucket=settings.wedap_import_bucket,
+                presigned_enabled=settings.wedap_presigned_enabled,
             )
             wedap_on_terminal = wedap_delivery_dispatcher.make_on_terminal(
                 ReconCallbackClient(
@@ -243,6 +244,8 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     hmac_secret=settings.recon_callback_hmac_secret or None,
                 ),
                 wedap_bucket=settings.wedap_import_bucket,
+                wedap_client=app.state.wedap,
+                presigned_enabled=settings.wedap_presigned_enabled,
             )
             tasks.append(
                 asyncio.create_task(

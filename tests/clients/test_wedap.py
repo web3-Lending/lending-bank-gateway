@@ -7,6 +7,7 @@ import respx
 
 from app.clients.wedap import (
     _IMPORT_PATH,
+    _PRESIGN_PATH,
     KNOWN_BATCH_STATUS,
     WedapClient,
     WedapError,
@@ -761,3 +762,160 @@ async def test_notify_sanitizes_batch_no_in_request_id_header() -> None:
     assert "\r" not in rid and "\n" not in rid and "\t" not in rid
     assert rid.startswith("wedap-import-EVIL--X-Injected:-1")  # : 保留,CR/LF/tab/非ASCII → -
     assert "X-Injected" not in req.headers  # 注入的头名没被当成真头
+
+
+# ---------------------------------------------------------------------------
+# request_presign (flow-import P4 预签名)
+# ---------------------------------------------------------------------------
+
+PRESIGN_PATH = f"{BASE}/bank/api/v1/import/presign"
+
+
+def _presign_ok_body(operation: str, method: str) -> dict:
+    return {
+        "status": "OK",
+        "operation": operation,
+        "method": method,
+        "url": f"https://s3.example/presigned-{operation.lower()}?sig=abc",
+        "objectKey": f"lending/{operation.lower()}/x",
+        "expiresInSeconds": 900,
+    }
+
+
+async def _do_presign(client: WedapClient, operation: str = "UPLOAD") -> str:
+    return await client.request_presign(
+        operation=operation,
+        data_type="interest-accrual",
+        channel_id="LEN",
+        import_date="20260624",
+        import_batch_no="BATCH-LEN-20260624-001",
+    )
+
+
+@respx.mock
+async def test_presign_upload_returns_url() -> None:
+    route = respx.post(PRESIGN_PATH).mock(
+        return_value=httpx.Response(200, json=_presign_ok_body("UPLOAD", "PUT"))
+    )
+    url = await _do_presign(_import_client(), "UPLOAD")
+    assert url == "https://s3.example/presigned-upload?sig=abc"
+    # POST 到 presign 路径 + 请求体带契约字段
+    req = route.calls.last.request
+    body = json.loads(req.content.decode())
+    assert body["operation"] == "UPLOAD"
+    assert body["dataType"] == "interest-accrual"
+    assert body["channelId"] == "LEN"
+    assert body["importBatchNo"] == "BATCH-LEN-20260624-001"
+    assert body["importDate"] == "20260624"
+
+
+@respx.mock
+async def test_presign_result_returns_url() -> None:
+    respx.post(PRESIGN_PATH).mock(
+        return_value=httpx.Response(200, json=_presign_ok_body("RESULT", "GET"))
+    )
+    url = await _do_presign(_import_client(), "RESULT")
+    assert url == "https://s3.example/presigned-result?sig=abc"
+
+
+@respx.mock
+async def test_presign_sends_apikey_header() -> None:
+    route = respx.post(PRESIGN_PATH).mock(
+        return_value=httpx.Response(200, json=_presign_ok_body("UPLOAD", "PUT"))
+    )
+    await _do_presign(_import_client())
+    assert route.calls.last.request.headers["apikey"] == "KEY123"
+
+
+@respx.mock
+async def test_presign_adds_signature_headers_when_secret_set() -> None:
+    """复用 notify 的 HMAC 签名机制：签名头齐全 + 签 _PRESIGN_PATH + 实发 body 字节。"""
+    route = respx.post(PRESIGN_PATH).mock(
+        return_value=httpx.Response(200, json=_presign_ok_body("UPLOAD", "PUT"))
+    )
+    await _do_presign(_signed_client(), "UPLOAD")
+    req = route.calls.last.request
+    assert req.headers["X-Request-Id"] == "wedap-presign-UPLOAD-BATCH-LEN-20260624-001"
+    assert req.headers["X-Timestamp"].isdigit()
+    assert len(req.headers["X-Nonce"]) == 32
+    body_sent = req.content.decode()
+    expected_sig = _hmac_sign(
+        "sign-secret",
+        method="POST",
+        path=_PRESIGN_PATH,
+        timestamp=req.headers["X-Timestamp"],
+        body=body_sent,
+    )
+    assert req.headers["X-Signature"] == expected_sig
+
+
+@respx.mock
+async def test_presign_no_signature_headers_when_secret_empty() -> None:
+    route = respx.post(PRESIGN_PATH).mock(
+        return_value=httpx.Response(200, json=_presign_ok_body("UPLOAD", "PUT"))
+    )
+    await _do_presign(_import_client())
+    req = route.calls.last.request
+    assert "X-Signature" not in req.headers
+    assert "X-Nonce" not in req.headers
+
+
+@respx.mock
+async def test_presign_gateway_rejection_success_false_raises() -> None:
+    respx.post(PRESIGN_PATH).mock(
+        return_value=httpx.Response(
+            401, json={"success": False, "error": {"code": "UNAUTHORIZED", "message": "x"}}
+        )
+    )
+    with pytest.raises(WedapGatewayRejected) as exc:
+        await _do_presign(_import_client())
+    assert exc.value.http_status == 401
+    assert exc.value.code == "UNAUTHORIZED"
+
+
+@respx.mock
+async def test_presign_gateway_rejection_error_non_dict_falls_back() -> None:
+    # success:false 但 error 非 dict（缺失/字符串）→ code/message 走兜底 GATEWAY_REJECTED。
+    respx.post(PRESIGN_PATH).mock(
+        return_value=httpx.Response(429, json={"success": False, "error": "boom"})
+    )
+    with pytest.raises(WedapGatewayRejected) as exc:
+        await _do_presign(_import_client())
+    assert exc.value.http_status == 429
+    assert exc.value.code == "GATEWAY_REJECTED"
+
+
+@respx.mock
+async def test_presign_plain_401_raises_wedap_error() -> None:
+    respx.post(PRESIGN_PATH).mock(return_value=httpx.Response(401, json={"status": "UNAUTHORIZED"}))
+    with pytest.raises(WedapError) as exc:
+        await _do_presign(_import_client())
+    assert exc.value.code == "401"
+
+
+@respx.mock
+async def test_presign_5xx_raises() -> None:
+    respx.post(PRESIGN_PATH).mock(return_value=httpx.Response(503, text="unavailable"))
+    with pytest.raises(httpx.HTTPStatusError):
+        await _do_presign(_import_client())
+
+
+@respx.mock
+async def test_presign_status_not_ok_raises() -> None:
+    respx.post(PRESIGN_PATH).mock(
+        return_value=httpx.Response(200, json={"status": "ERROR", "message": "bad op"})
+    )
+    with pytest.raises(WedapError) as exc:
+        await _do_presign(_import_client())
+    assert exc.value.code == "PRESIGN_FAILED"
+
+
+@respx.mock
+@pytest.mark.parametrize("bad_url", [None, "", 42, []])
+async def test_presign_missing_or_bad_url_raises(bad_url) -> None:
+    respx.post(PRESIGN_PATH).mock(
+        return_value=httpx.Response(200, json={"status": "OK", "url": bad_url})
+    )
+    with pytest.raises(WedapError) as exc:
+        await _do_presign(_import_client())
+    assert exc.value.code == "PRESIGN_FAILED"

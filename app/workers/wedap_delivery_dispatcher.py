@@ -10,6 +10,7 @@ import datetime as dt
 import logging
 from collections.abc import Awaitable, Callable
 
+import httpx
 from botocore.exceptions import ClientError  # type: ignore[import-untyped]
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -24,6 +25,7 @@ from app.services.wedap_delivery import (
     mark_callback_sent,
     resend_pending_callbacks_once,
 )
+from app.services.wedap_import import CHANNEL_ID
 from app.services.wedap_import_result import ImportResult, build_result_key
 
 logger = logging.getLogger(__name__)
@@ -66,8 +68,13 @@ def make_deliver(
     *,
     staging_bucket: str,
     wedap_bucket: str,
+    presigned_enabled: bool = False,
 ) -> Callable[[WedapImportDeliveryTask], Awaitable[None]]:
-    """把 deliver_task 绑定客户端 + bucket → dispatch_delivery_once 的 deliver 闭包。"""
+    """把 deliver_task 绑定客户端 + bucket → dispatch_delivery_once 的 deliver 闭包。
+
+    presigned_enabled=True 时 wedap 侧上传走 presigned PUT（无需长期 S3 凭证）；False（默认）
+    走 boto3 直传，现网行为不变。
+    """
 
     async def _deliver(task: WedapImportDeliveryTask) -> None:
         await deliver_task(
@@ -76,6 +83,7 @@ def make_deliver(
             wedap_client=wedap_client,
             staging_bucket=staging_bucket,
             wedap_bucket=wedap_bucket,
+            presigned_enabled=presigned_enabled,
         )
 
     return _deliver
@@ -93,15 +101,42 @@ def make_collect(
     recon_client: ReconCallbackClient,
     *,
     wedap_bucket: str,
+    wedap_client: WedapClient | None = None,
+    presigned_enabled: bool = False,
 ) -> tuple[_ResultFetch, _ResultPost]:
     """绑定 S3(拉 _result.json) + recon(转投 line-results) → collect_results_once 的 fetch/post。
 
-    fetch: 按 result_key 拉 wedap 写回的 _result.json；NoSuchKey/NotFound/404 = 未就绪 → None。
+    fetch 二选一（ADR-0001 P4）：
+      - presigned_enabled=False（默认）：boto3 直读 ``wedap_bucket`` + build_result_key；
+        NoSuchKey/NotFound/404 = 未就绪 → None（需 wedap S3 凭证）。
+      - presigned_enabled=True：向 web2-core 申请 presigned GET URL 再 HTTP GET；presigned GET
+        404 = 未就绪 → None（与 boto3 语义一致），需 wedap_client（不传则 raise）。
     post: 逐条异常行（DUPLICATE/LINE_PARSE_ERROR/CONTRACT_INVALID）转投 recon；
           全 INGESTED 则跳过不发。
     """
+    if presigned_enabled and wedap_client is None:
+        raise ValueError("make_collect: presigned_enabled=True 需传 wedap_client")
+    # 仅 presigned 模式绑定 presign client（否则 None）；_fetch 以 `is not None` 二分走 presigned
+    # / boto3，免去闭包内 assert（S101）。boto3 模式即便误传 wedap_client 也不用它。
+    presign_client = wedap_client if presigned_enabled else None
 
     async def _fetch(task: WedapImportDeliveryTask) -> bytes | None:
+        if presign_client is not None:
+            url = await presign_client.request_presign(
+                operation="RESULT",
+                data_type=task.data_type,
+                channel_id=CHANNEL_ID,
+                import_date=task.import_date,
+                import_batch_no=task.import_batch_no,
+            )
+            try:
+                return await asyncio.to_thread(s3_client.get_bytes_via_presigned_get, url=url)
+            except httpx.HTTPStatusError as exc:
+                # presigned GET 404 = _result.json 未就绪（wedap 仍在处理）→ None（与 boto3 一致）；
+                # 其余（403 越权/URL 过期 / 5xx）为真错，抛。
+                if exc.response.status_code == 404:
+                    return None
+                raise
         key = build_result_key(
             data_type=task.data_type,
             import_date=task.import_date,
