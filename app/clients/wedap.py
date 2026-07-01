@@ -1,12 +1,44 @@
+import logging
 from typing import Any
 
 import httpx
+
+log = logging.getLogger(__name__)
+
+# web2-core BatchUploadedResponse.Status 的 7 值枚举（ADR-0001 §外部错误契约）。
+# lending 须对这 7 值全覆盖分支；未识别 status 告警不静默（防误当受理成功）。
+KNOWN_BATCH_STATUS = frozenset(
+    {
+        "ACCEPTED",
+        "DUPLICATE_BATCH",
+        "DUPLICATE_BATCH_CONFLICT",
+        "FILE_NOT_FOUND",
+        "CHECKSUM_MISMATCH",
+        "INVALID_PARAM",
+        "REPLACES_BATCH_NOT_FOUND",
+    }
+)
 
 
 class WedapError(Exception):
     def __init__(self, code: str, msg: str) -> None:
         super().__init__(f"wedap {code}: {msg}")
         self.code = code
+
+
+class WedapGatewayRejected(WedapError):
+    """网关（APISIX）拒绝：响应带 ``success=false``。区别于上游应用层 401 / 业务响应。
+
+    ADR-0001 §外部错误契约：lending 唯一可靠的"网关拒绝"锚点 = ``success`` 字段为 ``false``。
+    ``http_status`` 供上层按错误契约表分类重试（401/403/400 不重试；429/502/503 退避重试）。
+    """
+
+    def __init__(self, http_status: int, code: str | None, message: str | None) -> None:
+        super().__init__(
+            code or "GATEWAY_REJECTED",
+            message or f"gateway rejected (HTTP {http_status})",
+        )
+        self.http_status = http_status
 
 
 class WedapClient:
@@ -229,11 +261,13 @@ class WedapClient:
         payload 必填 dataType/channelId/importBatchNo/importDate/fileChecksum/fileSize，
         可选 payloadSchemaVersion/totalCount/replacesBatchNo。
 
-        HTTP 状态处理：
-          - 200/400 → 返回响应体（``status`` 字段载明 ACCEPTED/DUPLICATE_BATCH/
-            CHECKSUM_MISMATCH/INVALID_PARAM 等，调用方据此决定重传/修复，**不抛**）。
-          - 401 → apikey 失败 → raise WedapError("401")。
+        响应判定（ADR-0001 §外部错误契约，顺序敏感）：
+          - ``success`` 字段为 ``false`` → 网关（APISIX）拒绝 → raise WedapGatewayRejected
+            （唯一可靠锚点；含 401 key-auth 等 APISIX 内置/自定义插件拒绝）。
+          - HTTP 401 且无 success 字段 → 上游应用层 401（apikey 未对齐）→ raise WedapError("401")。
           - 5xx → 服务端错误 → raise（可重试）。
+          - 其余（200/400 业务响应）→ 返回响应体；``status`` 须属 7 值枚举，
+            未识别则告警不静默（防误当受理成功）。
         """
         headers = {
             "apikey": self._import_api_key or "",
@@ -245,8 +279,27 @@ class WedapClient:
                 json=payload,
                 headers=headers,
             )
+        try:
+            body = dict(r.json())
+        except ValueError:
+            body = {}  # 5xx / 非 JSON 错误体（如网关纯文本 503）
+
+        # 1) 网关拒绝唯一锚点：success 字段存在且为 false（APISIX/error-response 契约）。
+        if body.get("success") is False:
+            err = body.get("error") or {}
+            raise WedapGatewayRejected(r.status_code, err.get("code"), err.get("message"))
+        # 2) 上游应用层 401（无 success 字段，Spring 形态）→ apikey 未对齐。
         if r.status_code == 401:
             raise WedapError("401", "import apikey rejected")
+        # 3) 服务端错误 → raise（可重试）。
         if r.status_code >= 500:
             r.raise_for_status()
-        return dict(r.json())
+        # 4) 业务响应：按 7 值 status 解析；未识别 status 告警不静默（防误当受理成功）。
+        status = body.get("status")
+        if status not in KNOWN_BATCH_STATUS:
+            log.warning(
+                "notify_batch_uploaded: unknown wedap batch status: %r (batch=%s)",
+                status,
+                payload.get("importBatchNo"),
+            )
+        return body
