@@ -20,15 +20,32 @@ STATUS_SUCCESS = "SUCCESS"
 STATUS_PARTIAL = "PARTIAL"
 STATUS_FAILED = "FAILED"
 
+# web2-core ErrorCode 枚举（9 值，与 line_status 正交）——仅作契约认知/观测参考；
+# lending 原样透传 errorCode 不校验枚举（未来 wedap 加值不阻塞回收）。ADR-0001 P5。
+KNOWN_LINE_ERROR_CODE = frozenset(
+    {
+        "INVALID_JSON",
+        "DEDUP_KEY_MISSING",
+        "REQUIRED_FIELD_MISSING",
+        "INVALID_NUMBER",
+        "INVALID_DATE_FORMAT",
+        "INVALID_ENUM",
+        "UNSUPPORTED_SCHEMA_VERSION",
+        "CONTRACT_SHAPE_MISMATCH",
+        "UNKNOWN_PARSE_ERROR",
+    }
+)
+
 
 @dataclass(frozen=True)
 class BadLine:
-    """一条非 INGESTED 的结果行（DUPLICATE / LINE_PARSE_ERROR）。"""
+    """一条非 INGESTED 的结果行（DUPLICATE / LINE_PARSE_ERROR / CONTRACT_INVALID）。"""
 
     line_no: int | None
     line_status: str
     error_message: str | None
-    # wedap LineResult.errorCode（8 值枚举）；DLQ 按它分类，成功/DUPLICATE 行 null。
+    # wedap LineResult.errorCode（web2-core ErrorCode **9 值**枚举，见 KNOWN_LINE_ERROR_CODE）；
+    # DLQ 按它分类，成功/DUPLICATE 行 null。lending 原样透传（截 recon max_length=64）、不校验枚举。
     error_code: str | None = None
     # 结构化去重键；LINE_PARSE_ERROR 行 null（失败行回映靠 lineNo+manifest）。
     dedup_key: dict[str, str] | None = None
