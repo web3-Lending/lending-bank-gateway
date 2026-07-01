@@ -96,7 +96,11 @@ def test_upload_via_presigned_put_ok() -> None:
     route = respx.put(_PUT_URL).mock(return_value=httpx.Response(200))
     sha = S3FileClient(endpoint_url=None).upload_via_presigned_put(url=_PUT_URL, content=CONTENT)
     assert sha == hashlib.sha256(CONTENT).hexdigest()
-    assert route.calls.last.request.content == CONTENT  # 字节原样 PUT
+    req = route.calls.last.request
+    assert req.content == CONTENT  # 字节原样 PUT
+    # presigned URL 约束：不得加 Authorization / 显式 Content-Type，否则破坏 S3 签名
+    assert "authorization" not in {k.lower() for k in req.headers}
+    assert "content-type" not in {k.lower() for k in req.headers}
 
 
 @respx.mock
