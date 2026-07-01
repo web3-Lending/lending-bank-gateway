@@ -340,6 +340,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         base_url=settings.wedap_base_url,
         timeout_seconds=settings.wedap_timeout_seconds,
         import_api_key=settings.wedap_import_api_key,
+        import_signing_secret=settings.wedap_import_signing_secret,
     )
     # outbox_targets 供 dispatcher worker（T24）读取；key=target 名，value=目标 URL
     app.state.outbox_targets = {

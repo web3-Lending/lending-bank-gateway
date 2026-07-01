@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     wedap_staging_bucket: str = "lending-wedap-staging"
     wedap_import_bucket: str = "wedap-flow-import"
     wedap_import_api_key: str = ""  # wedap flow-import notify apikey（FLOW_IMPORT_API_KEYS 之一）
+    # HMAC 签名密钥（对齐 APISIX LENDING consumer signing_key）。切流到 APISIX 后必配，
+    # 为空=直连 baffle 模式不签名（ADR-0001 P1b）。
+    wedap_import_signing_secret: str = ""
     wedap_delivery_interval_seconds: float = 5.0
     wedap_delivery_max_attempts: int = 5
     wedap_delivery_enabled: bool = False  # wedap 投递 worker 开关（默认关，e2e/部署显式开）

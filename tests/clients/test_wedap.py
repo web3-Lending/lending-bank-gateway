@@ -6,10 +6,12 @@ import pytest
 import respx
 
 from app.clients.wedap import (
+    _IMPORT_PATH,
     KNOWN_BATCH_STATUS,
     WedapClient,
     WedapError,
     WedapGatewayRejected,
+    _hmac_sign,
 )
 
 FIX = pathlib.Path(__file__).parent.parent / "fixtures" / "wedap"
@@ -664,3 +666,75 @@ def test_known_batch_status_is_the_seven_web2core_values() -> None:
         "INVALID_PARAM",
         "REPLACES_BATCH_NOT_FOUND",
     }
+
+
+# --- HMAC 签名（ADR-0001 P1b：切流到 APISIX 前 lending 须签名）---
+
+
+def _signed_client() -> WedapClient:
+    return WedapClient(
+        base_url=BASE,
+        timeout_seconds=1.0,
+        import_api_key="KEY123",
+        import_signing_secret="sign-secret",  # noqa: S106 - test fixture secret
+    )
+
+
+def test_hmac_sign_matches_apisix_contract() -> None:
+    # 对齐 hmac-sign.lua: HMAC-SHA256(METHOD\nPATH\nTS\nBODY) base64；与 openssl 手算一致。
+    import base64
+    import hashlib
+    import hmac as _h
+
+    sig = _hmac_sign("s", method="POST", path="/p", timestamp="123", body='{"a":1}')
+    expected = base64.b64encode(
+        _h.new(b"s", b"POST\n/p\n123\n" + b'{"a":1}', hashlib.sha256).digest()
+    ).decode()
+    assert sig == expected
+
+
+def test_hmac_sign_omits_body_when_empty() -> None:
+    # body 为空时签名串不拼 BODY 段（与 lua 一致）。
+    assert _hmac_sign("s", method="GET", path="/p", timestamp="1", body="") == _hmac_sign(
+        "s", method="GET", path="/p", timestamp="1", body=""
+    )
+    import base64
+    import hashlib
+    import hmac as _h
+
+    expected = base64.b64encode(_h.new(b"s", b"GET\n/p\n1", hashlib.sha256).digest()).decode()
+    assert _hmac_sign("s", method="GET", path="/p", timestamp="1", body="") == expected
+
+
+@respx.mock
+async def test_notify_adds_signature_headers_when_secret_set() -> None:
+    route = respx.post(NOTIFY_PATH).mock(
+        return_value=httpx.Response(200, json={"status": "ACCEPTED"})
+    )
+    await _signed_client().notify_batch_uploaded(payload=_payload())
+    req = route.calls.last.request
+    # 必填头齐 + 签名与实际发送的 body 字节一致
+    assert req.headers["X-Request-Id"] == "wedap-import-BATCH-LEN-20260624-001"
+    assert req.headers["X-Timestamp"].isdigit()
+    assert len(req.headers["X-Nonce"]) == 32
+    body_sent = req.content.decode()
+    expected_sig = _hmac_sign(
+        "sign-secret",
+        method="POST",
+        path=_IMPORT_PATH,
+        timestamp=req.headers["X-Timestamp"],
+        body=body_sent,
+    )
+    assert req.headers["X-Signature"] == expected_sig
+
+
+@respx.mock
+async def test_notify_no_signature_headers_when_secret_empty() -> None:
+    # 向后兼容：未配签名密钥（直连 baffle 模式）→ 不加签名头。
+    route = respx.post(NOTIFY_PATH).mock(
+        return_value=httpx.Response(200, json={"status": "ACCEPTED"})
+    )
+    await _import_client().notify_batch_uploaded(payload=_payload())
+    req = route.calls.last.request
+    assert "X-Signature" not in req.headers
+    assert "X-Nonce" not in req.headers

@@ -1,6 +1,29 @@
+import base64
+import hashlib
+import hmac
+import json
+import time
+import uuid
 from typing import Any
 
 import httpx
+
+# flow-import notify 的入站路径（APISIX 专用 route5，见 ADR-0001 P2）；HMAC 签名串用它。
+_IMPORT_PATH = "/bank/api/v1/import/batch-uploaded"
+
+
+def _hmac_sign(secret: str, *, method: str, path: str, timestamp: str, body: str) -> str:
+    """按 wedap APISIX hmac-sign 契约签名：HMAC-SHA256(METHOD\\nPATH\\nTIMESTAMP\\nBODY) → base64。
+
+    与 recon 回调的签名方案不同（那个签 X-Body-SHA256）；此处对齐 APISIX hmac-sign.lua：
+    签名串 = ``METHOD + "\\n" + PATH + "\\n" + TIMESTAMP + "\\n" + BODY``（BODY 非空时才拼）。
+    """
+    sign_str = f"{method}\n{path}\n{timestamp}"
+    if body:
+        sign_str += f"\n{body}"
+    digest = hmac.new(secret.encode(), sign_str.encode(), hashlib.sha256).digest()
+    return base64.b64encode(digest).decode()
+
 
 # web2-core BatchUploadedResponse.Status 的 7 值枚举（ADR-0001 §外部错误契约）。
 # lending 须对这 7 值全覆盖分支；未识别 / 缺失 status 直接抛 WedapError（不静默返回，
@@ -54,10 +77,14 @@ class WedapClient:
         base_url: str,
         timeout_seconds: float,
         import_api_key: str | None = None,
+        import_signing_secret: str | None = None,
     ) -> None:
         self._base = base_url.rstrip("/")
         self._timeout = timeout_seconds
         self._import_api_key = import_api_key
+        # HMAC 签名密钥（对齐 APISIX LENDING consumer 的 signing_key）。为空 = 不签名
+        # （P0/P1 直连 baffle 无 APISIX 时；切流到 APISIX 后必须配，否则被 hmac-sign 拦 400）。
+        self._import_signing_secret = import_signing_secret
 
     def _headers(self, tenant_id: str, request_id: str) -> dict[str, str]:
         return {
@@ -270,14 +297,30 @@ class WedapClient:
           - 其余（200/400 业务响应）→ ``status`` 须属 7 值枚举则返回响应体；
             缺失 / 未识别 status → raise WedapError（不静默返回，否则会被上层记为 DELIVERED）。
         """
+        # 自行序列化 body → 签名的字节与发送的字节完全一致（json= 会重新序列化，可能不一致）。
+        body_bytes = json.dumps(payload, separators=(",", ":")).encode()
         headers = {
             "apikey": self._import_api_key or "",
             "Content-Type": "application/json",
         }
+        # 切流到 APISIX 后必须带 X-Request-Id + HMAC 签名头（request-id-check / hmac-sign /
+        # anti-replay 缺则 400）。签名密钥未配 = 直连 baffle 模式，不加签名头（向后兼容）。
+        if self._import_signing_secret:
+            timestamp = str(int(time.time()))
+            headers["X-Request-Id"] = f"wedap-import-{payload.get('importBatchNo', '')}"
+            headers["X-Timestamp"] = timestamp
+            headers["X-Nonce"] = uuid.uuid4().hex
+            headers["X-Signature"] = _hmac_sign(
+                self._import_signing_secret,
+                method="POST",
+                path=_IMPORT_PATH,
+                timestamp=timestamp,
+                body=body_bytes.decode(),
+            )
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             r = await client.post(
-                f"{self._base}/bank/api/v1/import/batch-uploaded",
-                json=payload,
+                f"{self._base}{_IMPORT_PATH}",
+                content=body_bytes,
                 headers=headers,
             )
         try:
