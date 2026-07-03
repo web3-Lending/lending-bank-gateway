@@ -18,6 +18,21 @@ from app.clients.wedap import WedapClient
 CHANNEL_ID = "LEN"
 PAYLOAD_SCHEMA_VERSION = "1.0"
 
+# wedap 受理类 status（§6.1 护栏②）：KNOWN_BATCH_STATUS 7 值中真正代表"批次已被 wedap 接收、
+# 后续会出 _result.json"的两值。其余 5 值（FILE_NOT_FOUND / CHECKSUM_MISMATCH / INVALID_PARAM /
+# DUPLICATE_BATCH_CONFLICT / REPLACES_BATCH_NOT_FOUND）为业务拒绝——deliver_task 抛
+# WedapBatchRejected 进 dispatch 退避重试（文件层问题重传可自愈；确定性错误重试到上限 FAILED），
+# 不再被误记 DELIVERED（旧行为的 silent-failure：拒绝批永远等不到 result）。
+ACCEPTED_BATCH_STATUS = frozenset({"ACCEPTED", "DUPLICATE_BATCH"})
+
+
+class WedapBatchRejected(Exception):
+    """wedap notify 返回业务拒绝 status（KNOWN_BATCH_STATUS 中非受理类的 5 值）。"""
+
+    def __init__(self, status: str, message: str | None) -> None:
+        super().__init__(f"wedap batch rejected: {status} ({message})")
+        self.status = status
+
 
 class UploadChecksumMismatch(Exception):
     """上传后 S3 内容 SHA-256 与生成侧 BatchFile.checksum 不一致（上传损坏）。"""

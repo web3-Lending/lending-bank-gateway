@@ -21,6 +21,20 @@ class Settings(BaseSettings):
     wedap_delivery_interval_seconds: float = 5.0
     wedap_delivery_max_attempts: int = 5
     wedap_delivery_enabled: bool = False  # wedap 投递 worker 开关（默认关，e2e/部署显式开）
+    # §6.1 五护栏（切流 silent-failure 防护）配置。
+    wedap_result_scan_anchor_hour: int = 2
+    """wedap BatchScanScheduler 每日运行点的 UTC 小时（GW_WEDAP_RESULT_SCAN_ANCHOR_HOUR）。
+
+    护栏②：受理时 result_deadline_at = 受理后下一个 anchor 时刻 + grace。默认 2 对齐
+    web2-core 默认 cron ``0 0 2 * * ?``；wedap 侧改 cron 时同步调整本值。
+    """
+    wedap_result_grace_minutes: float = 30.0
+    """scanner 窗口后的 result 宽限分钟数（GW_WEDAP_RESULT_GRACE_MINUTES，§6.1 定 30min）。"""
+    wedap_delivery_pending_max_age_seconds: float = 1800.0
+    """任务停留 PENDING/SENDING 超此秒数 → PENDING_STUCK 告警（护栏③，默认 30min）。
+    GW_WEDAP_DELIVERY_PENDING_MAX_AGE_SECONDS"""
+    wedap_delivery_alert_batch_limit: int = 100
+    """每轮护栏告警扫描的行上限（GW_WEDAP_DELIVERY_ALERT_BATCH_LIMIT）。"""
     wedap_presigned_enabled: bool = False
     """预签名投递/读取开关（GW_WEDAP_PRESIGNED_ENABLED · ADR-0001 P4）。
 

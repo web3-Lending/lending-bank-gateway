@@ -404,6 +404,58 @@
         }
       }
     },
+    "/api/v1/admin/wedap-import/delivery-report": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Wedap Delivery Report",
+        "description": "§6.1 护栏⑤：wedap 投递报告——gateway acceptance 与 result closure 分开统计。\n\nacceptance（受理面）：按 status 计数 + 已受理数（accepted_at 非空）。\nresult_closure（结果闭环面）：DELIVERED 中已回收 / 未回收 / 超截止未回收（overdue）。\nalerts：wedap_delivery_alert 按 kind 计数（PENDING_STUCK / RESULT_OVERDUE）。\n两面分开呈现，\"notify 受理成功\"不再被误读为\"批次已闭环\"。可选 import_date（YYYYMMDD）过滤。",
+        "operationId": "wedap_delivery_report_api_v1_admin_wedap_import_delivery_report_get",
+        "parameters": [
+          {
+            "name": "import_date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Import Date"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Wedap Delivery Report Api V1 Admin Wedap Import Delivery Report Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/recon/notify": {
       "post": {
         "tags": [

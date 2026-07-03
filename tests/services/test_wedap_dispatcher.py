@@ -257,3 +257,241 @@ async def test_reclaim_keeps_fresh_sending(factory):
     await _insert(factory, status="SENDING", locked_at=fresh)
     await _reclaim_stale_sending(factory, now=NOW, claim_timeout_seconds=300)
     assert (await _get_task(factory, "BATCH-LEN-20260624-902")).status == "SENDING"
+
+
+# ─────────────────────── §6.1 五护栏（护栏②③④） ───────────────────────
+
+from app.models.wedap_delivery_alert import WedapDeliveryAlert  # noqa: E402
+from app.services.wedap_delivery import (  # noqa: E402
+    alert_stuck_deliveries,
+    compute_result_deadline,
+)
+
+_DEADLINE = dt.datetime(2026, 6, 25, 2, 30, tzinfo=dt.UTC)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_delivered_records_guardrail_fields(factory):
+    """护栏②：受理成功落 accepted_at / result_file_path / result_deadline_at。"""
+    await _seed(factory)
+
+    async def deliver(task):
+        return {"status": "ACCEPTED", "resultFilePath": "lending/import/x/_result.json"}
+
+    n = await dispatch_delivery_once(
+        factory, deliver=deliver, now=NOW, result_deadline=lambda now: _DEADLINE
+    )
+    assert n == 1
+    task = await _get_task(factory)
+    assert task.status == "DELIVERED"
+    assert task.accepted_at is not None
+    assert task.result_file_path == "lending/import/x/_result.json"
+    assert task.result_deadline_at is not None
+    assert task.result_deadline_at.replace(tzinfo=dt.UTC) == _DEADLINE
+
+
+@pytest.mark.asyncio
+async def test_dispatch_delivered_none_response_still_accepts(factory):
+    """deliver 返回 None（无响应体）→ accepted_at 仍置，path/deadline 留空不崩。"""
+    await _seed(factory)
+
+    async def deliver(task):
+        return None
+
+    await dispatch_delivery_once(factory, deliver=deliver, now=NOW)
+    task = await _get_task(factory)
+    assert task.status == "DELIVERED"
+    assert task.accepted_at is not None
+    assert task.result_file_path is None
+    assert task.result_deadline_at is None
+
+
+@pytest.mark.asyncio
+async def test_dispatch_non_str_resultfilepath_ignored(factory):
+    """resultFilePath 非 str（wedap 回脏值）→ 落 None，不带毒进库。"""
+    await _seed(factory)
+
+    async def deliver(task):
+        return {"status": "ACCEPTED", "resultFilePath": 12345}
+
+    await dispatch_delivery_once(factory, deliver=deliver, now=NOW)
+    task = await _get_task(factory)
+    assert task.result_file_path is None
+
+
+def test_compute_result_deadline_before_anchor():
+    """当日 anchor 未到 → 当日 anchor + grace。"""
+    now = dt.datetime(2026, 6, 24, 1, 0, tzinfo=dt.UTC)
+    got = compute_result_deadline(now, anchor_hour=2, grace_minutes=30)
+    assert got == dt.datetime(2026, 6, 24, 2, 30, tzinfo=dt.UTC)
+
+
+def test_compute_result_deadline_after_anchor():
+    """当日 anchor 已过 → 次日 anchor + grace。"""
+    now = dt.datetime(2026, 6, 24, 3, 0, tzinfo=dt.UTC)
+    got = compute_result_deadline(now, anchor_hour=2, grace_minutes=30)
+    assert got == dt.datetime(2026, 6, 25, 2, 30, tzinfo=dt.UTC)
+
+
+def test_compute_result_deadline_at_anchor_takes_next_day():
+    """正好落在 anchor 时刻 → 保守取次日窗口。"""
+    now = dt.datetime(2026, 6, 24, 2, 0, tzinfo=dt.UTC)
+    got = compute_result_deadline(now, anchor_hour=2, grace_minutes=30)
+    assert got == dt.datetime(2026, 6, 25, 2, 30, tzinfo=dt.UTC)
+
+
+async def _get_alerts(factory):
+    async with factory() as s:
+        from sqlalchemy import select
+
+        return list((await s.execute(select(WedapDeliveryAlert))).scalars().all())
+
+
+@pytest.mark.asyncio
+async def test_alert_pending_stuck_dedup(factory):
+    """护栏③：PENDING 超龄 → 告警一次；重复扫描不再新增（唯一约束去重）。"""
+    await _seed(factory)  # created_at = 现在（sqlite server_default）
+    later = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=3600)
+
+    first = await alert_stuck_deliveries(
+        factory, now=later, pending_max_age_seconds=1800.0, batch_limit=100
+    )
+    again = await alert_stuck_deliveries(
+        factory, now=later, pending_max_age_seconds=1800.0, batch_limit=100
+    )
+    assert first == 1
+    assert again == 0
+    alerts = await _get_alerts(factory)
+    assert len(alerts) == 1
+    assert alerts[0].kind == "PENDING_STUCK"
+    assert alerts[0].import_batch_no == "BATCH-LEN-20260624-001"
+    assert "status=PENDING" in alerts[0].detail
+
+
+@pytest.mark.asyncio
+async def test_alert_pending_fresh_not_alerted(factory):
+    """未超龄的 PENDING 不告警。"""
+    await _seed(factory)
+    n = await alert_stuck_deliveries(
+        factory,
+        now=dt.datetime.now(dt.UTC),
+        pending_max_age_seconds=1800.0,
+        batch_limit=100,
+    )
+    assert n == 0
+    assert await _get_alerts(factory) == []
+
+
+@pytest.mark.asyncio
+async def test_alert_result_overdue(factory):
+    """护栏④：DELIVERED 超截止未回收 → RESULT_OVERDUE 告警。"""
+    await _seed(factory)
+
+    async def deliver(task):
+        return {"status": "ACCEPTED"}
+
+    await dispatch_delivery_once(
+        factory, deliver=deliver, now=NOW, result_deadline=lambda now: _DEADLINE
+    )
+    after_deadline = _DEADLINE + dt.timedelta(minutes=1)
+    n = await alert_stuck_deliveries(
+        factory, now=after_deadline, pending_max_age_seconds=86400.0, batch_limit=100
+    )
+    assert n == 1
+    alerts = await _get_alerts(factory)
+    assert alerts[0].kind == "RESULT_OVERDUE"
+    assert "deadline=" in alerts[0].detail
+
+
+@pytest.mark.asyncio
+async def test_alert_result_within_deadline_not_alerted(factory):
+    """截止未到 / 无 deadline 的 DELIVERED 不告警。"""
+    await _seed(factory)
+
+    async def deliver(task):
+        return {"status": "ACCEPTED"}
+
+    # 无 deadline（旧存量行为）：不注入 result_deadline
+    await dispatch_delivery_once(factory, deliver=deliver, now=NOW)
+    n = await alert_stuck_deliveries(
+        factory,
+        now=dt.datetime.now(dt.UTC) + dt.timedelta(days=365),
+        pending_max_age_seconds=10.0**9,
+        batch_limit=100,
+    )
+    assert n == 0
+
+
+@pytest.mark.asyncio
+async def test_alert_result_collected_not_alerted(factory):
+    """已回收 result 的 DELIVERED 不告警（即使超截止）。"""
+    await _seed(factory)
+
+    async def deliver(task):
+        return {"status": "ACCEPTED"}
+
+    await dispatch_delivery_once(
+        factory, deliver=deliver, now=NOW, result_deadline=lambda now: _DEADLINE
+    )
+    async with factory() as s:
+        from sqlalchemy import update
+
+        await s.execute(
+            update(WedapImportDeliveryTask).values(result_collected_at=NOW)
+        )
+        await s.commit()
+    n = await alert_stuck_deliveries(
+        factory,
+        now=_DEADLINE + dt.timedelta(days=1),
+        pending_max_age_seconds=10.0**9,
+        batch_limit=100,
+    )
+    assert n == 0
+
+
+@pytest.mark.asyncio
+async def test_alert_result_overdue_without_accepted_at(factory):
+    """存量行 accepted_at 为空（迁移前投递）也能告警，detail 记 accepted_at=None。"""
+    await _seed(factory)
+    async with factory() as s:
+        from sqlalchemy import update
+
+        await s.execute(
+            update(WedapImportDeliveryTask).values(
+                status="DELIVERED", result_deadline_at=_DEADLINE
+            )
+        )
+        await s.commit()
+    n = await alert_stuck_deliveries(
+        factory,
+        now=_DEADLINE + dt.timedelta(minutes=1),
+        pending_max_age_seconds=10.0**9,
+        batch_limit=100,
+    )
+    assert n == 1
+    alerts = await _get_alerts(factory)
+    assert alerts[0].kind == "RESULT_OVERDUE"
+    assert "accepted_at=None" in alerts[0].detail
+
+
+@pytest.mark.asyncio
+async def test_alert_result_overdue_dedup(factory):
+    """RESULT_OVERDUE 同批只告警一次（唯一约束去重）。"""
+    await _seed(factory)
+
+    async def deliver(task):
+        return {"status": "ACCEPTED"}
+
+    await dispatch_delivery_once(
+        factory, deliver=deliver, now=NOW, result_deadline=lambda now: _DEADLINE
+    )
+    after = _DEADLINE + dt.timedelta(minutes=1)
+    first = await alert_stuck_deliveries(
+        factory, now=after, pending_max_age_seconds=10.0**9, batch_limit=100
+    )
+    again = await alert_stuck_deliveries(
+        factory, now=after, pending_max_age_seconds=10.0**9, batch_limit=100
+    )
+    assert first == 1
+    assert again == 0
+    assert len(await _get_alerts(factory)) == 1
