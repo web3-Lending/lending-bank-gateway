@@ -9,6 +9,7 @@ import asyncio
 import datetime as dt
 import logging
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 import httpx
 from botocore.exceptions import ClientError  # type: ignore[import-untyped]
@@ -19,6 +20,7 @@ from app.clients.s3 import S3FileClient
 from app.clients.wedap import WedapClient
 from app.models.wedap_delivery import WedapImportDeliveryTask
 from app.services.wedap_delivery import (
+    alert_stuck_deliveries,
     collect_results_once,
     deliver_task,
     dispatch_delivery_once,
@@ -69,15 +71,16 @@ def make_deliver(
     staging_bucket: str,
     wedap_bucket: str,
     presigned_enabled: bool = False,
-) -> Callable[[WedapImportDeliveryTask], Awaitable[None]]:
+) -> Callable[[WedapImportDeliveryTask], Awaitable[dict[str, Any] | None]]:
     """把 deliver_task 绑定客户端 + bucket → dispatch_delivery_once 的 deliver 闭包。
 
     presigned_enabled=True 时 wedap 侧上传走 presigned PUT（无需长期 S3 凭证）；False（默认）
-    走 boto3 直传，现网行为不变。
+    走 boto3 直传，现网行为不变。返回 wedap notify 响应体（§6.1 护栏②：dispatch 落
+    accepted_at / result_file_path 留证）。
     """
 
-    async def _deliver(task: WedapImportDeliveryTask) -> None:
-        await deliver_task(
+    async def _deliver(task: WedapImportDeliveryTask) -> dict[str, Any] | None:
+        return await deliver_task(
             task,
             s3_client=s3_client,
             wedap_client=wedap_client,
@@ -197,13 +200,16 @@ def make_collect(
 async def run_forever(  # pragma: no cover
     factory: async_sessionmaker[AsyncSession],
     *,
-    deliver: Callable[[WedapImportDeliveryTask], Awaitable[None]],
+    deliver: Callable[[WedapImportDeliveryTask], Awaitable[dict[str, Any] | None]],
     max_attempts: int,
     interval_seconds: float = 5.0,
     on_terminal: Callable[[WedapImportDeliveryTask, str, str | None], Awaitable[None]]
     | None = None,
     result_fetch: _ResultFetch | None = None,
     result_post: _ResultPost | None = None,
+    result_deadline: Callable[[dt.datetime], dt.datetime] | None = None,
+    pending_max_age_seconds: float | None = None,
+    alert_batch_limit: int = 100,
 ) -> None:
     """无限循环投递 wedap 任务，每轮间隔 interval_seconds 秒（lifespan 后台 task）。"""
     while True:
@@ -213,6 +219,7 @@ async def run_forever(  # pragma: no cover
             now=dt.datetime.now(dt.UTC),
             max_attempts=max_attempts,
             on_terminal=on_terminal,
+            result_deadline=result_deadline,
         )
         # durable 回执：重发终态但未送达的回执（FU-WEDAP-CALLBACK-DURABLE）
         if on_terminal is not None:
@@ -226,5 +233,13 @@ async def run_forever(  # pragma: no cover
                 fetch=result_fetch,
                 post=result_post,
                 now=dt.datetime.now(dt.UTC),
+            )
+        # §6.1 护栏③④：PENDING_STUCK / RESULT_OVERDUE 去重告警
+        if pending_max_age_seconds is not None:
+            await alert_stuck_deliveries(
+                factory,
+                now=dt.datetime.now(dt.UTC),
+                pending_max_age_seconds=pending_max_age_seconds,
+                batch_limit=alert_batch_limit,
             )
         await asyncio.sleep(interval_seconds)

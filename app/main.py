@@ -219,7 +219,10 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
         )
         if settings.wedap_delivery_enabled:
+            from functools import partial
+
             from app.clients.recon_callback import ReconCallbackClient
+            from app.services.wedap_delivery import compute_result_deadline
             from app.workers import wedap_delivery_dispatcher
 
             wedap_deliver = wedap_delivery_dispatcher.make_deliver(
@@ -247,6 +250,12 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 wedap_client=app.state.wedap,
                 presigned_enabled=settings.wedap_presigned_enabled,
             )
+            # §6.1 护栏②：受理时落 result 回收截止（下一个 wedap scanner 窗口 + grace）
+            wedap_result_deadline = partial(
+                compute_result_deadline,
+                anchor_hour=settings.wedap_result_scan_anchor_hour,
+                grace_minutes=settings.wedap_result_grace_minutes,
+            )
             tasks.append(
                 asyncio.create_task(
                     supervised(
@@ -259,6 +268,12 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                             on_terminal=wedap_on_terminal,
                             result_fetch=wedap_result_fetch,
                             result_post=wedap_result_post,
+                            result_deadline=wedap_result_deadline,
+                            # §6.1 护栏③④：PENDING_STUCK / RESULT_OVERDUE 去重告警
+                            pending_max_age_seconds=(
+                                settings.wedap_delivery_pending_max_age_seconds
+                            ),
+                            alert_batch_limit=settings.wedap_delivery_alert_batch_limit,
                         ),
                         restart_delay_seconds=settings.worker_restart_delay_seconds,
                     ),

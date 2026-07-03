@@ -119,3 +119,118 @@ def test_list_stuck_orders(client: TestClient) -> None:
     assert data["success"] is True
     assert data["data"]["count"] == 1
     assert data["data"]["items"][0]["biz_seq_no"] == "DSB-STUCK-1"
+
+
+# ─────────────────────── §6.1 护栏⑤：delivery-report ───────────────────────
+
+
+async def _insert_delivery_task(engine: Any, **over: Any) -> None:
+    from sqlalchemy import insert
+
+    from app.models.wedap_delivery import WedapImportDeliveryTask
+
+    values: dict[str, Any] = {
+        "tenant_id": "OCBC",
+        "request_id": f"wedap-import-{over.get('import_batch_no', 'B1')}",
+        "import_batch_no": "B1",
+        "data_type": "interest-accrual",
+        "import_date": "20260703",
+        "staging_key": "staging/k.jsonl",
+        "file_checksum": "a" * 64,
+        "file_size": 1,
+        "total_count": 1,
+        "status": "PENDING",
+        "attempts": 0,
+        **over,
+    }
+    async with engine.connect() as conn:
+        await conn.execute(insert(WedapImportDeliveryTask).values(**values))
+        await conn.commit()
+
+
+async def _insert_delivery_alert(engine: Any, **over: Any) -> None:
+    import datetime as dt
+
+    from sqlalchemy import insert
+
+    from app.models.wedap_delivery_alert import WedapDeliveryAlert
+
+    values: dict[str, Any] = {
+        "tenant_id": "OCBC",
+        "import_batch_no": "B1",
+        "kind": "PENDING_STUCK",
+        "detail": "status=PENDING",
+        "first_alerted_at": dt.datetime(2026, 7, 3, tzinfo=dt.UTC),
+        **over,
+    }
+    async with engine.connect() as conn:
+        await conn.execute(insert(WedapDeliveryAlert).values(**values))
+        await conn.commit()
+
+
+def test_wedap_delivery_report_separates_acceptance_and_closure(client: TestClient) -> None:
+    """护栏⑤：acceptance 与 result_closure 分开统计，overdue 单列。"""
+    import datetime as dt
+
+    app_engine = client.app.state.engine  # type: ignore[union-attr]
+    past = dt.datetime(2026, 7, 1, 2, 30, tzinfo=dt.UTC)
+    # 1 条 PENDING + 1 条 DELIVERED 已回收 + 1 条 DELIVERED 超截止未回收 + 1 条 FAILED
+    asyncio.run(_insert_delivery_task(app_engine, import_batch_no="B1"))
+    asyncio.run(
+        _insert_delivery_task(
+            app_engine,
+            import_batch_no="B2",
+            status="DELIVERED",
+            accepted_at=past,
+            result_collected_at=past,
+        )
+    )
+    asyncio.run(
+        _insert_delivery_task(
+            app_engine,
+            import_batch_no="B3",
+            status="DELIVERED",
+            accepted_at=past,
+            result_deadline_at=past,
+        )
+    )
+    asyncio.run(_insert_delivery_task(app_engine, import_batch_no="B4", status="FAILED"))
+    asyncio.run(_insert_delivery_alert(app_engine, import_batch_no="B3", kind="RESULT_OVERDUE"))
+
+    r = client.get("/api/v1/admin/wedap-import/delivery-report", headers=HEADERS)
+
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["acceptance"]["by_status"] == {"PENDING": 1, "DELIVERED": 2, "FAILED": 1}
+    assert data["acceptance"]["total"] == 4
+    assert data["acceptance"]["accepted"] == 2
+    assert data["result_closure"] == {
+        "delivered": 2,
+        "result_collected": 1,
+        "outstanding": 1,
+        "overdue": 1,
+    }
+    assert data["alerts"] == {"RESULT_OVERDUE": 1}
+    assert data["import_date"] is None
+
+
+def test_wedap_delivery_report_filters_by_import_date(client: TestClient) -> None:
+    """import_date 过滤只统计当日批次，alerts 同口径 join 过滤（codex MEDIUM）。"""
+    app_engine = client.app.state.engine  # type: ignore[union-attr]
+    asyncio.run(_insert_delivery_task(app_engine, import_batch_no="B1", import_date="20260701"))
+    asyncio.run(_insert_delivery_task(app_engine, import_batch_no="B2", import_date="20260702"))
+    # B1（0701）与 B2（0702）各挂一条告警：过滤 0702 时只应统计 B2 的 RESULT_OVERDUE
+    asyncio.run(_insert_delivery_alert(app_engine, import_batch_no="B1", kind="PENDING_STUCK"))
+    asyncio.run(_insert_delivery_alert(app_engine, import_batch_no="B2", kind="RESULT_OVERDUE"))
+
+    r = client.get(
+        "/api/v1/admin/wedap-import/delivery-report",
+        params={"import_date": "20260702"},
+        headers=HEADERS,
+    )
+
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["acceptance"]["total"] == 1
+    assert data["import_date"] == "20260702"
+    assert data["alerts"] == {"RESULT_OVERDUE": 1}

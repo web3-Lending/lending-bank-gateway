@@ -24,7 +24,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.clients.s3 import S3FileClient
 from app.clients.wedap import WedapClient
 from app.models.wedap_delivery import WedapImportDeliveryTask
-from app.services.wedap_import import deliver_batch
+from app.models.wedap_delivery_alert import WedapDeliveryAlert
+from app.services.wedap_import import ACCEPTED_BATCH_STATUS, WedapBatchRejected, deliver_batch
 from app.services.wedap_import_result import ImportResult, parse_result
 
 logger = logging.getLogger(__name__)
@@ -163,16 +164,32 @@ async def _claim(factory: async_sessionmaker[AsyncSession], task_id: int, now: d
         return bool(result.rowcount == 1)  # type: ignore[attr-defined]  # CursorResult.rowcount
 
 
+def compute_result_deadline(
+    now: dt.datetime, *, anchor_hour: int, grace_minutes: float
+) -> dt.datetime:
+    """§6.1 护栏②：result 回收截止 = ``now`` 之后下一个 wedap scanner 运行点 + grace。
+
+    anchor_hour 是 wedap BatchScanScheduler 每日 cron 的 UTC 小时（默认 2 = ``0 0 2 * * ?``）。
+    受理正好落在 anchor 时刻上时取次日窗口（scanner 与受理的先后不可知，保守多等一天）。
+    """
+    anchor = now.replace(hour=anchor_hour, minute=0, second=0, microsecond=0)
+    if anchor <= now:
+        anchor += dt.timedelta(days=1)
+    return anchor + dt.timedelta(minutes=grace_minutes)
+
+
 async def dispatch_delivery_once(
     factory: async_sessionmaker[AsyncSession],
     *,
-    deliver: Callable[[WedapImportDeliveryTask], Awaitable[None]],
+    deliver: Callable[[WedapImportDeliveryTask], Awaitable[dict[str, Any] | None]],
     now: dt.datetime,
     max_attempts: int = 5,
     base_seconds: float = 60.0,
     claim_timeout_seconds: float = 300.0,
     on_terminal: Callable[[WedapImportDeliveryTask, str, str | None], Awaitable[None]]
     | None = None,
+    result_deadline: Callable[[dt.datetime], dt.datetime] | None = None,
+    clock: Callable[[], dt.datetime] | None = None,
 ) -> int:
     """扫一轮可投递任务并逐条投递，返回处理条数（=成功 claim 并处理的条数）。
 
@@ -180,7 +197,15 @@ async def dispatch_delivery_once(
     （PENDING→SENDING），只有抢到的副本继续 deliver，避免多副本重复南向投递。投递动作 deliver
     由调用方注入；状态机：成功→DELIVERED；失败→attempts+1，未达上限回 PENDING+退避，达上限→FAILED；
     终态/重排均清 locked_at。外呼在事务外，更新各自独立短事务。on_terminal 终态 commit 后触发回执。
+
+    §6.1 护栏②：deliver 成功（= wedap 受理，非受理已在 deliver_task 抛出）时额外落
+    accepted_at、响应回带的 result_file_path、result_deadline_at=result_deadline(accepted_at)
+    （未注入 result_deadline 则留空，不影响既有路径）。受理时刻取 ``clock()``（默认真实
+    UTC now，测试可注入固定时钟）而非本轮扫描起始 ``now``——投递外呼耗时可能跨过 scanner
+    anchor，用扫描起始时刻算 deadline 会把截止算早一个窗口，制造假 RESULT_OVERDUE
+    （codex HIGH）。notified_at 同步用受理时刻。
     """
+    real_clock = clock if clock is not None else lambda: dt.datetime.now(dt.UTC)
     await _reclaim_stale_sending(factory, now=now, claim_timeout_seconds=claim_timeout_seconds)
 
     async with factory() as snap_session:
@@ -207,8 +232,9 @@ async def dispatch_delivery_once(
             continue
 
         error: str | None = None
+        response: dict[str, Any] | None = None
         try:
-            await deliver(task)
+            response = await deliver(task)
         except Exception as exc:  # noqa: BLE001 - 投递失败统一进退避，错误存 last_error
             error = str(exc)
             logger.warning(
@@ -217,6 +243,8 @@ async def dispatch_delivery_once(
                 task.attempts + 1,
                 error,
             )
+        # 受理时刻在 deliver 返回后取（外呼耗时可能跨 scanner anchor，codex HIGH）。
+        accepted_now = real_clock()
 
         terminal: str | None = None
         async with factory() as upd_session:
@@ -227,9 +255,15 @@ async def dispatch_delivery_once(
             row.locked_at = None  # 退出 SENDING，释放 claim
             if error is None:
                 row.status = "DELIVERED"
-                row.notified_at = (
-                    now  # = wedap notify 成功时刻（非"已回执 recon"，回执是 on_terminal 另发）
-                )
+                # wedap notify 成功时刻（非"已回执 recon"，回执是 on_terminal 另发）。
+                row.notified_at = accepted_now
+                # §6.1 护栏②：deliver 无异常 = wedap 受理（非受理 status 已在 deliver_task 抛出）。
+                row.accepted_at = accepted_now
+                if response is not None:
+                    rfp = response.get("resultFilePath")
+                    row.result_file_path = rfp if isinstance(rfp, str) else None
+                if result_deadline is not None:
+                    row.result_deadline_at = result_deadline(accepted_now)
                 row.last_error = None
                 terminal = "DELIVERED"
             elif row.attempts >= max_attempts:
@@ -261,13 +295,17 @@ async def deliver_task(
     staging_bucket: str,
     wedap_bucket: str,
     presigned_enabled: bool = False,
-) -> None:
+) -> dict[str, Any]:
     """生产投递动作：staging 取字节 → 校 checksum → deliver_batch（上传 wedap + 通知）。
 
     供 dispatch_delivery_once 的 deliver 参数绑定。staging 读（lending 自有 bucket，boto3）后先校
     SHA-256 == 任务记录值，防 staging 损坏把脏字节投给 wedap；deliver_batch 内部再校上传后
     checksum（双重）。presigned_enabled 透传给 deliver_batch，决定 wedap 侧上传走 presigned PUT
     还是 boto3 直传（staging 读始终 boto3，不受影响）。
+
+    §6.1 护栏②：notify 响应 status 非受理类（ACCEPTED_BATCH_STATUS 之外）→ 抛 WedapBatchRejected
+    进 dispatch 退避重试路径，不再把业务拒绝误记 DELIVERED；受理 → 返回响应体（含
+    resultFilePath），由 dispatch 落库留证。
     """
     content = await asyncio.to_thread(
         s3_client.get_bytes, bucket=staging_bucket, key=task.staging_key
@@ -275,7 +313,7 @@ async def deliver_task(
     actual = hashlib.sha256(content).hexdigest()
     if actual != task.file_checksum:
         raise StagingChecksumMismatch(f"{actual} != {task.file_checksum}")
-    await deliver_batch(
+    response = await deliver_batch(
         s3_client=s3_client,
         wedap_client=wedap_client,
         bucket=wedap_bucket,
@@ -288,6 +326,10 @@ async def deliver_task(
         total_count=task.total_count,
         presigned_enabled=presigned_enabled,
     )
+    status = str(response.get("status"))
+    if status not in ACCEPTED_BATCH_STATUS:
+        raise WedapBatchRejected(status, str(response.get("message")))
+    return response
 
 
 async def mark_callback_sent(
@@ -507,3 +549,134 @@ async def collect_results_once(
         if await mark_result_collected(factory, task.id, token, now):  # 仅本轮真置位才计数
             collected += 1
     return collected
+
+
+async def _record_delivery_alert(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: str,
+    import_batch_no: str,
+    kind: str,
+    detail: str,
+    now: dt.datetime,
+) -> bool:
+    """插入投递告警标记；UNIQUE(tenant, batch, kind) 命中（已告警过）→ 返 False。
+
+    INSERT + 捕获 IntegrityError 跨 SQLite/MySQL 可移植地实现「只告警一次」去重
+    （同 OrderStuckAlert 的 _record_stuck_alert 模式）。
+    """
+    try:
+        async with factory() as session:
+            async with session.begin():
+                session.add(
+                    WedapDeliveryAlert(
+                        tenant_id=tenant_id,
+                        import_batch_no=import_batch_no,
+                        kind=kind,
+                        detail=detail[:255],
+                        first_alerted_at=now,
+                    )
+                )
+        return True
+    except IntegrityError:
+        return False
+
+
+async def alert_stuck_deliveries(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    now: dt.datetime,
+    pending_max_age_seconds: float,
+    batch_limit: int = 100,
+) -> int:
+    """§6.1 护栏③④：wedap 投递 silent-failure 去重告警。返回本轮新增告警数。
+
+    - PENDING_STUCK（护栏③）：停留 PENDING/SENDING 超 pending_max_age 仍未投出——重试打满
+      退避窗或 worker 停摆都会落进来，不静默排队。
+    - RESULT_OVERDUE（护栏④）：已受理（DELIVERED）但超过 result_deadline_at 仍未回收
+      _result.json——切流负责人须按 §6.1 评估回滚（deadline 为空的存量行不判，避免误报）。
+    同批同类只告警一次（唯一约束去重 + 限频 ERROR），admin /wedap-import/delivery-report 可查。
+    """
+    new_alerts = 0
+
+    min_created = now - dt.timedelta(seconds=pending_max_age_seconds)
+    async with factory() as session:
+        stuck = (
+            (
+                await session.execute(
+                    select(WedapImportDeliveryTask)
+                    .where(
+                        WedapImportDeliveryTask.status.in_(("PENDING", "SENDING")),
+                        WedapImportDeliveryTask.created_at <= min_created,
+                    )
+                    .limit(batch_limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    for task in stuck:
+        # SQLite/aiomysql 读回的 DATETIME 可能是 naive（按 UTC 存）→ 补 tzinfo 再算 age。
+        created = (
+            task.created_at
+            if task.created_at.tzinfo is not None
+            else task.created_at.replace(tzinfo=dt.UTC)
+        )
+        age = int((now - created).total_seconds())
+        if await _record_delivery_alert(
+            factory,
+            tenant_id=task.tenant_id,
+            import_batch_no=task.import_batch_no,
+            kind="PENDING_STUCK",
+            detail=f"status={task.status} attempts={task.attempts} age_s={age}",
+            now=now,
+        ):
+            new_alerts += 1
+            logger.error(
+                "wedap delivery stuck over max_age %s/%s status=%s attempts=%s"
+                "（已记 wedap_delivery_alert · §6.1 护栏③）",
+                task.tenant_id,
+                task.import_batch_no,
+                task.status,
+                task.attempts,
+            )
+
+    async with factory() as session:
+        overdue = (
+            (
+                await session.execute(
+                    select(WedapImportDeliveryTask)
+                    .where(
+                        WedapImportDeliveryTask.status == "DELIVERED",
+                        WedapImportDeliveryTask.result_collected_at.is_(None),
+                        WedapImportDeliveryTask.result_deadline_at.is_not(None),
+                        WedapImportDeliveryTask.result_deadline_at <= now,
+                    )
+                    .limit(batch_limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    for task in overdue:
+        deadline = task.result_deadline_at
+        if deadline is None:  # pragma: no cover - WHERE 已滤空，防御性判空给 mypy
+            continue
+        if await _record_delivery_alert(
+            factory,
+            tenant_id=task.tenant_id,
+            import_batch_no=task.import_batch_no,
+            kind="RESULT_OVERDUE",
+            detail=f"deadline={deadline.isoformat()} accepted_at="
+            f"{task.accepted_at.isoformat() if task.accepted_at else None}",
+            now=now,
+        ):
+            new_alerts += 1
+            logger.error(
+                "wedap result overdue（超截止未回收 _result.json）%s/%s deadline=%s"
+                "（已记 wedap_delivery_alert · §6.1 护栏④，评估切流回滚）",
+                task.tenant_id,
+                task.import_batch_no,
+                deadline.isoformat(),
+            )
+    return new_alerts

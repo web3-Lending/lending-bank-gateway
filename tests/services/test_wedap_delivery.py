@@ -147,3 +147,81 @@ async def test_enqueue_and_serialize_returns_response(tmp_path):
     assert resp["requestId"] == "wedap-import-BATCH-LEN-20260624-001"
     assert resp["status"] == "PENDING"
     assert resp["taskId"] is not None
+
+
+# ─────────────────────── §6.1 护栏②：notify 受理判定 ───────────────────────
+
+from app.services.wedap_import import WedapBatchRejected  # noqa: E402
+
+
+@pytest.mark.asyncio
+async def test_deliver_task_returns_notify_response():
+    """受理（ACCEPTED）→ 返回响应体（dispatch 落 result_file_path 用）。"""
+    s3 = MagicMock()
+    s3.get_bytes = MagicMock(return_value=_CONTENT)
+    s3.upload = MagicMock(return_value=_CHECKSUM)
+    wedap = AsyncMock()
+    wedap.notify_batch_uploaded = AsyncMock(
+        return_value={"status": "ACCEPTED", "resultFilePath": "p/_result.json"}
+    )
+
+    resp = await deliver_task(
+        _task(_CHECKSUM),
+        s3_client=s3,
+        wedap_client=wedap,
+        staging_bucket="stg",
+        wedap_bucket="wedap",
+    )
+    assert resp == {"status": "ACCEPTED", "resultFilePath": "p/_result.json"}
+
+
+@pytest.mark.asyncio
+async def test_deliver_task_duplicate_batch_is_accepted():
+    """DUPLICATE_BATCH（同号同 checksum 重投）属受理类，不抛。"""
+    s3 = MagicMock()
+    s3.get_bytes = MagicMock(return_value=_CONTENT)
+    s3.upload = MagicMock(return_value=_CHECKSUM)
+    wedap = AsyncMock()
+    wedap.notify_batch_uploaded = AsyncMock(return_value={"status": "DUPLICATE_BATCH"})
+
+    resp = await deliver_task(
+        _task(_CHECKSUM),
+        s3_client=s3,
+        wedap_client=wedap,
+        staging_bucket="stg",
+        wedap_bucket="wedap",
+    )
+    assert resp["status"] == "DUPLICATE_BATCH"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status",
+    [
+        "FILE_NOT_FOUND",
+        "CHECKSUM_MISMATCH",
+        "INVALID_PARAM",
+        "DUPLICATE_BATCH_CONFLICT",
+        "REPLACES_BATCH_NOT_FOUND",
+    ],
+)
+async def test_deliver_task_rejected_status_raises(status):
+    """非受理 status → WedapBatchRejected（进 dispatch 退避重试，不误记 DELIVERED）。"""
+    s3 = MagicMock()
+    s3.get_bytes = MagicMock(return_value=_CONTENT)
+    s3.upload = MagicMock(return_value=_CHECKSUM)
+    wedap = AsyncMock()
+    wedap.notify_batch_uploaded = AsyncMock(
+        return_value={"status": status, "message": "boom"}
+    )
+
+    with pytest.raises(WedapBatchRejected) as exc:
+        await deliver_task(
+            _task(_CHECKSUM),
+            s3_client=s3,
+            wedap_client=wedap,
+            staging_bucket="stg",
+            wedap_bucket="wedap",
+        )
+    assert exc.value.status == status
+    assert status in str(exc.value)

@@ -33,6 +33,15 @@ class WedapImportDeliveryTask(Base, TenantMixin, TimestampMixin):
         Index("ix_wedap_delivery_status_retry", "status", "next_retry_at"),
         # collect_results_once 扫 (DELIVERED, result_collected_at IS NULL)（codex P1 MEDIUM-2）。
         Index("ix_wedap_delivery_result_scan", "status", "result_collected_at"),
+        # §6.1 护栏③④告警扫描（codex MEDIUM）：PENDING_STUCK 按 (status, created_at)，
+        # RESULT_OVERDUE 按 (status, result_collected_at, result_deadline_at)。
+        Index("ix_wedap_delivery_stuck_scan", "status", "created_at"),
+        Index(
+            "ix_wedap_delivery_overdue_scan",
+            "status",
+            "result_collected_at",
+            "result_deadline_at",
+        ),
     )
 
     id: Mapped[int] = mapped_column(_BIG_PK, primary_key=True, autoincrement=True)
@@ -54,6 +63,16 @@ class WedapImportDeliveryTask(Base, TenantMixin, TimestampMixin):
     locked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     # wedap notify 成功时刻（南向投递完成），非 gateway→recon 回执时刻（回执由 on_terminal 另发）。
     notified_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    # wedap 受理时刻（§6.1 护栏②）：notify 响应 status ∈ ACCEPTED_BATCH_STATUS 时置。
+    # 与 notified_at 的区别：notified_at = notify 调用返回成功；accepted_at = wedap 确认受理。
+    accepted_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    # wedap notify 响应回带的 resultFilePath（§6.1 护栏②）：受理时落库留证，
+    # 供人工核对 result 落点；回收路径仍按约定 build_result_key 现算（两者应一致）。
+    result_file_path: Mapped[str | None] = mapped_column(String(512))
+    # result 回收截止（§6.1 护栏②）：受理时 = 下一个 wedap scanner 窗口(anchor hour, UTC) + grace。
+    # DELIVERED + result_collected_at 空 + 超过此刻 → RESULT_OVERDUE 告警（护栏④），
+    # 提示切流负责人评估回滚。
+    result_deadline_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     # gateway→recon 回执送达时刻（FU-WEDAP-CALLBACK-DURABLE）：终态 + 此列为空 = 回执未送达，
     # resend_pending_callbacks_once 重发兜底，消除 recon 永久卡 ENQUEUED。
     callback_sent_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
