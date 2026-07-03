@@ -33,6 +33,15 @@ class WedapImportDeliveryTask(Base, TenantMixin, TimestampMixin):
         Index("ix_wedap_delivery_status_retry", "status", "next_retry_at"),
         # collect_results_once 扫 (DELIVERED, result_collected_at IS NULL)（codex P1 MEDIUM-2）。
         Index("ix_wedap_delivery_result_scan", "status", "result_collected_at"),
+        # §6.1 护栏③④告警扫描（codex MEDIUM）：PENDING_STUCK 按 (status, created_at)，
+        # RESULT_OVERDUE 按 (status, result_collected_at, result_deadline_at)。
+        Index("ix_wedap_delivery_stuck_scan", "status", "created_at"),
+        Index(
+            "ix_wedap_delivery_overdue_scan",
+            "status",
+            "result_collected_at",
+            "result_deadline_at",
+        ),
     )
 
     id: Mapped[int] = mapped_column(_BIG_PK, primary_key=True, autoincrement=True)

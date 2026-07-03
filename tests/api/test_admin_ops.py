@@ -215,10 +215,13 @@ def test_wedap_delivery_report_separates_acceptance_and_closure(client: TestClie
 
 
 def test_wedap_delivery_report_filters_by_import_date(client: TestClient) -> None:
-    """import_date 过滤只统计当日批次。"""
+    """import_date 过滤只统计当日批次，alerts 同口径 join 过滤（codex MEDIUM）。"""
     app_engine = client.app.state.engine  # type: ignore[union-attr]
     asyncio.run(_insert_delivery_task(app_engine, import_batch_no="B1", import_date="20260701"))
     asyncio.run(_insert_delivery_task(app_engine, import_batch_no="B2", import_date="20260702"))
+    # B1（0701）与 B2（0702）各挂一条告警：过滤 0702 时只应统计 B2 的 RESULT_OVERDUE
+    asyncio.run(_insert_delivery_alert(app_engine, import_batch_no="B1", kind="PENDING_STUCK"))
+    asyncio.run(_insert_delivery_alert(app_engine, import_batch_no="B2", kind="RESULT_OVERDUE"))
 
     r = client.get(
         "/api/v1/admin/wedap-import/delivery-report",
@@ -230,3 +233,4 @@ def test_wedap_delivery_report_filters_by_import_date(client: TestClient) -> Non
     data = r.json()["data"]
     assert data["acceptance"]["total"] == 1
     assert data["import_date"] == "20260702"
+    assert data["alerts"] == {"RESULT_OVERDUE": 1}

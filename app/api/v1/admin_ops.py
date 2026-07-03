@@ -70,6 +70,19 @@ async def list_stuck_orders(request: Request) -> dict[str, object]:
     return ok({"items": items, "count": len(items)}, trace_id=trace_id)
 
 
+def _alert_counts_query(import_date: str | None):  # type: ignore[no-untyped-def]
+    """alerts 按 kind 计数；import_date 过滤时与投递统计同口径（codex MEDIUM）——
+    join 回投递表按 (tenant_id, import_batch_no) 关联，避免切流日报混入其它日期的告警。"""
+    q = select(WedapDeliveryAlert.kind, func.count()).group_by(WedapDeliveryAlert.kind)
+    if import_date is None:
+        return q
+    return q.join(
+        WedapImportDeliveryTask,
+        (WedapImportDeliveryTask.tenant_id == WedapDeliveryAlert.tenant_id)
+        & (WedapImportDeliveryTask.import_batch_no == WedapDeliveryAlert.import_batch_no),
+    ).where(WedapImportDeliveryTask.import_date == import_date)
+
+
 @router.get("/wedap-import/delivery-report")
 async def wedap_delivery_report(
     request: Request, import_date: str | None = None
@@ -137,11 +150,7 @@ async def wedap_delivery_report(
                 )
             )
         ).scalar_one()
-        alert_rows = (
-            await session.execute(
-                select(WedapDeliveryAlert.kind, func.count()).group_by(WedapDeliveryAlert.kind)
-            )
-        ).all()
+        alert_rows = (await session.execute(_alert_counts_query(import_date))).all()
     status_counts = {status: count for status, count in status_rows}
     return ok(
         {

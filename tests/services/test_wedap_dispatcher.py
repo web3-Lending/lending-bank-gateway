@@ -65,7 +65,7 @@ async def test_dispatch_success_marks_delivered(factory):
     async def deliver(task):
         seen.append(task.import_batch_no)
 
-    n = await dispatch_delivery_once(factory, deliver=deliver, now=NOW)
+    n = await dispatch_delivery_once(factory, deliver=deliver, now=NOW, clock=lambda: NOW)
 
     assert n == 1
     assert seen == ["BATCH-LEN-20260624-001"]
@@ -436,9 +436,7 @@ async def test_alert_result_collected_not_alerted(factory):
     async with factory() as s:
         from sqlalchemy import update
 
-        await s.execute(
-            update(WedapImportDeliveryTask).values(result_collected_at=NOW)
-        )
+        await s.execute(update(WedapImportDeliveryTask).values(result_collected_at=NOW))
         await s.commit()
     n = await alert_stuck_deliveries(
         factory,
@@ -457,9 +455,7 @@ async def test_alert_result_overdue_without_accepted_at(factory):
         from sqlalchemy import update
 
         await s.execute(
-            update(WedapImportDeliveryTask).values(
-                status="DELIVERED", result_deadline_at=_DEADLINE
-            )
+            update(WedapImportDeliveryTask).values(status="DELIVERED", result_deadline_at=_DEADLINE)
         )
         await s.commit()
     n = await alert_stuck_deliveries(
@@ -495,3 +491,38 @@ async def test_alert_result_overdue_dedup(factory):
     assert first == 1
     assert again == 0
     assert len(await _get_alerts(factory)) == 1
+
+
+@pytest.mark.asyncio
+async def test_dispatch_deadline_uses_post_deliver_clock(factory):
+    """codex HIGH：deadline 按 deliver 完成后的真实受理时刻算，非本轮扫描起始。
+
+    场景：扫描起始 01:59（anchor=02:00 前），notify 完成已 02:01（跨过 anchor）——
+    deadline 必须基于 02:01 取次日 02:30，而非基于 01:59 取当日 02:30（scanner 已错过）。
+    """
+    await _seed(factory)
+    scan_start = dt.datetime(2026, 6, 24, 1, 59, tzinfo=dt.UTC)
+    after_anchor = dt.datetime(2026, 6, 24, 2, 1, tzinfo=dt.UTC)
+    deadline_inputs = []
+
+    async def deliver(task):
+        return {"status": "ACCEPTED"}
+
+    def deadline(accepted_at):
+        deadline_inputs.append(accepted_at)
+        return compute_result_deadline(accepted_at, anchor_hour=2, grace_minutes=30)
+
+    await dispatch_delivery_once(
+        factory,
+        deliver=deliver,
+        now=scan_start,
+        result_deadline=deadline,
+        clock=lambda: after_anchor,
+    )
+    assert deadline_inputs == [after_anchor]
+    task = await _get_task(factory)
+    assert task.accepted_at.replace(tzinfo=dt.UTC) == after_anchor
+    assert task.notified_at.replace(tzinfo=dt.UTC) == after_anchor
+    assert task.result_deadline_at.replace(tzinfo=dt.UTC) == dt.datetime(
+        2026, 6, 25, 2, 30, tzinfo=dt.UTC
+    )

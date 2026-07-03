@@ -37,6 +37,17 @@ def upgrade() -> None:
         "wedap_import_delivery_task",
         sa.Column("result_deadline_at", sa.DateTime(timezone=True), nullable=True),
     )
+    # 护栏③④告警扫描索引（codex MEDIUM）：dispatcher 每轮跑，避免多副本下全表扫。
+    op.create_index(
+        "ix_wedap_delivery_stuck_scan",
+        "wedap_import_delivery_task",
+        ["status", "created_at"],
+    )
+    op.create_index(
+        "ix_wedap_delivery_overdue_scan",
+        "wedap_import_delivery_task",
+        ["status", "result_collected_at", "result_deadline_at"],
+    )
     op.create_table(
         "wedap_delivery_alert",
         sa.Column("id", sa.BigInteger().with_variant(sa.Integer, "sqlite"), primary_key=True),
@@ -65,6 +76,8 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_index("ix_wedap_delivery_alert_tenant_id", table_name="wedap_delivery_alert")
     op.drop_table("wedap_delivery_alert")
+    op.drop_index("ix_wedap_delivery_overdue_scan", table_name="wedap_import_delivery_task")
+    op.drop_index("ix_wedap_delivery_stuck_scan", table_name="wedap_import_delivery_task")
     op.drop_column("wedap_import_delivery_task", "result_deadline_at")
     op.drop_column("wedap_import_delivery_task", "result_file_path")
     op.drop_column("wedap_import_delivery_task", "accepted_at")

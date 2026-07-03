@@ -189,6 +189,7 @@ async def dispatch_delivery_once(
     on_terminal: Callable[[WedapImportDeliveryTask, str, str | None], Awaitable[None]]
     | None = None,
     result_deadline: Callable[[dt.datetime], dt.datetime] | None = None,
+    clock: Callable[[], dt.datetime] | None = None,
 ) -> int:
     """扫一轮可投递任务并逐条投递，返回处理条数（=成功 claim 并处理的条数）。
 
@@ -198,9 +199,13 @@ async def dispatch_delivery_once(
     终态/重排均清 locked_at。外呼在事务外，更新各自独立短事务。on_terminal 终态 commit 后触发回执。
 
     §6.1 护栏②：deliver 成功（= wedap 受理，非受理已在 deliver_task 抛出）时额外落
-    accepted_at=now、响应回带的 result_file_path、result_deadline_at=result_deadline(now)
-    （未注入 result_deadline 则留空，不影响既有路径）。
+    accepted_at、响应回带的 result_file_path、result_deadline_at=result_deadline(accepted_at)
+    （未注入 result_deadline 则留空，不影响既有路径）。受理时刻取 ``clock()``（默认真实
+    UTC now，测试可注入固定时钟）而非本轮扫描起始 ``now``——投递外呼耗时可能跨过 scanner
+    anchor，用扫描起始时刻算 deadline 会把截止算早一个窗口，制造假 RESULT_OVERDUE
+    （codex HIGH）。notified_at 同步用受理时刻。
     """
+    real_clock = clock if clock is not None else lambda: dt.datetime.now(dt.UTC)
     await _reclaim_stale_sending(factory, now=now, claim_timeout_seconds=claim_timeout_seconds)
 
     async with factory() as snap_session:
@@ -238,6 +243,8 @@ async def dispatch_delivery_once(
                 task.attempts + 1,
                 error,
             )
+        # 受理时刻在 deliver 返回后取（外呼耗时可能跨 scanner anchor，codex HIGH）。
+        accepted_now = real_clock()
 
         terminal: str | None = None
         async with factory() as upd_session:
@@ -248,16 +255,15 @@ async def dispatch_delivery_once(
             row.locked_at = None  # 退出 SENDING，释放 claim
             if error is None:
                 row.status = "DELIVERED"
-                row.notified_at = (
-                    now  # = wedap notify 成功时刻（非"已回执 recon"，回执是 on_terminal 另发）
-                )
+                # wedap notify 成功时刻（非"已回执 recon"，回执是 on_terminal 另发）。
+                row.notified_at = accepted_now
                 # §6.1 护栏②：deliver 无异常 = wedap 受理（非受理 status 已在 deliver_task 抛出）。
-                row.accepted_at = now
+                row.accepted_at = accepted_now
                 if response is not None:
                     rfp = response.get("resultFilePath")
                     row.result_file_path = rfp if isinstance(rfp, str) else None
                 if result_deadline is not None:
-                    row.result_deadline_at = result_deadline(now)
+                    row.result_deadline_at = result_deadline(accepted_now)
                 row.last_error = None
                 terminal = "DELIVERED"
             elif row.attempts >= max_attempts:
