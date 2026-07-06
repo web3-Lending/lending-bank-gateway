@@ -77,10 +77,11 @@ def test_create_app_prod_without_secret_raises(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_create_app_prod_with_secret_ok(monkeypatch: pytest.MonkeyPatch) -> None:
-    """GW_ENV=prod + secret 已设置 → create_app 正常建 app。"""
+    """GW_ENV=prod + 两个 secret（S2S + wedap 回调 apikey）已设置 → create_app 正常建 app。"""
     get_settings.cache_clear()
     monkeypatch.setenv("GW_ENV", "prod")
     monkeypatch.setenv("GW_S2S_SECRET", "super-secret-token")
+    monkeypatch.setenv("GW_WEDAP_CALLBACK_API_KEY", "super-secret-callback-key")
     result = create_app()
     assert isinstance(result, FastAPI)
     get_settings.cache_clear()
@@ -297,9 +298,7 @@ def test_lifespan_wedap_delivery_worker_started(monkeypatch: pytest.MonkeyPatch)
         patch("app.workers.outbox_dispatcher.run_forever", side_effect=_stub("outbox")),
         patch("app.workers.recon_worker.run_forever", side_effect=_stub("recon")),
         patch("app.workers.order_reconcile_worker.run_forever", side_effect=_stub("order")),
-        patch(
-            "app.workers.wedap_delivery_dispatcher.run_forever", side_effect=_stub("wedap")
-        ),
+        patch("app.workers.wedap_delivery_dispatcher.run_forever", side_effect=_stub("wedap")),
     ):
         with TestClient(create_app()):
             pass
