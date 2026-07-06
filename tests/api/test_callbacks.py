@@ -157,11 +157,13 @@ def test_cross_tenant_same_request_id_no_dedup(client: TestClient) -> None:
     assert len(rows_dbs) == 1
 
 
-def test_missing_caller_service_401(client: TestClient) -> None:
-    """缺 X-Caller-Service → S2SMiddleware 拦截 → 401。"""
+def test_callback_exempt_from_s2s_missing_caller_allowed(client: TestClient) -> None:
+    """回调端点已从 S2S 豁免（改用 apikey 守卫，FU-GW-INBOUND-AUTH-WEDAP-CALLBACK）：
+    外部 wedap 无 lending S2S token，缺 X-Caller-Service 不再被 S2S 拦 401。
+    apikey 认证的正/负路径见 tests/api/test_wedap_callback_auth.py。"""
     h = {k: v for k, v in HEADERS.items() if k != "X-Caller-Service"}
     r = client.post("/api/v1/callbacks/wedap/transactions", json=BODY, headers=h)
-    assert r.status_code == 401
+    assert r.status_code != 401
 
 
 # ---------------------------------------------------------------------------

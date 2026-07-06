@@ -308,6 +308,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         raise RuntimeError(
             "GW_S2S_SECRET 必须在非 local/test 环境配置（fail-fast，资金网关禁 fail-open）"
         )
+    if settings.env not in ("local", "test") and not settings.wedap_callback_api_key:
+        raise RuntimeError(
+            "GW_WEDAP_CALLBACK_API_KEY 必须在非 local/test 环境配置"
+            "（wedap 回调入口 fail-fast，资金网关禁 fail-open）"
+        )
 
     app = FastAPI(title="lending-bank-gateway", version="0.1.0", lifespan=_lifespan)
     # 全进程统一从 app.state.settings 取配置（lifespan/worker 不再各自调 get_settings）
@@ -345,6 +350,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         exempt_paths={"/healthz", "/readyz", "/build-info"},
         allowed_callers=allowed_callers,
         caller_tokens=caller_tokens,
+        # wedap→gateway 入站回调（外部 wedap 无 lending S2S token）：middleware 层 apikey 认证，
+        # body 解析前拒绝、最小权限（仅这两个 path，wedap 打不了银行 API）。
+        callback_paths={
+            "/api/v1/callbacks/wedap/transactions",
+            "/api/v1/recon/notify",
+        },
+        callback_api_key=settings.wedap_callback_api_key,
     )
     app.add_middleware(IdentifierMiddleware)
     engine = build_engine(

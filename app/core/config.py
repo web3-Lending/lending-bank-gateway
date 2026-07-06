@@ -18,6 +18,12 @@ class Settings(BaseSettings):
     # HMAC 签名密钥（对齐 APISIX LENDING consumer signing_key）。切流到 APISIX 后必配，
     # 为空=直连 baffle 模式不签名（ADR-0001 P1b）。
     wedap_import_signing_secret: str = ""
+    # wedap→gateway 入站回调 apikey（FU-GW-INBOUND-AUTH-WEDAP-CALLBACK）。wedap 调
+    # /api/v1/callbacks/wedap/transactions 与 /api/v1/recon/notify 时带 `apikey` header，
+    # 由 S2SMiddleware 在 body 解析前认证（回调不验签，无 body 签名，2026-07-06 决策）。
+    # 空=dev 降级放行（仅 local/test）；非 local/test 环境未配则 create_app 启动期 fail-fast
+    # （资金网关禁 fail-open），prod/dev-hw 必配。
+    wedap_callback_api_key: str = ""
     wedap_delivery_interval_seconds: float = 5.0
     wedap_delivery_max_attempts: int = 5
     wedap_delivery_enabled: bool = False  # wedap 投递 worker 开关（默认关，e2e/部署显式开）
