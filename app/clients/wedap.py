@@ -13,6 +13,10 @@ import httpx
 _IMPORT_PATH = "/bank/api/v1/import/batch-uploaded"
 # flow-import presign 签发端点（ADR-0001 P4 预签名投递）；HMAC 签名串用它。
 _PRESIGN_PATH = "/bank/api/v1/import/presign"
+# 银行南向 API（放款/还款/归集/分发/状态）经 APISIX 时的路由前缀。直连 baffle 无此前缀。
+# bank_signing_secret 配置 = 切流到 APISIX：路径加 /bank + apikey + HMAC 签名头；
+# 空 = 直连 baffle（向后兼容，路径不变、不签名）。
+_BANK_APISIX_PREFIX = "/bank"
 
 
 def _hmac_sign(secret: str, *, method: str, path: str, timestamp: str, body: str) -> str:
@@ -90,6 +94,8 @@ class WedapClient:
         timeout_seconds: float,
         import_api_key: str | None = None,
         import_signing_secret: str | None = None,
+        bank_api_key: str | None = None,
+        bank_signing_secret: str | None = None,
     ) -> None:
         self._base = base_url.rstrip("/")
         self._timeout = timeout_seconds
@@ -97,6 +103,10 @@ class WedapClient:
         # HMAC 签名密钥（对齐 APISIX LENDING consumer 的 signing_key）。为空 = 不签名
         # （P0/P1 直连 baffle 无 APISIX 时；切流到 APISIX 后必须配，否则被 hmac-sign 拦 400）。
         self._import_signing_secret = import_signing_secret
+        # 银行南向 API（放款/还款/归集/分发/状态）的 APISIX 凭证。签名密钥配置 = 切流到 APISIX
+        # （路径加 /bank 前缀 + apikey + HMAC 签名头）；空 = 直连 baffle（向后兼容，不签名）。
+        self._bank_api_key = bank_api_key
+        self._bank_signing_secret = bank_signing_secret
 
     def _headers(self, tenant_id: str, request_id: str) -> dict[str, str]:
         return {
@@ -131,6 +141,40 @@ class WedapClient:
             )
         return headers
 
+    def _bank_request(
+        self, *, method: str, path: str, tenant_id: str, request_id: str, body_bytes: bytes
+    ) -> tuple[str, dict[str, str]]:
+        """银行南向 API 的 (url, headers)。
+
+        APISIX 模式（bank_signing_secret 配置）：路径加 ``/bank`` 前缀 + apikey +
+        X-Request-Id/X-Timestamp/X-Nonce/X-Signature（HMAC-SHA256(METHOD\\nPATH\\nTS[\\nBODY])→base64，
+        PATH 用加了 /bank 的实际发送路径、不含 query；GET 空 body 不加 body 段）。X-Tenant-Id
+        经 APISIX 按 consumer 自动写入，仍带上以兼容直连。签名对实际发送的 ``body_bytes`` 字节
+        一致，故 POST 调用方须以同一 body_bytes 发送。
+
+        baffle 模式（未配签名密钥）：路径不变、不签名，退回 ``_headers``（向后兼容）。
+        """
+        if not self._bank_signing_secret:
+            return f"{self._base}{path}", self._headers(tenant_id, request_id)
+        sent_path = f"{_BANK_APISIX_PREFIX}{path}"
+        timestamp = str(int(time.time()))
+        headers = {
+            "apikey": self._bank_api_key or "",
+            "X-Tenant-Id": tenant_id,
+            "X-Request-Id": request_id,
+            "X-Timestamp": timestamp,
+            "X-Nonce": uuid.uuid4().hex,
+            "X-Signature": _hmac_sign(
+                self._bank_signing_secret,
+                method=method,
+                path=sent_path,
+                timestamp=timestamp,
+                body=body_bytes.decode() if body_bytes else "",
+            ),
+            "Content-Type": "application/json",
+        }
+        return f"{self._base}{sent_path}", headers
+
     async def _post(
         self,
         path: str,
@@ -139,12 +183,18 @@ class WedapClient:
         request_id: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
+        # APISIX 模式须对「实际发送字节」签名，故自行序列化 + content= 发送（非 json=，
+        # 避免 httpx 默认带空格序列化导致签名串与请求体不一致）。
+        body_bytes = json.dumps(payload, separators=(",", ":")).encode()
+        url, headers = self._bank_request(
+            method="POST",
+            path=path,
+            tenant_id=tenant_id,
+            request_id=request_id,
+            body_bytes=body_bytes,
+        )
         async with httpx.AsyncClient(timeout=self._timeout) as client:
-            r = await client.post(
-                f"{self._base}{path}",
-                json=payload,
-                headers=self._headers(tenant_id, request_id),
-            )
+            r = await client.post(url, content=body_bytes, headers=headers)
         return self._unwrap(r)
 
     async def _get(
@@ -155,12 +205,15 @@ class WedapClient:
         request_id: str,
         params: dict[str, str] | None = None,
     ) -> dict[str, Any]:
+        url, headers = self._bank_request(
+            method="GET",
+            path=path,
+            tenant_id=tenant_id,
+            request_id=request_id,
+            body_bytes=b"",
+        )
         async with httpx.AsyncClient(timeout=self._timeout) as client:
-            r = await client.get(
-                f"{self._base}{path}",
-                params=params,
-                headers=self._headers(tenant_id, request_id),
-            )
+            r = await client.get(url, params=params, headers=headers)
         return self._unwrap(r)
 
     @staticmethod
