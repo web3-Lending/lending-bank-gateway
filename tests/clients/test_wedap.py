@@ -919,3 +919,167 @@ async def test_presign_missing_or_bad_url_raises(bad_url) -> None:
     with pytest.raises(WedapError) as exc:
         await _do_presign(_import_client())
     assert exc.value.code == "PRESIGN_FAILED"
+
+
+# ---------------------------------------------------------------------------
+# 银行南向 API 经 APISIX（apikey + HMAC 签名 + /bank 前缀）——bank_signing_secret 配置态
+# ---------------------------------------------------------------------------
+import base64 as _b64  # noqa: E402
+import hashlib as _hl  # noqa: E402
+import hmac as _hm  # noqa: E402
+
+_BANK_KEY = "WBTHK01_testkey"  # noqa: S105
+_BANK_SECRET = "bank-signing-secret-test"  # noqa: S105
+
+
+def _apisix_client() -> WedapClient:
+    return WedapClient(
+        base_url=BASE,
+        timeout_seconds=1.0,
+        bank_api_key=_BANK_KEY,
+        bank_signing_secret=_BANK_SECRET,
+    )
+
+
+def _expected_sig(method: str, path: str, ts: str, body: str) -> str:
+    s = f"{method}\n{path}\n{ts}" + (f"\n{body}" if body else "")
+    return _b64.b64encode(_hm.new(_BANK_SECRET.encode(), s.encode(), _hl.sha256).digest()).decode()
+
+
+@respx.mock
+async def test_bank_apisix_post_signs_prefix_apikey_and_body() -> None:
+    route = respx.post(f"{BASE}/bank/api/v1/loans/p2p-disbursements").mock(
+        return_value=httpx.Response(
+            200, json=json.loads((FIX / "disbursement_accepted.json").read_text())
+        )
+    )
+    await _apisix_client().submit_disbursement(
+        tenant_id="WBTHK01", request_id="req-b1", payload={"bizSeqNo": "DSB-1", "amt": 10}
+    )
+    assert route.called
+    req = route.calls.last.request
+    assert req.headers["apikey"] == _BANK_KEY
+    assert req.headers["X-Tenant-Id"] == "WBTHK01"
+    assert req.headers["X-Request-Id"] == "req-b1"
+    assert req.headers["X-Nonce"] and req.headers["X-Timestamp"]
+    body = req.content.decode()
+    assert body == '{"bizSeqNo":"DSB-1","amt":10}'  # 紧凑序列化，签名串与请求体逐字节一致
+    exp = _expected_sig(
+        "POST", "/bank/api/v1/loans/p2p-disbursements", req.headers["X-Timestamp"], body
+    )
+    assert req.headers["X-Signature"] == exp
+
+
+@respx.mock
+async def test_bank_apisix_get_status_signs_no_body() -> None:
+    route = respx.get(f"{BASE}/bank/api/v1/loans/p2p-disbursements/DSB-9/status").mock(
+        return_value=httpx.Response(200, json={"code": "200", "data": {"txnStatus": "SUCCESS"}})
+    )
+    await _apisix_client().query_funds_status(
+        tenant_id="WBTHK01", request_id="req-b2", biz_seq_no="DSB-9", biz_type="DISB"
+    )
+    req = route.calls.last.request
+    assert req.headers["apikey"] == _BANK_KEY
+    assert "X-Signature" in req.headers
+    exp = _expected_sig(
+        "GET", "/bank/api/v1/loans/p2p-disbursements/DSB-9/status", req.headers["X-Timestamp"], ""
+    )
+    assert req.headers["X-Signature"] == exp
+
+
+@respx.mock
+async def test_bank_apisix_repayment_signs() -> None:
+    route = respx.post(f"{BASE}/bank/api/v1/loans/p2p-repayments").mock(
+        return_value=httpx.Response(200, json={"code": "200", "data": {"txnStatus": "PROCESSING"}})
+    )
+    await _apisix_client().submit_repayment(
+        tenant_id="WBTHK01", request_id="req-b3", payload={"bizSeqNo": "RPMT-1"}
+    )
+    req = route.calls.last.request
+    assert req.headers["apikey"] == _BANK_KEY
+    exp = _expected_sig(
+        "POST",
+        "/bank/api/v1/loans/p2p-repayments",
+        req.headers["X-Timestamp"],
+        req.content.decode(),
+    )
+    assert req.headers["X-Signature"] == exp
+
+
+@respx.mock
+async def test_bank_baffle_mode_unchanged_no_prefix_no_sign() -> None:
+    route = respx.post(f"{BASE}/api/v1/loans/p2p-disbursements").mock(
+        return_value=httpx.Response(
+            200, json=json.loads((FIX / "disbursement_accepted.json").read_text())
+        )
+    )
+    await _client().submit_disbursement(tenant_id="OCBC", request_id="r", payload={"bizSeqNo": "X"})
+    req = route.calls.last.request
+    assert "apikey" not in req.headers
+    assert "X-Signature" not in req.headers
+    assert req.headers["X-Tenant-Id"] == "OCBC"
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("call", "method", "sent_path"),
+    [
+        (lambda c: c.collect_from_users(tenant_id="WBTHK01", request_id="r",
+                                        payload={"a": 1}),
+         "POST", "/bank/api/v1/bank-funds/user-collections"),
+        (lambda c: c.distribute_to_users(tenant_id="WBTHK01", request_id="r",
+                                         payload={"a": 1}),
+         "POST", "/bank/api/v1/bank-funds/user-distributions"),
+        (lambda c: c.query_funds_status(tenant_id="WBTHK01", request_id="r",
+                                        biz_seq_no="RP-1", biz_type="RPMT"),
+         "GET", "/bank/api/v1/loans/p2p-repayments/RP-1/status"),
+        (lambda c: c.query_funds_status(tenant_id="WBTHK01", request_id="r",
+                                        biz_seq_no="DT-1", biz_type="DIST"),
+         "GET", "/bank/api/v1/bank-funds/user-distributions/DT-1"),
+        (lambda c: c.get_composite_steps(tenant_id="WBTHK01", biz_seq_no="CT-1"),
+         "GET", "/bank/api/v1/composite-transactions/CT-1/steps"),
+    ],
+)
+async def test_bank_apisix_all_south_paths_signed(call, method, sent_path) -> None:
+    if method == "POST":
+        respx.post(f"{BASE}{sent_path}").mock(
+            return_value=httpx.Response(200, json={"code": "200", "data": {"steps": []}})
+        )
+    else:
+        respx.get(f"{BASE}{sent_path}").mock(
+            return_value=httpx.Response(200, json={"code": "200", "data": {"steps": []}})
+        )
+    await call(_apisix_client())
+    reqs = [c.request for c in respx.calls if str(c.request.url).endswith(sent_path)]
+    assert reqs, f"no request to {sent_path}"
+    req = reqs[-1]
+    assert req.headers["apikey"] == _BANK_KEY
+    body = req.content.decode() if method == "POST" else ""
+    assert req.headers["X-Signature"] == _expected_sig(
+        method, sent_path, req.headers["X-Timestamp"], body
+    )
+
+
+@respx.mock
+async def test_bank_apisix_get_with_query_signs_path_excluding_query() -> None:
+    route = respx.get(f"{BASE}/bank/api/v1/users/info").mock(
+        return_value=httpx.Response(200, json={"code": "200", "data": {"userId": "U1"}})
+    )
+    await _apisix_client().get_user_info(
+        tenant_id="WBTHK01", request_id="r", params={"userId": "U1", "channelId": "W3C"}
+    )
+    req = route.calls.last.request
+    assert "userId=U1" in str(req.url)  # query 仍随请求发送
+    # 签名 path 不含 query（对齐 APISIX hmac-sign：PATH 用改写前路径不含 query）
+    exp = _expected_sig("GET", "/bank/api/v1/users/info", req.headers["X-Timestamp"], "")
+    assert req.headers["X-Signature"] == exp
+
+
+def test_bank_apisix_mode_requires_api_key_when_signing_set() -> None:
+    """半配置(只配 signing secret 漏 apikey)—— WedapClient 层不拦(由 create_app fail-fast),
+    但客户端应发 apikey:'' 可被复现，防回归静默。"""
+    c = WedapClient(base_url=BASE, timeout_seconds=1.0,
+                    bank_api_key="", bank_signing_secret=_BANK_SECRET)
+    _, headers = c._bank_request(method="POST", path="/x", tenant_id="T", request_id="r",
+                                 body_bytes=b"{}")
+    assert headers["apikey"] == ""  # 半配置会发空 apikey → create_app 启动期已拦

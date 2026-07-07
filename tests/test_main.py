@@ -305,3 +305,30 @@ def test_lifespan_wedap_delivery_worker_started(monkeypatch: pytest.MonkeyPatch)
 
     assert started["wedap"]  # wedap 投递 worker 已起
     get_settings.cache_clear()
+
+
+def test_create_app_bank_half_config_fails_fast() -> None:
+    """资金链路 fail-fast（codex MEDIUM）：银行 signing 配置但漏 apikey → 启动期 RuntimeError。"""
+    from app.core.config import Settings
+
+    bad = Settings(
+        env="test",
+        wedap_bank_signing_secret="s3cr3t",  # noqa: S106
+        wedap_bank_api_key="",
+    )
+    with pytest.raises(RuntimeError, match="GW_WEDAP_BANK_API_KEY"):
+        create_app(bad)
+
+
+def test_create_app_bank_both_set_ok() -> None:
+    """银行凭证两项齐备 → 正常启动（APISIX 模式）。"""
+    from app.core.config import Settings
+
+    ok = Settings(
+        env="test",
+        wedap_bank_signing_secret="s3cr3t",  # noqa: S106
+        wedap_bank_api_key="WBTHK01_key",  # noqa: S106
+    )
+    app = create_app(ok)
+    assert app.state.wedap._bank_signing_secret == "s3cr3t"  # noqa: S105
+    assert app.state.wedap._bank_api_key == "WBTHK01_key"

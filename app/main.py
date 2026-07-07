@@ -366,11 +366,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.engine = engine
     app.state.session_factory = build_session_factory(engine)
+    # 资金链路半配置 fail-fast（codex MEDIUM）：银行 APISIX 模式(签名密钥配置)必须同时配 apikey，
+    # 否则会发 apikey:"" 到 APISIX、首笔交易才被 key-auth 拒；启动期拦截而非运行期爆。
+    if settings.wedap_bank_signing_secret and not settings.wedap_bank_api_key:
+        raise RuntimeError(
+            "GW_WEDAP_BANK_SIGNING_SECRET is set but GW_WEDAP_BANK_API_KEY is empty — "
+            "bank APISIX mode requires both (or clear both for direct-baffle mode)."
+        )
     app.state.wedap = WedapClient(
         base_url=settings.wedap_base_url,
         timeout_seconds=settings.wedap_timeout_seconds,
         import_api_key=settings.wedap_import_api_key,
         import_signing_secret=settings.wedap_import_signing_secret,
+        bank_api_key=settings.wedap_bank_api_key,
+        bank_signing_secret=settings.wedap_bank_signing_secret,
     )
     # outbox_targets 供 dispatcher worker（T24）读取；key=target 名，value=目标 URL
     app.state.outbox_targets = {
