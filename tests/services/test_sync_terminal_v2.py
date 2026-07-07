@@ -228,6 +228,41 @@ async def test_reconcile_once_isolates_per_order_failure(factory) -> None:
 
 
 @pytest.mark.asyncio
+async def test_reconcile_once_isolates_wedap_error(factory) -> None:
+    """单单 WedapError（sync_legs_for→get_composite_steps 抛，如 wedap 404/5xx）隔离：
+    不逸出打穿整轮 worker、其余候选单继续。回归 FU-GW-RECONCILE-WEDAPERROR-ISOLATION：
+    修前 leg 兜底块只 except LegsSyncIncomplete，WedapError 逸出 → worker 崩溃循环。"""
+    await _seed_order(factory, biz="DSB-WEDAP-ERR", status="SUBMITTED")
+    await _seed_order(factory, biz="DSB-OK", status="SUBMITTED")
+    now = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=60)
+    wedap = AsyncMock()
+    wedap.query_funds_status.return_value = {"txnStatus": "PROCESSING"}  # 非终态→回落 leg 兜底
+
+    async def _sync(*_args, **kwargs):
+        if kwargs["biz_seq_no"] == "DSB-WEDAP-ERR":
+            raise WedapError("404", "No execution records found for bizSeqNo=DSB-WEDAP-ERR")
+
+    with patch(
+        "app.workers.order_reconcile_worker.sync_legs_for",
+        new_callable=AsyncMock,
+        side_effect=_sync,
+    ) as m:
+        count = await reconcile_once(
+            factory,
+            wedap=wedap,
+            now=now,
+            stale_after_seconds=1.0,
+            max_age_seconds=1e9,
+            leg_backfill_seconds=1e9,
+            batch_limit=10,
+        )
+    # WedapError 未逸出（reconcile_once 正常返回）+ 出错单不计入、正常单仍处理
+    assert count == 1
+    picked = {c.kwargs["biz_seq_no"] for c in m.call_args_list}
+    assert picked == {"DSB-WEDAP-ERR", "DSB-OK"}  # 两单都被尝试：错单没中断批
+
+
+@pytest.mark.asyncio
 async def test_reconcile_skips_terminal_no_leg_beyond_backfill_window(factory) -> None:
     """终态无 leg 但 finalized_at 超 leg_backfill 窗 → 不再补拉（防 CLT 空 steps 长期热重试）。"""
     now = dt.datetime.now(dt.UTC)
