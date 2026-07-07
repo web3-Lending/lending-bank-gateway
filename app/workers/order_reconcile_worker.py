@@ -132,6 +132,15 @@ async def reconcile_once(
             count += 1
         except LegsSyncIncomplete:
             logger.warning("order-reconcile incomplete %s/%s（待下轮重试）", tenant_id, biz_seq_no)
+        except Exception:  # noqa: BLE001 - 兜底 worker 单笔隔离：sync_legs_for→get_composite_steps
+            # 抛的 WedapError（如 wedap 404『无执行记录』/5xx）或 httpx 传输异常等，不得逸出
+            # reconcile_once 打穿整轮 worker（否则 supervisor 每 5s 重启、饿死其余单收敛）。
+            # 与上方 status-query 块的 per-order 隔离对齐；单笔记录后继续下一单，待下轮重试。
+            logger.exception(
+                "order-reconcile leg-sync failed %s/%s（单笔隔离，待下轮重试）",
+                tenant_id,
+                biz_seq_no,
+            )
     # G6：超 max_age 仍非终态的父单 → 去重告警（标记表 + 限频 ERROR），不静默放弃
     await alert_stuck_orders(
         factory, now=now, max_age_seconds=max_age_seconds, batch_limit=batch_limit
