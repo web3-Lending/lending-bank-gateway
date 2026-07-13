@@ -5,6 +5,30 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/version": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Api Version",
+        "description": "标准运行态身份端点：data 信封包裹（规范禁止扁平 JSON）。",
+        "operationId": "api_version_api_version_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Api Version Api Version Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/healthz": {
       "get": {
         "tags": [

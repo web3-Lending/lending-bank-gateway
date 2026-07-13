@@ -16,9 +16,19 @@ RUN pip install --no-cache-dir --timeout=300 --retries=8 -e . && useradd -r gate
 # USER gateway) so /srv ownership stays root; the files are world-readable.
 # Defaults to "unknown" for local / non-deploy builds without --build-arg GIT_SHA.
 ARG GIT_SHA=unknown
+ARG APP_VERSION=0.1.0
+ARG RELEASE_ID=not-reported
+ARG SCHEMA_REVISION=schema_unknown
+ARG REPO_URL=https://github.com/web3-Lending/lending-bank-gateway
 RUN date -u +%Y-%m-%dT%H:%M:%SZ > /srv/build_time.txt && \
     echo "${GIT_SHA}" > /srv/git_sha.txt
-LABEL org.opencontainers.image.revision="${GIT_SHA}"
+LABEL org.opencontainers.image.version="${APP_VERSION}" \
+      org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.source="${REPO_URL}" \
+      io.lending.project="lending-bank-gateway" \
+      io.lending.service="lending-bank-gateway-api" \
+      io.lending.release.id="${RELEASE_ID}" \
+      io.lending.schema.revision="${SCHEMA_REVISION}"
 USER gateway
 EXPOSE 8022
 HEALTHCHECK --interval=30s --timeout=5s CMD python -c "import urllib.request as u; u.urlopen('http://127.0.0.1:8022/healthz')"

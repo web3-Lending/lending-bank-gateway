@@ -161,3 +161,128 @@ def test_build_info_null_when_files_empty(app: FastAPI, tmp_path: Any) -> None:
         client = TestClient(app)
         r = client.get("/build-info")
     assert r.json()["data"] == {"build_time": None, "git_sha": None}
+
+
+def test_api_version_env_driven_identity(app: FastAPI, tmp_path: Any, monkeypatch: Any) -> None:
+    """部署链 env 全注入 → data 信封逐字段回显（规范 §/api/version 标准）。"""
+    from app.api.v1 import health as health_mod
+
+    for key, value in {
+        "APP_VERSION": "0.1.0",
+        "GIT_SHA": "a" * 40,
+        "PROJECT_ID": "lending-bank-gateway",
+        "SERVICE_NAME": "lending-bank-gateway-api",
+        "COLLAB_RELEASE_ID": "lending-bank-gateway-20260713-001",
+        "COLLAB_RELEASE_RUN_ID": "dev-promote-20260713-001",
+        "COLLAB_RELEASE_ENV": "dev",
+        "IMAGE_DIGEST": "sha256:" + "b" * 64,
+        "SOURCE_CONFIG_DIGEST": "sha256:" + "c" * 64,
+        "APP_SCHEMA_REVISION": "0007_leg_unique",
+        "BUILD_TIME_HKT": "2026-07-13 18:00:00 HKT",
+        "DATA_ACTION": "none",
+    }.items():
+        monkeypatch.setenv(key, value)
+    bt = tmp_path / "build_time.txt"
+    bt.write_text("2026-07-13T10:00:00Z\n", encoding="utf-8")
+    with patch.object(health_mod, "BUILD_TIME_FILE", bt):
+        client = TestClient(app)
+        r = client.get("/api/version")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["success"] is True and body["trace_id"]
+    data = body["data"]
+    assert data["appVersion"] == "0.1.0"
+    assert data["gitSha"] == "a" * 40
+    assert data["releaseId"] == "lending-bank-gateway-20260713-001"
+    assert data["releaseRunId"] == "dev-promote-20260713-001"
+    assert data["releaseEnv"] == "dev"
+    assert data["imageDigest"] == "sha256:" + "b" * 64
+    assert data["sourceConfigDigest"] == "sha256:" + "c" * 64
+    assert data["schemaRevision"] == "0007_leg_unique"
+    assert data["buildTimeHkt"] == "2026-07-13 18:00:00 HKT"
+    assert data["dataAction"] == "none"
+    assert data["dependencies"]["mysql"] == {
+        "version": "unreported",
+        "status": "unreported",
+    }
+
+
+def test_api_version_fallbacks_without_env(app: FastAPI, tmp_path: Any, monkeypatch: Any) -> None:
+    """无部署 env → 包元数据版本 + 显式占位（不猜测、不假绿）。"""
+    from app.api.v1 import health as health_mod
+
+    for key in (
+        "APP_VERSION",
+        "GIT_SHA",
+        "PROJECT_ID",
+        "SERVICE_NAME",
+        "COLLAB_RELEASE_ID",
+        "COLLAB_RELEASE_RUN_ID",
+        "COLLAB_RELEASE_ENV",
+        "GW_ENV",
+        "IMAGE_DIGEST",
+        "COLLAB_IMAGE_DIGEST",
+        "SOURCE_CONFIG_DIGEST",
+        "APP_SCHEMA_REVISION",
+        "SCHEMA_REVISION",
+        "BUILD_TIME_HKT",
+        "DATA_ACTION",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    missing = tmp_path / "absent.txt"
+    with (
+        patch.object(health_mod, "BUILD_TIME_FILE", missing),
+        patch.object(health_mod, "GIT_SHA_FILE", missing),
+    ):
+        client = TestClient(app)
+        r = client.get("/api/version")
+    data = r.json()["data"]
+    assert data["projectId"] == "lending-bank-gateway"
+    assert data["serviceName"] == "lending-bank-gateway-api"
+    assert data["appVersion"] == "0.1.0"
+    assert data["releaseId"] == "not-reported"
+    assert data["releaseRunId"] == "not-reported"
+    assert data["releaseEnv"] == "local"
+    assert data["gitSha"] == "unknown"
+    assert data["imageDigest"] == "digest_missing"
+    assert data["sourceConfigDigest"] == "digest_missing"
+    assert data["schemaRevision"] == "schema_unknown"
+    assert data["buildTimeHkt"] == "unknown"
+
+
+def test_api_version_package_metadata_fallback(monkeypatch: Any) -> None:
+    """importlib.metadata 未安装包 → 常量兜底 0.1.0。"""
+    from importlib import metadata as importlib_metadata
+
+    from app.api.v1 import health as health_mod
+
+    def _raise(_: str) -> str:
+        raise importlib_metadata.PackageNotFoundError
+
+    monkeypatch.setattr(health_mod.metadata, "version", _raise)
+    assert health_mod._package_app_version() == "0.1.0"
+
+
+def test_api_version_build_time_hkt_conversion() -> None:
+    """UTC stamp → HKT 展示；空值 → None；非法值原样透传（规范：只展示不排序）。"""
+    from app.api.v1 import health as health_mod
+
+    assert health_mod._build_time_hkt("2026-07-13T10:00:00Z") == "2026-07-13 18:00:00 HKT"
+    assert health_mod._build_time_hkt("2026-07-13T10:00:00") == "2026-07-13 18:00:00 HKT"
+    assert health_mod._build_time_hkt("") is None
+    assert health_mod._build_time_hkt("not-a-timestamp") == "not-a-timestamp"
+
+
+def test_api_version_exempt_from_s2s(monkeypatch: Any) -> None:
+    """/api/version 在 S2S 豁免清单——无 token 也可读版本身份（与 /build-info 同权）。"""
+    from app.core.config import get_settings
+    from app.main import create_app
+
+    monkeypatch.setenv("GW_ENV", "test")
+    monkeypatch.delenv("COLLAB_RELEASE_ENV", raising=False)
+    get_settings.cache_clear()
+    real_app = create_app()
+    client = TestClient(real_app)
+    r = client.get("/api/version")
+    assert r.status_code == 200
+    assert r.json()["data"]["releaseEnv"] == "test"

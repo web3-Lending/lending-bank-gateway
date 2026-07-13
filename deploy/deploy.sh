@@ -58,6 +58,13 @@ if ! [[ "$GIT_SHA" =~ ^[A-Za-z0-9._/-]+$ ]]; then
 fi
 export GIT_SHA
 
+# 运行态发布身份（版本号与发布身份规范0707）：appVersion 真源是 pyproject.toml，
+# 部署时注入容器 env 供 /api/version 回显；未提供的批次/schema 字段由端点显式占位。
+APP_VERSION="${APP_VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' "$PROJECT_ROOT/pyproject.toml" | head -1)}"
+APP_VERSION="${APP_VERSION:-0.1.0}"
+export APP_VERSION
+export BUILD_TIME_HKT="${BUILD_TIME_HKT:-$(TZ=Asia/Hong_Kong date '+%Y-%m-%d %H:%M:%S HKT')}"
+
 # ── Colors & logging ─────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 print_info()    { echo -e "${CYAN}[INFO]${NC} $1"; }
@@ -177,7 +184,11 @@ if [ "$DEPLOY_MODE" = "remote" ]; then
 
     print_info "本机 build 镜像 ${IMAGE_TAG}（GIT_SHA=${GIT_SHA}）..."
     cd "$PROJECT_ROOT"
-    DOCKER_BUILDKIT=1 docker build -f deploy/Dockerfile -t "${IMAGE_TAG}" --build-arg GIT_SHA="${GIT_SHA}" .
+    DOCKER_BUILDKIT=1 docker build -f deploy/Dockerfile -t "${IMAGE_TAG}" \
+        --build-arg GIT_SHA="${GIT_SHA}" \
+        --build-arg APP_VERSION="${APP_VERSION}" \
+        --build-arg RELEASE_ID="${COLLAB_RELEASE_ID:-not-reported}" \
+        --build-arg SCHEMA_REVISION="${APP_SCHEMA_REVISION:-schema_unknown}" .
 
     print_info "docker save + gzip + scp 到 dev-hw + load ..."
     docker save "${IMAGE_TAG}" | gzip > "${TARBALL}"
@@ -196,6 +207,14 @@ if [ "$DEPLOY_MODE" = "remote" ]; then
         printf 'GW_WEDAP_BASE_URL=%s\n' "$WEDAP_BASE_URL"
         printf 'GW_S2S_SECRET=%s\n' "$GW_S2S_SECRET"
         printf 'GW_ENV=%s\n' "$GW_ENV"
+        # 运行态发布身份 env（/api/version 回显源；规范0707 §Docker/OCI Label 与环境变量）
+        printf 'APP_VERSION=%s\n' "$APP_VERSION"
+        printf 'GIT_SHA=%s\n' "$GIT_SHA"
+        printf 'BUILD_TIME_HKT=%s\n' "$BUILD_TIME_HKT"
+        printf 'COLLAB_RELEASE_ENV=%s\n' "$GW_ENV"
+        [ -n "${COLLAB_RELEASE_ID:-}" ] && printf 'COLLAB_RELEASE_ID=%s\n' "$COLLAB_RELEASE_ID"
+        [ -n "${COLLAB_RELEASE_RUN_ID:-}" ] && printf 'COLLAB_RELEASE_RUN_ID=%s\n' "$COLLAB_RELEASE_RUN_ID"
+        [ -n "${APP_SCHEMA_REVISION:-}" ] && printf 'APP_SCHEMA_REVISION=%s\n' "$APP_SCHEMA_REVISION"
         # flow-import + 银行 API + S3 可选透传：env.<ENV> 定义即注入容器；未定义留空=直连 baffle
         # （codex HIGH：原先只透传 4 项，切流 APISIX 时容器凭证仍空→_bank_request 退回 baffle→400/401）。
         # AWS_* 走 boto3 标准 env（非 GW_ 前缀）；其余为 GW_ 前缀的 Settings 字段。
