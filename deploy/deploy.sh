@@ -220,6 +220,7 @@ if [ "$DEPLOY_MODE" = "remote" ]; then
         # 无凭证可透传；flow-import 独立 base 走 GW_WEDAP_IMPORT_BASE_URL（/external/web2-core）。
         # AWS_* 走 boto3 标准 env（非 GW_ 前缀）；其余为 GW_ 前缀的 Settings 字段。
         for _kv in \
+            "GW_WEDAP_CALLBACK_API_KEY=${GW_WEDAP_CALLBACK_API_KEY:-}" \
             "GW_WEDAP_IMPORT_API_KEY=${WEDAP_IMPORT_API_KEY:-}" \
             "GW_WEDAP_IMPORT_BASE_URL=${WEDAP_IMPORT_BASE_URL:-}" \
             "GW_WEDAP_IMPORT_BUCKET=${WEDAP_IMPORT_BUCKET:-}" \
