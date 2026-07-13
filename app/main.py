@@ -58,7 +58,7 @@ class _JsonLogFormatter(logging.Formatter):
             trace_id = current_ids().trace_id
         except Exception:
             trace_id = "trc-none"
-        entry: dict = {
+        entry: dict[str, Any] = {
             "time": _log_time(record.created),
             "level": record.levelname,
             "logger": record.name,

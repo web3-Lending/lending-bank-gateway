@@ -211,9 +211,7 @@ async def test_deliver_task_rejected_status_raises(status):
     s3.get_bytes = MagicMock(return_value=_CONTENT)
     s3.upload = MagicMock(return_value=_CHECKSUM)
     wedap = AsyncMock()
-    wedap.notify_batch_uploaded = AsyncMock(
-        return_value={"status": status, "message": "boom"}
-    )
+    wedap.notify_batch_uploaded = AsyncMock(return_value={"status": status, "message": "boom"})
 
     with pytest.raises(WedapBatchRejected) as exc:
         await deliver_task(
