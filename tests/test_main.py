@@ -278,6 +278,63 @@ class TestWorkerLogging:
         create_app()
         assert len(self._stdout_handlers()) == 1
 
+    def test_stdout_handler_emits_cw_compatible_json(self) -> None:
+        """stdout handler 输出结构化 JSON，time 为 +0800 无冒号（华为云 ICAgent /
+        CloudWatch Agent 兼容），字段 time/level/logger/msg/traceId —— 保证接任一
+        agent 零代码改造。"""
+        import json
+        import re
+
+        self._reset_logging()
+        create_app()
+        handler = self._stdout_handlers()[0]
+        record = logging.LogRecord("gw.test", logging.INFO, __file__, 0, "probe", None, None)
+        payload = json.loads(handler.format(record))
+        assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}\+0800$", payload["time"]), (
+            payload["time"]
+        )
+        assert payload["level"] == "INFO"
+        assert payload["logger"] == "gw.test"
+        assert payload["msg"] == "probe"
+        assert "traceId" in payload
+
+    def test_json_formatter_includes_exception(self) -> None:
+        """record 带 exc_info 时 JSON 含 exception 栈。"""
+        import json
+
+        self._reset_logging()
+        create_app()
+        handler = self._stdout_handlers()[0]
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            import sys as _sys
+
+            rec = logging.LogRecord("gw", logging.ERROR, __file__, 0, "err", None, _sys.exc_info())
+        payload = json.loads(handler.format(rec))
+        assert "exception" in payload
+        assert any("ValueError" in line for line in payload["exception"])
+
+    def test_json_formatter_trace_id_fallback_on_context_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """current_ids 异常时 traceId 回退 trc-none，formatter 不抛。"""
+        import json
+
+        import app.core.context as ctx
+
+        self._reset_logging()
+        create_app()
+        handler = self._stdout_handlers()[0]
+
+        def _boom() -> object:
+            raise RuntimeError("ctx unavailable")
+
+        monkeypatch.setattr(ctx, "current_ids", _boom)
+        rec = logging.LogRecord("gw", logging.INFO, __file__, 0, "x", None, None)
+        payload = json.loads(handler.format(rec))
+        assert payload["traceId"] == "trc-none"
+
 
 def test_lifespan_wedap_delivery_worker_started(monkeypatch: pytest.MonkeyPatch) -> None:
     """GW_WEDAP_DELIVERY_ENABLED=true → lifespan 额外起 wedap-delivery-dispatcher worker。"""
