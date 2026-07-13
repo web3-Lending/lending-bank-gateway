@@ -1,10 +1,24 @@
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="GW_", env_file=".env", extra="ignore")
+
+    @field_validator("s3_endpoint_url", "s2s_secret", mode="before")
+    @classmethod
+    def _empty_env_as_none(cls, v: object) -> object:
+        """空串/纯空白环境变量归一为 None（可空字段语义 = 未配置）。
+
+        compose 的 environment 段无法条件注入，`${VAR:-}` 会把未定义变量写成空串；
+        s3_endpoint_url 若拿到 "" 会被 boto3 当字面 endpoint 抛 Invalid endpoint
+        （recon-worker 启动崩溃循环）。s2s_secret 本就"空串与 None 等价"，一并归一。
+        """
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
 
     db_url: str = "sqlite+aiosqlite:///:memory:"
     wedap_base_url: str = "http://localhost:8021"

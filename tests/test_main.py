@@ -452,3 +452,17 @@ def test_create_app_wires_wedap_import_base_url() -> None:
 
     fallback = create_app(Settings(env="test", wedap_base_url="http://baffle:8021"))
     assert fallback.state.wedap._import_base == "http://baffle:8021"
+
+
+def test_settings_empty_env_string_normalizes_to_none(monkeypatch) -> None:
+    """compose `${VAR:-}` 注入空串时，可空字段归一 None（防 boto3 Invalid endpoint 崩溃循环）。"""
+    from app.core.config import Settings
+
+    monkeypatch.setenv("GW_S3_ENDPOINT_URL", "")
+    monkeypatch.setenv("GW_S2S_SECRET", "  ")
+    s = Settings(env="test")
+    assert s.s3_endpoint_url is None
+    assert s.s2s_secret is None
+
+    monkeypatch.setenv("GW_S3_ENDPOINT_URL", "http://minio:9000")
+    assert Settings(env="test").s3_endpoint_url == "http://minio:9000"
