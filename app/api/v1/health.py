@@ -1,3 +1,6 @@
+import datetime
+import os
+from importlib import metadata
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +18,75 @@ router = APIRouter(tags=["health"])
 # Module-level Paths so tests can monkeypatch them to fixture files.
 BUILD_TIME_FILE = Path("/srv/build_time.txt")
 GIT_SHA_FILE = Path("/srv/git_sha.txt")
+
+
+def _read_stamp(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _package_app_version() -> str:
+    try:
+        return metadata.version("lending-bank-gateway")
+    except metadata.PackageNotFoundError:
+        return "0.1.0"
+
+
+def _build_time_hkt(build_time: str) -> str | None:
+    if not build_time:
+        return None
+    try:
+        dt = datetime.datetime.fromisoformat(build_time.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.UTC)
+        hkt = dt.astimezone(datetime.timezone(datetime.timedelta(hours=8)))
+        return hkt.strftime("%Y-%m-%d %H:%M:%S HKT")
+    except ValueError:
+        return build_time
+
+
+def _runtime_identity() -> dict[str, object]:
+    """运行态发布身份（版本号与发布身份规范0707 §/api/version 标准）。
+
+    身份字段全部来自部署链注入的 env（buildops/deploy.sh），镜像 stamp 文件与
+    包元数据只作兜底；缺失字段按规范用 version_unknown / not-reported /
+    digest_missing / schema_unknown 显式占位，禁止猜测。
+    """
+    build_time = _read_stamp(BUILD_TIME_FILE)
+    git_sha = os.getenv("GIT_SHA") or _read_stamp(GIT_SHA_FILE)
+    app_version = os.getenv("APP_VERSION") or _package_app_version()
+    return {
+        "projectId": os.getenv("PROJECT_ID", "lending-bank-gateway"),
+        "serviceName": os.getenv("SERVICE_NAME", "lending-bank-gateway-api"),
+        "appVersion": app_version or "version_unknown",
+        "releaseId": os.getenv("COLLAB_RELEASE_ID") or "not-reported",
+        "releaseRunId": os.getenv("COLLAB_RELEASE_RUN_ID") or "not-reported",
+        "releaseEnv": os.getenv("COLLAB_RELEASE_ENV") or os.getenv("GW_ENV") or "local",
+        "gitSha": git_sha or "unknown",
+        "imageDigest": os.getenv("IMAGE_DIGEST")
+        or os.getenv("COLLAB_IMAGE_DIGEST")
+        or "digest_missing",
+        "sourceConfigDigest": os.getenv("SOURCE_CONFIG_DIGEST") or "digest_missing",
+        "schemaRevision": os.getenv("APP_SCHEMA_REVISION")
+        or os.getenv("SCHEMA_REVISION")
+        or "schema_unknown",
+        "buildTimeHkt": os.getenv("BUILD_TIME_HKT") or _build_time_hkt(build_time) or "unknown",
+        "dataAction": os.getenv("DATA_ACTION", "none"),
+        "dependencies": {
+            "mysql": {
+                "version": os.getenv("MYSQL_VERSION", "unreported"),
+                "status": os.getenv("MYSQL_STATUS", "unreported"),
+            }
+        },
+    }
+
+
+@router.get("/api/version")
+def api_version() -> dict[str, Any]:
+    """标准运行态身份端点：data 信封包裹（规范禁止扁平 JSON）。"""
+    return ok(_runtime_identity(), trace_id=current_ids().trace_id)
 
 
 @router.get("/healthz")

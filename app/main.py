@@ -58,7 +58,7 @@ class _JsonLogFormatter(logging.Formatter):
             trace_id = current_ids().trace_id
         except Exception:
             trace_id = "trc-none"
-        entry: dict = {
+        entry: dict[str, object] = {
             "time": _log_time(record.created),
             "level": record.levelname,
             "logger": record.name,
@@ -383,7 +383,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(
         S2SMiddleware,
         secret=settings.s2s_secret,
-        exempt_paths={"/healthz", "/readyz", "/build-info"},
+        exempt_paths={"/healthz", "/readyz", "/build-info", "/api/version"},
         allowed_callers=allowed_callers,
         caller_tokens=caller_tokens,
         # wedap→gateway 入站回调（外部 wedap 无 lending S2S token）：middleware 层 apikey 认证，
