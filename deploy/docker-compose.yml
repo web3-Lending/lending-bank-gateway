@@ -16,7 +16,7 @@ services:
       GW_S2S_SECRET: ${GW_S2S_SECRET}
       GW_ENV: ${GW_ENV:-local}
     # Logs go to stdout (app/main.py _configure_logging); the json-file driver
-    # caps on-disk growth (3 files x 50MB) so `docker logs` can't grow unbounded
+    # caps on-disk growth (3 files x 100MB) so `docker logs` can't grow unbounded
     # and a platform log agent tails the container. Gateway never wrote log
     # files — this only adds the missing rotation cap.
     logging:
