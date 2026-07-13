@@ -1,8 +1,11 @@
 import asyncio
+import json
 import logging
 import sys
+import traceback
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
@@ -33,6 +36,39 @@ logger = logging.getLogger(__name__)
 
 _logging_configured = False
 
+_CST = timezone(timedelta(hours=8))
+
+
+def _log_time(created: float) -> str:
+    """+0800 without a colon (e.g. 2026-07-13T14:30:00.123+0800). CloudWatch Agent /
+    华为云 ICAgent parse this; isoformat's '+08:00' breaks the CW %z pattern. Matches
+    core/recon/baffle's format so one lending agent timestamp_format covers all."""
+    dt = datetime.fromtimestamp(created, tz=_CST)
+    return dt.strftime(f"%Y-%m-%dT%H:%M:%S.{dt.microsecond // 1000:03d}+0800")
+
+
+class _JsonLogFormatter(logging.Formatter):
+    """Single-line structured JSON to stdout so 华为云 ICAgent / CloudWatch Agent
+    ingest without an app-side parse rule — no code change when either is added."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        try:
+            from app.core.context import current_ids
+
+            trace_id = current_ids().trace_id
+        except Exception:
+            trace_id = "trc-none"
+        entry: dict = {
+            "time": _log_time(record.created),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+            "traceId": trace_id,
+        }
+        if record.exc_info and record.exc_info[0] is not None:
+            entry["exception"] = traceback.format_exception(*record.exc_info)
+        return json.dumps(entry, ensure_ascii=False)
+
 
 def _configure_logging(level: str) -> None:
     """给 root logger 装 stdout handler，使 app.* 的 INFO/exception 在容器 docker logs 可见。
@@ -54,7 +90,7 @@ def _configure_logging(level: str) -> None:
     root.setLevel(resolved)
     if not _logging_configured:
         handler = logging.StreamHandler(sys.stdout)
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+        handler.setFormatter(_JsonLogFormatter())
         root.addHandler(handler)
         _logging_configured = True
 
