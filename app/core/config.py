@@ -15,14 +15,10 @@ class Settings(BaseSettings):
     wedap_staging_bucket: str = "lending-wedap-staging"
     wedap_import_bucket: str = "wedap-flow-import"
     wedap_import_api_key: str = ""  # wedap flow-import notify apikey（FLOW_IMPORT_API_KEYS 之一）
-    # HMAC 签名密钥（对齐 APISIX LENDING consumer signing_key）。切流到 APISIX 后必配，
-    # 为空=直连 baffle 模式不签名（ADR-0001 P1b）。
-    wedap_import_signing_secret: str = ""
-    # 银行南向 API（放款/还款/归集/分发/状态）经 APISIX 的凭证（GW_WEDAP_BANK_API_KEY /
-    # GW_WEDAP_BANK_SIGNING_SECRET）。签名密钥配置=切流 APISIX（路径加 /bank + apikey + HMAC）；
-    # 为空=直连 baffle（向后兼容，不签名）。与 flow-import 的 import_* 凭证分离（不同 consumer）。
-    wedap_bank_api_key: str = ""
-    wedap_bank_signing_secret: str = ""
+    # flow-import 独立 base（GW_WEDAP_IMPORT_BASE_URL）：银行南向与 import 经 gw-internal
+    # 的路由前缀不同（/lending-gw → adapter vs /external/web2-core → web2-core），一个
+    # base 罩不住。空 = 回落 wedap_base_url（local/test，import 链路默认关闭）。
+    wedap_import_base_url: str = ""
     # wedap→gateway 入站回调 apikey（FU-GW-INBOUND-AUTH-WEDAP-CALLBACK）。wedap 调
     # /api/v1/callbacks/wedap/transactions 与 /api/v1/recon/notify 时带 `apikey` header，
     # 由 S2SMiddleware 在 body 解析前认证（回调不验签，无 body 签名，2026-07-06 决策）。

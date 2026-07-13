@@ -364,28 +364,18 @@ def test_lifespan_wedap_delivery_worker_started(monkeypatch: pytest.MonkeyPatch)
     get_settings.cache_clear()
 
 
-def test_create_app_bank_half_config_fails_fast() -> None:
-    """资金链路 fail-fast（codex MEDIUM）：银行 signing 配置但漏 apikey → 启动期 RuntimeError。"""
+def test_create_app_wires_wedap_import_base_url() -> None:
+    """gw-internal 分体 base：import_base_url 配置透传进 WedapClient；空则回落 base_url。"""
     from app.core.config import Settings
 
-    bad = Settings(
+    split = Settings(
         env="test",
-        wedap_bank_signing_secret="s3cr3t",  # noqa: S106
-        wedap_bank_api_key="",
+        wedap_base_url="http://gw-internal:8000/lending-gw",
+        wedap_import_base_url="http://gw-internal:8000/external/web2-core",
     )
-    with pytest.raises(RuntimeError, match="GW_WEDAP_BANK_API_KEY"):
-        create_app(bad)
+    app = create_app(split)
+    assert app.state.wedap._base == "http://gw-internal:8000/lending-gw"
+    assert app.state.wedap._import_base == "http://gw-internal:8000/external/web2-core"
 
-
-def test_create_app_bank_both_set_ok() -> None:
-    """银行凭证两项齐备 → 正常启动（APISIX 模式）。"""
-    from app.core.config import Settings
-
-    ok = Settings(
-        env="test",
-        wedap_bank_signing_secret="s3cr3t",  # noqa: S106
-        wedap_bank_api_key="WBTHK01_key",  # noqa: S106
-    )
-    app = create_app(ok)
-    assert app.state.wedap._bank_signing_secret == "s3cr3t"  # noqa: S105
-    assert app.state.wedap._bank_api_key == "WBTHK01_key"
+    fallback = create_app(Settings(env="test", wedap_base_url="http://baffle:8021"))
+    assert fallback.state.wedap._import_base == "http://baffle:8021"
