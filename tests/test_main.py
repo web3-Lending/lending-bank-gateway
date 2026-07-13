@@ -278,10 +278,9 @@ class TestWorkerLogging:
         create_app()
         assert len(self._stdout_handlers()) == 1
 
-    def test_stdout_handler_emits_cw_compatible_json(self) -> None:
-        """stdout handler 输出结构化 JSON，time 为 +0800 无冒号（华为云 ICAgent /
-        CloudWatch Agent 兼容），字段 time/level/logger/msg/traceId —— 保证接任一
-        agent 零代码改造。"""
+    def test_stdout_handler_emits_utc_snakecase_json(self) -> None:
+        """stdout handler 输出结构化 JSON，time 为 aware UTC +00:00、字段 snake_case
+        (trace_id)——lending 内部标准(05 §2 + 11)，外部平台格式由 agent 出口转。"""
         import json
         import re
 
@@ -290,13 +289,14 @@ class TestWorkerLogging:
         handler = self._stdout_handlers()[0]
         record = logging.LogRecord("gw.test", logging.INFO, __file__, 0, "probe", None, None)
         payload = json.loads(handler.format(record))
-        assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}\+0800$", payload["time"]), (
+        assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}\+00:00$", payload["time"]), (
             payload["time"]
         )
         assert payload["level"] == "INFO"
         assert payload["logger"] == "gw.test"
         assert payload["msg"] == "probe"
-        assert "traceId" in payload
+        assert "trace_id" in payload
+        assert "traceId" not in payload
 
     def test_json_formatter_includes_exception(self) -> None:
         """record 带 exc_info 时 JSON 含 exception 栈。"""
@@ -333,7 +333,7 @@ class TestWorkerLogging:
         monkeypatch.setattr(ctx, "current_ids", _boom)
         rec = logging.LogRecord("gw", logging.INFO, __file__, 0, "x", None, None)
         payload = json.loads(handler.format(rec))
-        assert payload["traceId"] == "trc-none"
+        assert payload["trace_id"] == "trc-none"
 
 
 def test_lifespan_wedap_delivery_worker_started(monkeypatch: pytest.MonkeyPatch) -> None:
