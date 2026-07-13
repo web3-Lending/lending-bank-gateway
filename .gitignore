@@ -23,3 +23,4 @@ deploy/env.dev-hw
 
 # spec-kit 技能目录（可能含凭证，本地保留，不纳入版本库）
 .claude/
+.setting/*.log
