@@ -35,6 +35,10 @@ KNOWN_BATCH_STATUS = frozenset(
     }
 )
 
+# 受理类 status（幂等受理也算）；其余 5 值为业务拒绝类。受理类只信任 2xx 位（见
+# notify_batch_uploaded 判定），dispatch 据此集合决定 DELIVERED / WedapBatchRejected。
+ACCEPTED_BATCH_STATUS = frozenset({"ACCEPTED", "DUPLICATE_BATCH"})
+
 
 class WedapError(Exception):
     def __init__(self, code: str, msg: str) -> None:
@@ -47,13 +51,30 @@ def _error_text(body: dict[str, Any]) -> str:
 
     baffle 的 envelope 用 ``msg``；真 wedap（adapter AdapterResponse / gw-internal
     CommonResponse）用 ``message``。只认其一会把另一侧的错误文案丢成 "None"。
-    空串 / 纯空白 / 非字符串视同缺失（防 ``msg: " "`` 遮住有效 ``message``）。
+    空串 / 纯空白视同缺失（防 ``msg: " "`` 遮住有效 ``message``）；非字符串的
+    truthy 载荷（数字码 / 结构化对象，部分 Java 网关会给）str 化保留，不丢诊断信息。
     """
     for key in ("msg", "message"):
         val = body.get(key)
-        if isinstance(val, str) and val.strip():
-            return val
+        if isinstance(val, str):
+            if val.strip():
+                return val
+            continue
+        if val is not None:
+            return str(val)
     return "<no error message>"
+
+
+def _flow_import_error(body: dict[str, Any], *, fallback_code: str, detail: str) -> "WedapError":
+    """flow-import 非受理响应 → WedapError 统一构造（notify / presign 共用）。
+
+    gw-internal 网关错误统一形态 CommonResponse{code,message}（无 status）→ 用其
+    ``code``；code 缺失或为 null → ``fallback_code`` 兜底（防 str(None) 污染
+    调用方按 code 的分流与日志口径）。文案带上下文 detail 便于排障。
+    """
+    code = body.get("code")
+    eff_code = str(code) if code is not None else fallback_code
+    return WedapError(eff_code, f"{_error_text(body)} ({detail})")
 
 
 class WedapClient:
@@ -336,22 +357,26 @@ class WedapClient:
         # 2) 服务端 / 网关转发错误 → raise（可重试）。
         if r.status_code >= 500:
             r.raise_for_status()
-        # 3) 业务响应仅允许 200/400（web2-core 契约）；其余 4xx（网关限流 / 路由错误等）
-        #    即使体里带 status 也不可信 → 按 CommonResponse code 抛，缺 code 用 HTTP 码兜底。
-        if r.status_code not in (200, 400):
-            raise WedapError(str(body.get("code") or f"HTTP_{r.status_code}"), _error_text(body))
-        # 4) status 须属 7 值枚举才算合法受理响应。
+        # 3) 合法枚举 status：受理类只信任 2xx 位——非成功位 + 受理体（如 403+ACCEPTED）
+        #    是矛盾响应，返回会被 dispatch 记 DELIVERED（批次实际未受理，等 RESULT_OVERDUE
+        #    才暴露）。拒绝类 status 任意非 401/5xx 位均保留（400/409/422 带业务拒因供
+        #    排障与修复重传，不降级成泛化 HTTP 码）。
         status = body.get("status")
-        if status not in KNOWN_BATCH_STATUS:
-            if "status" not in body and "code" in body:
-                # gw-internal 网关错误统一形态 CommonResponse{code,message}（无 status）。
-                raise WedapError(str(body.get("code")), _error_text(body))
-            raise WedapError(
-                "UNKNOWN_STATUS",
-                f"unrecognized/missing wedap batch status: {status!r} "
-                f"(batch={payload.get('importBatchNo')})",
-            )
-        return body
+        if status in KNOWN_BATCH_STATUS:
+            if status in ACCEPTED_BATCH_STATUS and not (200 <= r.status_code < 300):
+                raise WedapError(
+                    f"HTTP_{r.status_code}",
+                    f"acceptance status {status!r} on non-2xx position not trusted "
+                    f"(batch={payload.get('importBatchNo')})",
+                )
+            return body
+        # 4) 非枚举响应：gw-internal CommonResponse{code,message} 用其 code，缺 code
+        #    兜底 UNKNOWN_STATUS（不静默返回，否则被上层记 DELIVERED 误当受理成功）。
+        raise _flow_import_error(
+            body,
+            fallback_code="UNKNOWN_STATUS",
+            detail=f"status={status!r} http={r.status_code} batch={payload.get('importBatchNo')}",
+        )
 
     async def request_presign(
         self,
@@ -406,14 +431,22 @@ class WedapClient:
             r.raise_for_status()
         # 3) presign 成功响应只认 2xx；非 2xx（网关限流等）即使体里带 status=OK 也不可信。
         if not (200 <= r.status_code < 300):
-            raise WedapError(str(body.get("code") or f"HTTP_{r.status_code}"), _error_text(body))
+            raise _flow_import_error(
+                body,
+                fallback_code=f"HTTP_{r.status_code}",
+                detail=f"op={operation} batch={import_batch_no}",
+            )
         # 4) 业务响应：status 须为 OK 且带非空 url，否则抛（不静默返回空 url）。
         status = body.get("status")
         url = body.get("url")
         if status != "OK" or not isinstance(url, str) or not url:
             if "status" not in body and "code" in body:
                 # gw-internal 网关错误统一形态 CommonResponse{code,message}（无 status）。
-                raise WedapError(str(body.get("code")), _error_text(body))
+                raise _flow_import_error(
+                    body,
+                    fallback_code="PRESIGN_FAILED",
+                    detail=f"op={operation} batch={import_batch_no}",
+                )
             raise WedapError(
                 "PRESIGN_FAILED",
                 f"presign not OK: status={status!r} url={url!r} "

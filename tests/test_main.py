@@ -379,7 +379,7 @@ def test_create_app_gw_internal_delivery_without_import_base_fails_fast() -> Non
 
 
 def test_create_app_gw_internal_delivery_with_import_base_ok() -> None:
-    """M2 护栏反例：import base 配齐则正常启动。"""
+    """M2 护栏反例：import base + apikey 配齐则正常启动。"""
     from app.core.config import Settings
 
     ok = Settings(
@@ -387,9 +387,54 @@ def test_create_app_gw_internal_delivery_with_import_base_ok() -> None:
         wedap_base_url="http://gw-internal:8000/lending-gw",
         wedap_delivery_enabled=True,
         wedap_import_base_url="http://gw-internal:8000/external/web2-core",
+        wedap_import_api_key="k1",
     )
     app = create_app(ok)
     assert app.state.wedap._import_base == "http://gw-internal:8000/external/web2-core"
+
+
+def test_create_app_hostname_containing_lending_gw_not_false_positive() -> None:
+    """护栏判定锚定 URL path 段：主机名含 lending-gw（无路径前缀）不误触发。"""
+    from app.core.config import Settings
+
+    ok = Settings(
+        env="test",
+        wedap_base_url="http://lending-gw-internal:8000",
+        wedap_delivery_enabled=True,
+        wedap_import_base_url="",
+    )
+    app = create_app(ok)  # 不抛：直连形态，import 回落 base 合法
+    assert app.state.wedap._import_base == "http://lending-gw-internal:8000"
+
+
+def test_create_app_import_base_on_bank_route_fails_fast() -> None:
+    """护栏②：import base 误配成银行路由（照抄 base 值）→ 启动期拦截。"""
+    from app.core.config import Settings
+
+    bad = Settings(
+        env="test",
+        wedap_base_url="http://gw-internal:8000/lending-gw",
+        wedap_delivery_enabled=True,
+        wedap_import_base_url="http://gw-internal:8000/lending-gw",
+        wedap_import_api_key="k1",
+    )
+    with pytest.raises(RuntimeError, match="bank route"):
+        create_app(bad)
+
+
+def test_create_app_import_base_without_apikey_fails_fast() -> None:
+    """护栏③：投递开启 + import base 已配 + apikey 空 → 启动期拦截（防运行期 401 重试打满）。"""
+    from app.core.config import Settings
+
+    bad = Settings(
+        env="test",
+        wedap_base_url="http://gw-internal:8000/lending-gw",
+        wedap_delivery_enabled=True,
+        wedap_import_base_url="http://gw-internal:8000/external/web2-core",
+        wedap_import_api_key="",
+    )
+    with pytest.raises(RuntimeError, match="GW_WEDAP_IMPORT_API_KEY"):
+        create_app(bad)
 
 
 def test_create_app_wires_wedap_import_base_url() -> None:

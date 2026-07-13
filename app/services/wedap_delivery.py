@@ -22,10 +22,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.clients.s3 import S3FileClient
-from app.clients.wedap import WedapClient
+from app.clients.wedap import ACCEPTED_BATCH_STATUS, WedapClient, _error_text
 from app.models.wedap_delivery import WedapImportDeliveryTask
 from app.models.wedap_delivery_alert import WedapDeliveryAlert
-from app.services.wedap_import import ACCEPTED_BATCH_STATUS, WedapBatchRejected, deliver_batch
+from app.services.wedap_import import WedapBatchRejected, deliver_batch
 from app.services.wedap_import_result import ImportResult, parse_result
 
 logger = logging.getLogger(__name__)
@@ -328,7 +328,9 @@ async def deliver_task(
     )
     status = str(response.get("status"))
     if status not in ACCEPTED_BATCH_STATUS:
-        raise WedapBatchRejected(status, str(response.get("message")))
+        # 拒因文案走 msg|message 双字段兼容（baffle=msg，真 wedap=message），
+        # 与 client 层 _error_text 同口径，防 last_error 落成字面量 "None"。
+        raise WedapBatchRejected(status, _error_text(response))
     return response
 
 

@@ -1022,3 +1022,64 @@ async def test_presign_200_common_response_no_status_raises_with_code() -> None:
     with pytest.raises(WedapError) as exc:
         await _do_presign(_import_client())
     assert exc.value.code == "GW_200_WRAPPED"
+
+
+# ---------------------------------------------------------------------------
+# 兜底评审修复回归：受理类 status 只信任 2xx 位；拒绝类 status 保留任意 4xx 业务位
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_notify_400_with_accepted_status_not_trusted() -> None:
+    # 400 位 + 受理体是矛盾响应（web2-core 契约 400 只承载拒绝类）→ 抛，不记 DELIVERED。
+    respx.post(NOTIFY_PATH).mock(return_value=httpx.Response(400, json={"status": "ACCEPTED"}))
+    with pytest.raises(WedapError) as exc:
+        await _import_client().notify_batch_uploaded(payload=_payload())
+    assert exc.value.code == "HTTP_400"
+
+
+@respx.mock
+async def test_notify_202_with_accepted_status_returns_body() -> None:
+    # 受理类 status 在任意 2xx 位可信（201/202 等非 200 成功位不误伤为 FAILED 对账分叉）。
+    respx.post(NOTIFY_PATH).mock(
+        return_value=httpx.Response(202, json={"status": "ACCEPTED", "processingId": "P2"})
+    )
+    resp = await _import_client().notify_batch_uploaded(payload=_payload())
+    assert resp["processingId"] == "P2"
+
+
+@respx.mock
+async def test_notify_422_with_rejection_status_returns_body() -> None:
+    # 拒绝类 status 在非 400 的 4xx 位（REST 惯例 422/409）保留业务拒因，不降级泛化 HTTP 码。
+    respx.post(NOTIFY_PATH).mock(
+        return_value=httpx.Response(422, json={"status": "CHECKSUM_MISMATCH", "message": "bad"})
+    )
+    resp = await _import_client().notify_batch_uploaded(payload=_payload())
+    assert resp["status"] == "CHECKSUM_MISMATCH"
+
+
+@respx.mock
+async def test_notify_unknown_status_with_code_uses_code_not_unknown() -> None:
+    # 未识别 status 但带 code（中间层混合体）→ 用 code/message，不吞成 UNKNOWN_STATUS。
+    respx.post(NOTIFY_PATH).mock(
+        return_value=httpx.Response(
+            200, json={"status": "REJECTED", "code": "GW_RATE_LIMIT", "message": "throttled"}
+        )
+    )
+    with pytest.raises(WedapError) as exc:
+        await _import_client().notify_batch_uploaded(payload=_payload())
+    assert exc.value.code == "GW_RATE_LIMIT"
+    assert "throttled" in str(exc.value)
+
+
+@respx.mock
+async def test_unwrap_error_text_non_string_payload_stringified() -> None:
+    # 非字符串 truthy 错误载荷（数字码/结构化对象）str 化保留，不丢诊断信息。
+    respx.post(f"{BASE}/api/v1/loans/p2p-disbursements").mock(
+        return_value=httpx.Response(
+            200, json={"code": "500", "message": {"detail": "checksum mismatch at line 3"}}
+        )
+    )
+    with pytest.raises(WedapError) as exc:
+        await _client().submit_disbursement(tenant_id="WBTHK01", request_id="r", payload={})
+    assert "checksum mismatch at line 3" in str(exc.value)

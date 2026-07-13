@@ -15,11 +15,19 @@ services:
       GW_WEDAP_BASE_URL: ${WEDAP_BASE_URL}
       GW_S2S_SECRET: ${GW_S2S_SECRET}
       GW_ENV: ${GW_ENV:-local}
-      # flow-import（canary 切流开关在 env.local 定义才生效；Pydantic 只认 GW_ 前缀）
-      GW_WEDAP_IMPORT_BASE_URL: ${WEDAP_IMPORT_BASE_URL:-}
-      GW_WEDAP_IMPORT_API_KEY: ${WEDAP_IMPORT_API_KEY:-}
-      GW_WEDAP_DELIVERY_ENABLED: ${WEDAP_DELIVERY_ENABLED:-false}
-      GW_WEDAP_PRESIGNED_ENABLED: ${WEDAP_PRESIGNED_ENABLED:-false}
+      # flow-import 透传（Pydantic 只认 GW_ 前缀；deploy.sh 已 set -a source env 文件，
+      # 无前缀名与 GW_ 前缀名都参与替换）。嵌套默认 ${X:-${GW_X:-…}}：优先无前缀惯例名，
+      # 回落 GW_ 前缀直写名——防 environment 段用空串/false 静默覆盖 env_file 里的 GW_ 条目。
+      GW_WEDAP_IMPORT_BASE_URL: ${WEDAP_IMPORT_BASE_URL:-${GW_WEDAP_IMPORT_BASE_URL:-}}
+      GW_WEDAP_IMPORT_API_KEY: ${WEDAP_IMPORT_API_KEY:-${GW_WEDAP_IMPORT_API_KEY:-}}
+      GW_WEDAP_DELIVERY_ENABLED: ${WEDAP_DELIVERY_ENABLED:-${GW_WEDAP_DELIVERY_ENABLED:-false}}
+      GW_WEDAP_PRESIGNED_ENABLED: ${WEDAP_PRESIGNED_ENABLED:-${GW_WEDAP_PRESIGNED_ENABLED:-false}}
+      GW_WEDAP_STAGING_BUCKET: ${WEDAP_STAGING_BUCKET:-${GW_WEDAP_STAGING_BUCKET:-lending-wedap-staging}}
+      GW_WEDAP_IMPORT_BUCKET: ${WEDAP_IMPORT_BUCKET:-${GW_WEDAP_IMPORT_BUCKET:-wedap-flow-import}}
+      GW_S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-${GW_S3_ENDPOINT_URL:-}}
+      GW_RECON_BASE_URL: ${RECON_BASE_URL:-${GW_RECON_BASE_URL:-}}
+      GW_RECON_CALLBACK_HMAC_SECRET: ${RECON_CALLBACK_HMAC_SECRET:-${GW_RECON_CALLBACK_HMAC_SECRET:-}}
+      # AWS_* 凭证走 env_file 同名直通（boto3 标准名，无需映射）
     # Logs go to stdout (app/main.py _configure_logging); the json-file driver
     # caps on-disk growth (3 files x 50MB) so `docker logs` can't grow unbounded
     # and a platform log agent tails the container. Gateway never wrote log
