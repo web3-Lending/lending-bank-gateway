@@ -952,3 +952,73 @@ async def test_unwrap_error_text_from_msg_field_baffle_style() -> None:
     with pytest.raises(WedapError) as exc:
         await _client().submit_disbursement(tenant_id="WBTHK01", request_id="r", payload={})
     assert "SYSTEM_ERROR" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# codex NEEDS-ATTENTION 修复回归（L1 非业务位 4xx 不可信 status；L2 _error_text 边界）
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_notify_403_with_accepted_status_not_trusted() -> None:
+    # L1：非 200/400 的 4xx（网关限流/拒绝）即使体里带合法 status 也不可信 → 抛，不记 DELIVERED。
+    respx.post(NOTIFY_PATH).mock(return_value=httpx.Response(403, json={"status": "ACCEPTED"}))
+    with pytest.raises(WedapError) as exc:
+        await _import_client().notify_batch_uploaded(payload=_payload())
+    assert exc.value.code == "HTTP_403"
+
+
+@respx.mock
+async def test_presign_429_with_ok_status_not_trusted() -> None:
+    # L1：presign 只认 2xx；429 带 status=OK+url 也不返回 URL。
+    respx.post(PRESIGN_PATH).mock(
+        return_value=httpx.Response(429, json=_presign_ok_body("UPLOAD", "PUT"))
+    )
+    with pytest.raises(WedapError) as exc:
+        await _do_presign(_import_client())
+    assert exc.value.code == "HTTP_429"
+
+
+@respx.mock
+async def test_unwrap_error_text_blank_msg_falls_to_message() -> None:
+    # L2：msg 为纯空白时不得遮住有效 message。
+    respx.post(f"{BASE}/api/v1/loans/p2p-disbursements").mock(
+        return_value=httpx.Response(200, json={"code": "500", "msg": " ", "message": "REAL_REASON"})
+    )
+    with pytest.raises(WedapError) as exc:
+        await _client().submit_disbursement(tenant_id="WBTHK01", request_id="r", payload={})
+    assert "REAL_REASON" in str(exc.value)
+
+
+@respx.mock
+async def test_unwrap_error_text_both_missing_stable_fallback() -> None:
+    # L2：msg/message 均缺失 → 稳定兜底文案，不再输出字符串 "None"。
+    respx.post(f"{BASE}/api/v1/loans/p2p-disbursements").mock(
+        return_value=httpx.Response(200, json={"code": "500"})
+    )
+    with pytest.raises(WedapError) as exc:
+        await _client().submit_disbursement(tenant_id="WBTHK01", request_id="r", payload={})
+    assert "<no error message>" in str(exc.value)
+
+
+@respx.mock
+async def test_notify_400_common_response_no_status_raises_with_code() -> None:
+    # 400 位的网关 CommonResponse（有 code 无 status）→ 按其 code 抛。
+    respx.post(NOTIFY_PATH).mock(
+        return_value=httpx.Response(400, json={"code": "GW_400", "message": "bad request"})
+    )
+    with pytest.raises(WedapError) as exc:
+        await _import_client().notify_batch_uploaded(payload=_payload())
+    assert exc.value.code == "GW_400"
+    assert "bad request" in str(exc.value)
+
+
+@respx.mock
+async def test_presign_200_common_response_no_status_raises_with_code() -> None:
+    # 2xx 位但体是 CommonResponse（有 code 无 status/url）→ 按其 code 抛，不落 PRESIGN_FAILED。
+    respx.post(PRESIGN_PATH).mock(
+        return_value=httpx.Response(200, json={"code": "GW_200_WRAPPED", "message": "unexpected"})
+    )
+    with pytest.raises(WedapError) as exc:
+        await _do_presign(_import_client())
+    assert exc.value.code == "GW_200_WRAPPED"

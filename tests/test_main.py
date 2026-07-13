@@ -364,6 +364,34 @@ def test_lifespan_wedap_delivery_worker_started(monkeypatch: pytest.MonkeyPatch)
     get_settings.cache_clear()
 
 
+def test_create_app_gw_internal_delivery_without_import_base_fails_fast() -> None:
+    """M2 护栏：base 走 /lending-gw + 投递开启 + import base 空 → 启动期 RuntimeError。"""
+    from app.core.config import Settings
+
+    bad = Settings(
+        env="test",
+        wedap_base_url="http://gw-internal:8000/lending-gw",
+        wedap_delivery_enabled=True,
+        wedap_import_base_url="",
+    )
+    with pytest.raises(RuntimeError, match="GW_WEDAP_IMPORT_BASE_URL"):
+        create_app(bad)
+
+
+def test_create_app_gw_internal_delivery_with_import_base_ok() -> None:
+    """M2 护栏反例：import base 配齐则正常启动。"""
+    from app.core.config import Settings
+
+    ok = Settings(
+        env="test",
+        wedap_base_url="http://gw-internal:8000/lending-gw",
+        wedap_delivery_enabled=True,
+        wedap_import_base_url="http://gw-internal:8000/external/web2-core",
+    )
+    app = create_app(ok)
+    assert app.state.wedap._import_base == "http://gw-internal:8000/external/web2-core"
+
+
 def test_create_app_wires_wedap_import_base_url() -> None:
     """gw-internal 分体 base：import_base_url 配置透传进 WedapClient；空则回落 base_url。"""
     from app.core.config import Settings

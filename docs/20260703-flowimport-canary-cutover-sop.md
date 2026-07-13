@@ -44,7 +44,11 @@ lending-bank-gateway 的 wedap flow-import 投递路径从「直连 baffle mock�
 
 `wedap_delivery_alert` 出现 `RESULT_OVERDUE`（受理后超过 scanner 窗口+30min 无 _result.json）：
 
-1. 摘 `GW_WEDAP_IMPORT_BASE_URL`（回落直连 baffle）或直接关 `GW_WEDAP_DELIVERY_ENABLED`
+1. 回滚二选一：直接关 `GW_WEDAP_DELIVERY_ENABLED`（推荐，安全阀）；或把
+   `GW_WEDAP_IMPORT_BASE_URL` **显式改指 baffle**（注意：若 `GW_WEDAP_BASE_URL` 已走
+   gw-internal `/lending-gw`，仅摘空 import base 会让 import 回落拼成
+   `/lending-gw/bank/api/v1/import/*` 误路由到 adapter——投递开启时 create_app 会
+   启动期 fail-fast 拦截这种半配置）
    → 重启容器（settings 为启动时快照）。
 2. 未闭环批次在 `delivery-report` 的 `result_closure.outstanding` 里逐一核对：wedap 侧确认
    是否已入库（DUPLICATE_BATCH 幂等语义保证恢复后重投安全）。

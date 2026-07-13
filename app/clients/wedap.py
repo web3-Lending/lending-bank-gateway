@@ -47,8 +47,13 @@ def _error_text(body: dict[str, Any]) -> str:
 
     baffle 的 envelope 用 ``msg``；真 wedap（adapter AdapterResponse / gw-internal
     CommonResponse）用 ``message``。只认其一会把另一侧的错误文案丢成 "None"。
+    空串 / 纯空白 / 非字符串视同缺失（防 ``msg: " "`` 遮住有效 ``message``）。
     """
-    return str(body.get("msg") or body.get("message"))
+    for key in ("msg", "message"):
+        val = body.get(key)
+        if isinstance(val, str) and val.strip():
+            return val
+    return "<no error message>"
 
 
 class WedapClient:
@@ -331,7 +336,11 @@ class WedapClient:
         # 2) 服务端 / 网关转发错误 → raise（可重试）。
         if r.status_code >= 500:
             r.raise_for_status()
-        # 3) 业务响应：status 须属 7 值枚举才算合法受理响应。
+        # 3) 业务响应仅允许 200/400（web2-core 契约）；其余 4xx（网关限流 / 路由错误等）
+        #    即使体里带 status 也不可信 → 按 CommonResponse code 抛，缺 code 用 HTTP 码兜底。
+        if r.status_code not in (200, 400):
+            raise WedapError(str(body.get("code") or f"HTTP_{r.status_code}"), _error_text(body))
+        # 4) status 须属 7 值枚举才算合法受理响应。
         status = body.get("status")
         if status not in KNOWN_BATCH_STATUS:
             if "status" not in body and "code" in body:
@@ -395,7 +404,10 @@ class WedapClient:
         # 2) 服务端 / 网关转发错误 → raise（可重试）。
         if r.status_code >= 500:
             r.raise_for_status()
-        # 3) 业务响应：status 须为 OK 且带非空 url，否则抛（不静默返回空 url）。
+        # 3) presign 成功响应只认 2xx；非 2xx（网关限流等）即使体里带 status=OK 也不可信。
+        if not (200 <= r.status_code < 300):
+            raise WedapError(str(body.get("code") or f"HTTP_{r.status_code}"), _error_text(body))
+        # 4) 业务响应：status 须为 OK 且带非空 url，否则抛（不静默返回空 url）。
         status = body.get("status")
         url = body.get("url")
         if status != "OK" or not isinstance(url, str) or not url:

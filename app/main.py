@@ -402,6 +402,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.engine = engine
     app.state.session_factory = build_session_factory(engine)
+    # 误路由 fail-fast（codex M2）：base_url 走 gw-internal 银行路由（/lending-gw）而
+    # import base 未配时，flow-import 会拼成 /lending-gw/bank/api/v1/import/* 被转发到
+    # wedap-adapter（错误路由，且体面失败要等运行期投递才暴露）。投递开启时启动期拦截。
+    if (
+        settings.wedap_delivery_enabled
+        and not settings.wedap_import_base_url
+        and "/lending-gw" in settings.wedap_base_url
+    ):
+        raise RuntimeError(
+            "GW_WEDAP_BASE_URL routes via gw-internal (/lending-gw) and delivery is "
+            "enabled — GW_WEDAP_IMPORT_BASE_URL (/external/web2-core route) must be "
+            "set explicitly, or flow-import requests would be misrouted to wedap-adapter."
+        )
     app.state.wedap = WedapClient(
         base_url=settings.wedap_base_url,
         timeout_seconds=settings.wedap_timeout_seconds,
