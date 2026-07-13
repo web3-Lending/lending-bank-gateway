@@ -221,7 +221,10 @@ if [ "$DEPLOY_MODE" = "remote" ]; then
     scp_cmd "$GW_RUN_ENV" "$REMOTE_RUN_ENV"
     ssh_cmd "chmod 600 ${REMOTE_RUN_ENV}"
     ssh_cmd "docker rm -f ${CONTAINER_NAME} 2>/dev/null || true"
-    ssh_cmd "docker run -d --name ${CONTAINER_NAME} --network wedap-network --restart unless-stopped -p ${APP_PORT}:${APP_PORT} --env-file ${REMOTE_RUN_ENV} ${IMAGE_TAG}"
+    # remote 走 docker run 不经 compose，compose 的 json-file logging 块在 dev-hw 不生效；
+    # dev-hw daemon.json 也无全局 log-opts（2026-07-13 实测 LogConfig=json-file map[]），
+    # 轮转上限必须在 run 命令显式带上，与 compose 口径一致（3 × 100MB）。
+    ssh_cmd "docker run -d --name ${CONTAINER_NAME} --network wedap-network --restart unless-stopped --log-driver json-file --log-opt max-size=100m --log-opt max-file=3 -p ${APP_PORT}:${APP_PORT} --env-file ${REMOTE_RUN_ENV} ${IMAGE_TAG}"
     ssh_cmd "rm -f ${REMOTE_RUN_ENV}"
 
     print_info "远程健康检查（容器内先跑 alembic 再起服务，首次可能稍久）..."
