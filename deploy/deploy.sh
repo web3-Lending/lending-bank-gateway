@@ -215,18 +215,17 @@ if [ "$DEPLOY_MODE" = "remote" ]; then
         [ -n "${COLLAB_RELEASE_ID:-}" ] && printf 'COLLAB_RELEASE_ID=%s\n' "$COLLAB_RELEASE_ID"
         [ -n "${COLLAB_RELEASE_RUN_ID:-}" ] && printf 'COLLAB_RELEASE_RUN_ID=%s\n' "$COLLAB_RELEASE_RUN_ID"
         [ -n "${APP_SCHEMA_REVISION:-}" ] && printf 'APP_SCHEMA_REVISION=%s\n' "$APP_SCHEMA_REVISION"
-        # flow-import + 银行 API + S3 可选透传：env.<ENV> 定义即注入容器；未定义留空=直连 baffle
-        # （codex HIGH：原先只透传 4 项，切流 APISIX 时容器凭证仍空→_bank_request 退回 baffle→400/401）。
+        # flow-import + S3 可选透传：env.<ENV> 定义即注入容器；未定义留空。
+        # 银行南向走 gw-internal（Phase 1 无鉴权），前缀由 GW_WEDAP_BASE_URL 承载（/lending-gw），
+        # 无凭证可透传；flow-import 独立 base 走 GW_WEDAP_IMPORT_BASE_URL（/external/web2-core）。
         # AWS_* 走 boto3 标准 env（非 GW_ 前缀）；其余为 GW_ 前缀的 Settings 字段。
         for _kv in \
             "GW_WEDAP_IMPORT_API_KEY=${WEDAP_IMPORT_API_KEY:-}" \
-            "GW_WEDAP_IMPORT_SIGNING_SECRET=${WEDAP_IMPORT_SIGNING_SECRET:-}" \
+            "GW_WEDAP_IMPORT_BASE_URL=${WEDAP_IMPORT_BASE_URL:-}" \
             "GW_WEDAP_IMPORT_BUCKET=${WEDAP_IMPORT_BUCKET:-}" \
             "GW_WEDAP_STAGING_BUCKET=${WEDAP_STAGING_BUCKET:-}" \
             "GW_WEDAP_PRESIGNED_ENABLED=${WEDAP_PRESIGNED_ENABLED:-}" \
             "GW_WEDAP_DELIVERY_ENABLED=${WEDAP_DELIVERY_ENABLED:-}" \
-            "GW_WEDAP_BANK_API_KEY=${WEDAP_BANK_API_KEY:-}" \
-            "GW_WEDAP_BANK_SIGNING_SECRET=${WEDAP_BANK_SIGNING_SECRET:-}" \
             "GW_S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-}" \
             "GW_RECON_BASE_URL=${RECON_BASE_URL:-}" \
             "GW_RECON_CALLBACK_HMAC_SECRET=${RECON_CALLBACK_HMAC_SECRET:-}" \

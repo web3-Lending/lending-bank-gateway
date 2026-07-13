@@ -7,6 +7,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
@@ -402,20 +403,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.engine = engine
     app.state.session_factory = build_session_factory(engine)
-    # 资金链路半配置 fail-fast（codex MEDIUM）：银行 APISIX 模式(签名密钥配置)必须同时配 apikey，
-    # 否则会发 apikey:"" 到 APISIX、首笔交易才被 key-auth 拒；启动期拦截而非运行期爆。
-    if settings.wedap_bank_signing_secret and not settings.wedap_bank_api_key:
-        raise RuntimeError(
-            "GW_WEDAP_BANK_SIGNING_SECRET is set but GW_WEDAP_BANK_API_KEY is empty — "
-            "bank APISIX mode requires both (or clear both for direct-baffle mode)."
+    # 半配置 fail-fast（codex M2 + 兜底评审加固）：投递开启时三类误配启动期拦截，
+    # 不留到运行期投递才暴露。判定锚定 URL path 段（urlsplit().path，防 lending-gw
+    # 出现在主机名里的假阳性）；/lending-gw 是 gw-internal 银行路由前缀（wedap 路由契约），
+    # flow-import 必须走 /external/web2-core。
+    if settings.wedap_delivery_enabled:
+        base_is_bank_route = (
+            urlsplit(settings.wedap_base_url).path.rstrip("/").endswith("/lending-gw")
         )
+        import_base = settings.wedap_import_base_url
+        # ① base 走银行路由而 import base 未配 → 回落拼成 /lending-gw/bank/api/v1/import/*
+        #   误投 wedap-adapter
+        if base_is_bank_route and not import_base:
+            raise RuntimeError(
+                "GW_WEDAP_BASE_URL routes via gw-internal (/lending-gw) and delivery is "
+                "enabled — GW_WEDAP_IMPORT_BASE_URL (/external/web2-core route) must be "
+                "set explicitly, or flow-import requests would be misrouted to wedap-adapter."
+            )
+        if import_base:
+            # ② import base 也误配成银行路由（照抄 base 的值）→ 同一误路由换入口复现
+            if urlsplit(import_base).path.rstrip("/").endswith("/lending-gw"):
+                raise RuntimeError(
+                    "GW_WEDAP_IMPORT_BASE_URL points at the gw-internal bank route "
+                    "(/lending-gw) — flow-import must use the /external/web2-core route."
+                )
+            # ③ apikey 空 → web2-core 应用层必拒，运行期 401 重试打满才暴露
+            if not settings.wedap_import_api_key:
+                raise RuntimeError(
+                    "GW_WEDAP_IMPORT_BASE_URL is set with delivery enabled but "
+                    "GW_WEDAP_IMPORT_API_KEY is empty — web2-core app-layer auth would "
+                    "reject every notify/presign at runtime."
+                )
     app.state.wedap = WedapClient(
         base_url=settings.wedap_base_url,
         timeout_seconds=settings.wedap_timeout_seconds,
         import_api_key=settings.wedap_import_api_key,
-        import_signing_secret=settings.wedap_import_signing_secret,
-        bank_api_key=settings.wedap_bank_api_key,
-        bank_signing_secret=settings.wedap_bank_signing_secret,
+        import_base_url=settings.wedap_import_base_url,
     )
     # outbox_targets 供 dispatcher worker（T24）读取；key=target 名，value=目标 URL
     app.state.outbox_targets = {

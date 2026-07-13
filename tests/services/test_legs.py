@@ -580,9 +580,7 @@ async def test_new_leg_missing_txn_date_raises_legs_sync_incomplete(factory) -> 
     """G1：新 leg 插入缺 txnDate → 抛 LegsSyncIncomplete（不再静默落 NULL），零 leg 落库。"""
     step_no_date = {k: v for k, v in STEP.items() if k != "txnDate"}
     with pytest.raises(LegsSyncIncomplete):
-        await sync_legs_for(
-            factory, wedap=_wedap([step_no_date]), tenant_id="OCBC", biz_seq_no=BIZ
-        )
+        await sync_legs_for(factory, wedap=_wedap([step_no_date]), tenant_id="OCBC", biz_seq_no=BIZ)
     async with factory() as s:
         legs = (await s.execute(select(BankTxnLeg))).scalars().all()
         order = (await s.execute(select(BankTxnOrder))).scalar_one()

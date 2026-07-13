@@ -23,3 +23,6 @@ deploy/env.dev-hw
 
 # spec-kit 技能目录（可能含凭证，本地保留，不纳入版本库）
 .claude/
+
+# MCP 本地日志（.setting 下运行时产物，防误提交）
+.setting/*.log

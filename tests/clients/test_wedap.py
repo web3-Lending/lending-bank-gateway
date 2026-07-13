@@ -6,13 +6,9 @@ import pytest
 import respx
 
 from app.clients.wedap import (
-    _IMPORT_PATH,
-    _PRESIGN_PATH,
     KNOWN_BATCH_STATUS,
     WedapClient,
     WedapError,
-    WedapGatewayRejected,
-    _hmac_sign,
 )
 
 FIX = pathlib.Path(__file__).parent.parent / "fixtures" / "wedap"
@@ -569,43 +565,45 @@ async def test_notify_sends_apikey_header() -> None:
     assert route.calls.last.request.headers["apikey"] == "KEY123"
 
 
-# --- 网关拒绝锚点(success=false) + 7 值 status 全覆盖(ADR-0001 §外部错误契约) ---
+# --- 网关错误(gw-internal CommonResponse{code,message}) + 7 值 status 全覆盖(外部错误契约) ---
 
 
 @respx.mock
-async def test_notify_gateway_rejection_success_false_400_raises() -> None:
+async def test_notify_gateway_common_response_error_raises_with_its_code() -> None:
+    # gw-internal GlobalErrorWebExceptionHandler 统一错误形态：CommonResponse{code,message}
+    # （无 status 字段）→ 按其 code/message 抛 WedapError，不落 UNKNOWN_STATUS。
     respx.post(NOTIFY_PATH).mock(
         return_value=httpx.Response(
-            400,
-            json={"success": False, "error": {"code": "MISSING_REQUEST_ID", "message": "x"}},
+            404, json={"code": "GW_404", "message": "no route matched", "data": None}
         )
     )
-    with pytest.raises(WedapGatewayRejected) as exc:
+    with pytest.raises(WedapError) as exc:
         await _import_client().notify_batch_uploaded(payload=_payload())
-    assert exc.value.http_status == 400
-    assert exc.value.code == "MISSING_REQUEST_ID"
+    assert exc.value.code == "GW_404"
+    assert "no route matched" in str(exc.value)
 
 
 @respx.mock
-async def test_notify_gateway_rejection_success_false_401_is_gateway_not_plain_401() -> None:
-    # APISIX key-auth 拒绝: HTTP 401 但带 success:false → 归网关拒绝(WedapGatewayRejected),
-    # 非上游应用层 401(WedapError)。error 缺 message → 覆盖 message 兜底分支。
+async def test_notify_gateway_401_common_response_is_plain_401() -> None:
+    # 401 无论体形态（网关 CommonResponse / web2-core 应用层）统一归 apikey 未对齐。
     respx.post(NOTIFY_PATH).mock(
-        return_value=httpx.Response(401, json={"success": False, "error": {"code": "UNAUTHORIZED"}})
+        return_value=httpx.Response(401, json={"code": "UNAUTHORIZED", "message": "denied"})
     )
-    with pytest.raises(WedapGatewayRejected) as exc:
+    with pytest.raises(WedapError) as exc:
         await _import_client().notify_batch_uploaded(payload=_payload())
-    assert exc.value.http_status == 401
+    assert exc.value.code == "401"
 
 
 @respx.mock
-async def test_notify_gateway_rejection_429_no_error_dict_falls_back() -> None:
-    # success:false 但无 error dict → code/message 走兜底(GATEWAY_REJECTED)。
-    respx.post(NOTIFY_PATH).mock(return_value=httpx.Response(429, json={"success": False}))
-    with pytest.raises(WedapGatewayRejected) as exc:
+async def test_notify_gateway_429_common_response_raises_with_code() -> None:
+    # 非 401/5xx 的网关错误（如限流 429）→ 按 CommonResponse code 抛，可读文案不丢。
+    respx.post(NOTIFY_PATH).mock(
+        return_value=httpx.Response(429, json={"code": "TOO_MANY", "message": "rate limited"})
+    )
+    with pytest.raises(WedapError) as exc:
         await _import_client().notify_batch_uploaded(payload=_payload())
-    assert exc.value.http_status == 429
-    assert exc.value.code == "GATEWAY_REJECTED"
+    assert exc.value.code == "TOO_MANY"
+    assert "rate limited" in str(exc.value)
 
 
 @respx.mock
@@ -628,15 +626,14 @@ async def test_notify_missing_status_raises() -> None:
 
 
 @respx.mock
-async def test_notify_gateway_rejection_error_non_dict_falls_back() -> None:
-    # codex: error 若是字符串(非 dict) → 不应 AttributeError，code/message 走兜底。
+async def test_notify_non_contract_error_body_falls_to_unknown_status() -> None:
+    # 既无 status 也无 code 的错误体（非契约形态）→ 兜底 UNKNOWN_STATUS，不静默 DELIVERED。
     respx.post(NOTIFY_PATH).mock(
         return_value=httpx.Response(400, json={"success": False, "error": "boom"})
     )
-    with pytest.raises(WedapGatewayRejected) as exc:
+    with pytest.raises(WedapError) as exc:
         await _import_client().notify_batch_uploaded(payload=_payload())
-    assert exc.value.http_status == 400
-    assert exc.value.code == "GATEWAY_REJECTED"
+    assert exc.value.code == "UNKNOWN_STATUS"
 
 
 @respx.mock
@@ -669,76 +666,21 @@ def test_known_batch_status_is_the_seven_web2core_values() -> None:
     }
 
 
-# --- HMAC 签名（ADR-0001 P1b：切流到 APISIX 前 lending 须签名）---
-
-
-def _signed_client() -> WedapClient:
-    return WedapClient(
-        base_url=BASE,
-        timeout_seconds=1.0,
-        import_api_key="KEY123",
-        import_signing_secret="sign-secret",  # noqa: S106 - test fixture secret
-    )
-
-
-def test_hmac_sign_matches_apisix_contract() -> None:
-    # 对齐 hmac-sign.lua: HMAC-SHA256(METHOD\nPATH\nTS\nBODY) base64；与 openssl 手算一致。
-    import base64
-    import hashlib
-    import hmac as _h
-
-    sig = _hmac_sign("s", method="POST", path="/p", timestamp="123", body='{"a":1}')
-    expected = base64.b64encode(
-        _h.new(b"s", b"POST\n/p\n123\n" + b'{"a":1}', hashlib.sha256).digest()
-    ).decode()
-    assert sig == expected
-
-
-def test_hmac_sign_omits_body_when_empty() -> None:
-    # body 为空时签名串不拼 BODY 段（与 lua 一致）。
-    assert _hmac_sign("s", method="GET", path="/p", timestamp="1", body="") == _hmac_sign(
-        "s", method="GET", path="/p", timestamp="1", body=""
-    )
-    import base64
-    import hashlib
-    import hmac as _h
-
-    expected = base64.b64encode(_h.new(b"s", b"GET\n/p\n1", hashlib.sha256).digest()).decode()
-    assert _hmac_sign("s", method="GET", path="/p", timestamp="1", body="") == expected
+# --- 请求头（gw-internal：无网关签名，apikey 应用层鉴权 + X-Request-Id 追踪头恒发）---
 
 
 @respx.mock
-async def test_notify_adds_signature_headers_when_secret_set() -> None:
-    route = respx.post(NOTIFY_PATH).mock(
-        return_value=httpx.Response(200, json={"status": "ACCEPTED"})
-    )
-    await _signed_client().notify_batch_uploaded(payload=_payload())
-    req = route.calls.last.request
-    # 必填头齐 + 签名与实际发送的 body 字节一致
-    assert req.headers["X-Request-Id"] == "wedap-import-BATCH-LEN-20260624-001"
-    assert req.headers["X-Timestamp"].isdigit()
-    assert len(req.headers["X-Nonce"]) == 32
-    body_sent = req.content.decode()
-    expected_sig = _hmac_sign(
-        "sign-secret",
-        method="POST",
-        path=_IMPORT_PATH,
-        timestamp=req.headers["X-Timestamp"],
-        body=body_sent,
-    )
-    assert req.headers["X-Signature"] == expected_sig
-
-
-@respx.mock
-async def test_notify_no_signature_headers_when_secret_empty() -> None:
-    # 向后兼容：未配签名密钥（直连 baffle 模式）→ 不加签名头。
+async def test_notify_headers_no_signature_and_request_id_always_sent() -> None:
     route = respx.post(NOTIFY_PATH).mock(
         return_value=httpx.Response(200, json={"status": "ACCEPTED"})
     )
     await _import_client().notify_batch_uploaded(payload=_payload())
     req = route.calls.last.request
+    assert req.headers["X-Request-Id"] == "wedap-import-BATCH-LEN-20260624-001"
+    # gw-internal Phase 1 无网关鉴权：不再有 APISIX HMAC 签名头
     assert "X-Signature" not in req.headers
     assert "X-Nonce" not in req.headers
+    assert "X-Timestamp" not in req.headers
 
 
 def test_header_safe_sanitizes_unsafe_chars() -> None:
@@ -756,7 +698,7 @@ async def test_notify_sanitizes_batch_no_in_request_id_header() -> None:
         return_value=httpx.Response(200, json={"status": "ACCEPTED"})
     )
     payload = {**_payload(), "importBatchNo": "EVIL\r\nX-Injected: 1\t日本"}
-    await _signed_client().notify_batch_uploaded(payload=payload)
+    await _import_client().notify_batch_uploaded(payload=payload)
     req = route.calls.last.request
     rid = req.headers["X-Request-Id"]
     assert "\r" not in rid and "\n" not in rid and "\t" not in rid
@@ -828,61 +770,41 @@ async def test_presign_sends_apikey_header() -> None:
 
 
 @respx.mock
-async def test_presign_adds_signature_headers_when_secret_set() -> None:
-    """复用 notify 的 HMAC 签名机制：签名头齐全 + 签 _PRESIGN_PATH + 实发 body 字节。"""
+async def test_presign_headers_no_signature_and_request_id_always_sent() -> None:
     route = respx.post(PRESIGN_PATH).mock(
         return_value=httpx.Response(200, json=_presign_ok_body("UPLOAD", "PUT"))
     )
-    await _do_presign(_signed_client(), "UPLOAD")
+    await _do_presign(_import_client(), "UPLOAD")
     req = route.calls.last.request
     assert req.headers["X-Request-Id"] == "wedap-presign-UPLOAD-BATCH-LEN-20260624-001"
-    assert req.headers["X-Timestamp"].isdigit()
-    assert len(req.headers["X-Nonce"]) == 32
-    body_sent = req.content.decode()
-    expected_sig = _hmac_sign(
-        "sign-secret",
-        method="POST",
-        path=_PRESIGN_PATH,
-        timestamp=req.headers["X-Timestamp"],
-        body=body_sent,
-    )
-    assert req.headers["X-Signature"] == expected_sig
-
-
-@respx.mock
-async def test_presign_no_signature_headers_when_secret_empty() -> None:
-    route = respx.post(PRESIGN_PATH).mock(
-        return_value=httpx.Response(200, json=_presign_ok_body("UPLOAD", "PUT"))
-    )
-    await _do_presign(_import_client())
-    req = route.calls.last.request
+    # gw-internal Phase 1 无网关鉴权：不再有 APISIX HMAC 签名头
     assert "X-Signature" not in req.headers
     assert "X-Nonce" not in req.headers
+    assert "X-Timestamp" not in req.headers
 
 
 @respx.mock
-async def test_presign_gateway_rejection_success_false_raises() -> None:
+async def test_presign_gateway_common_response_error_raises_with_its_code() -> None:
+    # gw-internal 网关错误统一形态 CommonResponse{code,message}（无 status）→ 按其 code 抛。
     respx.post(PRESIGN_PATH).mock(
         return_value=httpx.Response(
-            401, json={"success": False, "error": {"code": "UNAUTHORIZED", "message": "x"}}
+            404, json={"code": "GW_404", "message": "no route matched", "data": None}
         )
     )
-    with pytest.raises(WedapGatewayRejected) as exc:
+    with pytest.raises(WedapError) as exc:
         await _do_presign(_import_client())
-    assert exc.value.http_status == 401
-    assert exc.value.code == "UNAUTHORIZED"
+    assert exc.value.code == "GW_404"
+    assert "no route matched" in str(exc.value)
 
 
 @respx.mock
-async def test_presign_gateway_rejection_error_non_dict_falls_back() -> None:
-    # success:false 但 error 非 dict（缺失/字符串）→ code/message 走兜底 GATEWAY_REJECTED。
+async def test_presign_gateway_429_common_response_raises_with_code() -> None:
     respx.post(PRESIGN_PATH).mock(
-        return_value=httpx.Response(429, json={"success": False, "error": "boom"})
+        return_value=httpx.Response(429, json={"code": "TOO_MANY", "message": "rate limited"})
     )
-    with pytest.raises(WedapGatewayRejected) as exc:
+    with pytest.raises(WedapError) as exc:
         await _do_presign(_import_client())
-    assert exc.value.http_status == 429
-    assert exc.value.code == "GATEWAY_REJECTED"
+    assert exc.value.code == "TOO_MANY"
 
 
 @respx.mock
@@ -922,92 +844,26 @@ async def test_presign_missing_or_bad_url_raises(bad_url) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 银行南向 API 经 APISIX（apikey + HMAC 签名 + /bank 前缀）——bank_signing_secret 配置态
+# gw-internal 对接形态（银行南向直连式无签名 + flow-import 独立 base）
 # ---------------------------------------------------------------------------
-import base64 as _b64  # noqa: E402
-import hashlib as _hl  # noqa: E402
-import hmac as _hm  # noqa: E402
 
-_BANK_KEY = "WBTHK01_testkey"  # noqa: S105
-_BANK_SECRET = "bank-signing-secret-test"  # noqa: S105
+IMPORT_BASE = "http://gw-internal:8000/external/web2-core"
 
 
-def _apisix_client() -> WedapClient:
+def _split_base_client() -> WedapClient:
+    """银行南向与 flow-import 各自 base（gw-internal：/lending-gw vs /external/web2-core）。"""
     return WedapClient(
         base_url=BASE,
         timeout_seconds=1.0,
-        bank_api_key=_BANK_KEY,
-        bank_signing_secret=_BANK_SECRET,
+        import_api_key="KEY123",
+        import_base_url=IMPORT_BASE,
     )
-
-
-def _expected_sig(method: str, path: str, ts: str, body: str) -> str:
-    s = f"{method}\n{path}\n{ts}" + (f"\n{body}" if body else "")
-    return _b64.b64encode(_hm.new(_BANK_SECRET.encode(), s.encode(), _hl.sha256).digest()).decode()
 
 
 @respx.mock
-async def test_bank_apisix_post_signs_prefix_apikey_and_body() -> None:
-    route = respx.post(f"{BASE}/bank/api/v1/loans/p2p-disbursements").mock(
-        return_value=httpx.Response(
-            200, json=json.loads((FIX / "disbursement_accepted.json").read_text())
-        )
-    )
-    await _apisix_client().submit_disbursement(
-        tenant_id="WBTHK01", request_id="req-b1", payload={"bizSeqNo": "DSB-1", "amt": 10}
-    )
-    assert route.called
-    req = route.calls.last.request
-    assert req.headers["apikey"] == _BANK_KEY
-    assert req.headers["X-Tenant-Id"] == "WBTHK01"
-    assert req.headers["X-Request-Id"] == "req-b1"
-    assert req.headers["X-Nonce"] and req.headers["X-Timestamp"]
-    body = req.content.decode()
-    assert body == '{"bizSeqNo":"DSB-1","amt":10}'  # 紧凑序列化，签名串与请求体逐字节一致
-    exp = _expected_sig(
-        "POST", "/bank/api/v1/loans/p2p-disbursements", req.headers["X-Timestamp"], body
-    )
-    assert req.headers["X-Signature"] == exp
-
-
-@respx.mock
-async def test_bank_apisix_get_status_signs_no_body() -> None:
-    route = respx.get(f"{BASE}/bank/api/v1/loans/p2p-disbursements/DSB-9/status").mock(
-        return_value=httpx.Response(200, json={"code": "200", "data": {"txnStatus": "SUCCESS"}})
-    )
-    await _apisix_client().query_funds_status(
-        tenant_id="WBTHK01", request_id="req-b2", biz_seq_no="DSB-9", biz_type="DISB"
-    )
-    req = route.calls.last.request
-    assert req.headers["apikey"] == _BANK_KEY
-    assert "X-Signature" in req.headers
-    exp = _expected_sig(
-        "GET", "/bank/api/v1/loans/p2p-disbursements/DSB-9/status", req.headers["X-Timestamp"], ""
-    )
-    assert req.headers["X-Signature"] == exp
-
-
-@respx.mock
-async def test_bank_apisix_repayment_signs() -> None:
-    route = respx.post(f"{BASE}/bank/api/v1/loans/p2p-repayments").mock(
-        return_value=httpx.Response(200, json={"code": "200", "data": {"txnStatus": "PROCESSING"}})
-    )
-    await _apisix_client().submit_repayment(
-        tenant_id="WBTHK01", request_id="req-b3", payload={"bizSeqNo": "RPMT-1"}
-    )
-    req = route.calls.last.request
-    assert req.headers["apikey"] == _BANK_KEY
-    exp = _expected_sig(
-        "POST",
-        "/bank/api/v1/loans/p2p-repayments",
-        req.headers["X-Timestamp"],
-        req.content.decode(),
-    )
-    assert req.headers["X-Signature"] == exp
-
-
-@respx.mock
-async def test_bank_baffle_mode_unchanged_no_prefix_no_sign() -> None:
+async def test_bank_direct_mode_no_prefix_no_sign() -> None:
+    # 银行南向唯一形态：base_url 直拼原始路径（gw-internal 前缀由 base_url 承载），
+    # 无 apikey / 无 HMAC 签名头。
     route = respx.post(f"{BASE}/api/v1/loans/p2p-disbursements").mock(
         return_value=httpx.Response(
             200, json=json.loads((FIX / "disbursement_accepted.json").read_text())
@@ -1017,69 +873,213 @@ async def test_bank_baffle_mode_unchanged_no_prefix_no_sign() -> None:
     req = route.calls.last.request
     assert "apikey" not in req.headers
     assert "X-Signature" not in req.headers
+    assert "X-Nonce" not in req.headers
     assert req.headers["X-Tenant-Id"] == "OCBC"
 
 
 @respx.mock
-@pytest.mark.parametrize(
-    ("call", "method", "sent_path"),
-    [
-        (lambda c: c.collect_from_users(tenant_id="WBTHK01", request_id="r",
-                                        payload={"a": 1}),
-         "POST", "/bank/api/v1/bank-funds/user-collections"),
-        (lambda c: c.distribute_to_users(tenant_id="WBTHK01", request_id="r",
-                                         payload={"a": 1}),
-         "POST", "/bank/api/v1/bank-funds/user-distributions"),
-        (lambda c: c.query_funds_status(tenant_id="WBTHK01", request_id="r",
-                                        biz_seq_no="RP-1", biz_type="RPMT"),
-         "GET", "/bank/api/v1/loans/p2p-repayments/RP-1/status"),
-        (lambda c: c.query_funds_status(tenant_id="WBTHK01", request_id="r",
-                                        biz_seq_no="DT-1", biz_type="DIST"),
-         "GET", "/bank/api/v1/bank-funds/user-distributions/DT-1"),
-        (lambda c: c.get_composite_steps(tenant_id="WBTHK01", biz_seq_no="CT-1"),
-         "GET", "/bank/api/v1/composite-transactions/CT-1/steps"),
-    ],
-)
-async def test_bank_apisix_all_south_paths_signed(call, method, sent_path) -> None:
-    if method == "POST":
-        respx.post(f"{BASE}{sent_path}").mock(
-            return_value=httpx.Response(200, json={"code": "200", "data": {"steps": []}})
-        )
-    else:
-        respx.get(f"{BASE}{sent_path}").mock(
-            return_value=httpx.Response(200, json={"code": "200", "data": {"steps": []}})
-        )
-    await call(_apisix_client())
-    reqs = [c.request for c in respx.calls if str(c.request.url).endswith(sent_path)]
-    assert reqs, f"no request to {sent_path}"
-    req = reqs[-1]
-    assert req.headers["apikey"] == _BANK_KEY
-    body = req.content.decode() if method == "POST" else ""
-    assert req.headers["X-Signature"] == _expected_sig(
-        method, sent_path, req.headers["X-Timestamp"], body
+async def test_bank_base_url_carries_gw_internal_prefix() -> None:
+    # 经 gw-internal 时 base_url 自带 /lending-gw 前缀，client 不做任何路径改写。
+    gw_base = "http://gw-internal:8000/lending-gw"
+    route = respx.get(f"{gw_base}/api/v1/loans/p2p-disbursements/DSB-9/status").mock(
+        return_value=httpx.Response(200, json={"code": "200", "data": {"txnStatus": "SUCCESS"}})
     )
+    c = WedapClient(base_url=gw_base, timeout_seconds=1.0)
+    resp = await c.query_funds_status(
+        tenant_id="WBTHK01", request_id="r", biz_seq_no="DSB-9", biz_type="DISB"
+    )
+    assert resp["txnStatus"] == "SUCCESS"
+    assert route.called
 
 
 @respx.mock
-async def test_bank_apisix_get_with_query_signs_path_excluding_query() -> None:
-    route = respx.get(f"{BASE}/bank/api/v1/users/info").mock(
-        return_value=httpx.Response(200, json={"code": "200", "data": {"userId": "U1"}})
+async def test_import_base_url_routes_notify_and_presign_separately() -> None:
+    # flow-import 走独立 base：notify/presign 打到 import_base_url，银行南向仍打 base_url。
+    notify_route = respx.post(f"{IMPORT_BASE}/bank/api/v1/import/batch-uploaded").mock(
+        return_value=httpx.Response(200, json={"status": "ACCEPTED"})
     )
-    await _apisix_client().get_user_info(
-        tenant_id="WBTHK01", request_id="r", params={"userId": "U1", "channelId": "W3C"}
+    presign_route = respx.post(f"{IMPORT_BASE}/bank/api/v1/import/presign").mock(
+        return_value=httpx.Response(200, json=_presign_ok_body("UPLOAD", "PUT"))
     )
-    req = route.calls.last.request
-    assert "userId=U1" in str(req.url)  # query 仍随请求发送
-    # 签名 path 不含 query（对齐 APISIX hmac-sign：PATH 用改写前路径不含 query）
-    exp = _expected_sig("GET", "/bank/api/v1/users/info", req.headers["X-Timestamp"], "")
-    assert req.headers["X-Signature"] == exp
+    bank_route = respx.post(f"{BASE}/api/v1/loans/p2p-repayments").mock(
+        return_value=httpx.Response(200, json={"code": "200", "data": {"txnStatus": "PROCESSING"}})
+    )
+    c = _split_base_client()
+    await c.notify_batch_uploaded(payload=_payload())
+    await _do_presign(c)
+    await c.submit_repayment(tenant_id="WBTHK01", request_id="r", payload={"bizSeqNo": "RP-1"})
+    assert notify_route.called
+    assert presign_route.called
+    assert bank_route.called
 
 
-def test_bank_apisix_mode_requires_api_key_when_signing_set() -> None:
-    """半配置(只配 signing secret 漏 apikey)—— WedapClient 层不拦(由 create_app fail-fast),
-    但客户端应发 apikey:'' 可被复现，防回归静默。"""
-    c = WedapClient(base_url=BASE, timeout_seconds=1.0,
-                    bank_api_key="", bank_signing_secret=_BANK_SECRET)
-    _, headers = c._bank_request(method="POST", path="/x", tenant_id="T", request_id="r",
-                                 body_bytes=b"{}")
-    assert headers["apikey"] == ""  # 半配置会发空 apikey → create_app 启动期已拦
+@respx.mock
+async def test_import_base_url_empty_falls_back_to_base_url() -> None:
+    # import_base_url 未配（local/test）→ 回落 base_url（既有 NOTIFY_PATH 即此形态）。
+    route = respx.post(NOTIFY_PATH).mock(
+        return_value=httpx.Response(200, json={"status": "ACCEPTED"})
+    )
+    await _import_client().notify_batch_uploaded(payload=_payload())
+    assert route.called
+
+
+# ---------------------------------------------------------------------------
+# 错误文案 msg|message 双字段兼容（baffle=msg，真 wedap AdapterResponse=message）
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_unwrap_error_text_from_message_field_adapter_style() -> None:
+    # 真 wedap（adapter AdapterResponse）错误体用 message；文案不得丢成 "None"。
+    respx.post(f"{BASE}/api/v1/loans/p2p-disbursements").mock(
+        return_value=httpx.Response(
+            200, json={"code": "500", "message": "ROUTER_TIMEOUT", "data": None}
+        )
+    )
+    with pytest.raises(WedapError) as exc:
+        await _client().submit_disbursement(tenant_id="WBTHK01", request_id="r", payload={})
+    assert exc.value.code == "500"
+    assert "ROUTER_TIMEOUT" in str(exc.value)
+    assert "None" not in str(exc.value)
+
+
+@respx.mock
+async def test_unwrap_error_text_from_msg_field_baffle_style() -> None:
+    # baffle 错误体用 msg；兼容不回退。
+    respx.post(f"{BASE}/api/v1/loans/p2p-disbursements").mock(
+        return_value=httpx.Response(200, json={"code": "500", "msg": "SYSTEM_ERROR"})
+    )
+    with pytest.raises(WedapError) as exc:
+        await _client().submit_disbursement(tenant_id="WBTHK01", request_id="r", payload={})
+    assert "SYSTEM_ERROR" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# codex NEEDS-ATTENTION 修复回归（L1 非业务位 4xx 不可信 status；L2 _error_text 边界）
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_notify_403_with_accepted_status_not_trusted() -> None:
+    # L1：非 200/400 的 4xx（网关限流/拒绝）即使体里带合法 status 也不可信 → 抛，不记 DELIVERED。
+    respx.post(NOTIFY_PATH).mock(return_value=httpx.Response(403, json={"status": "ACCEPTED"}))
+    with pytest.raises(WedapError) as exc:
+        await _import_client().notify_batch_uploaded(payload=_payload())
+    assert exc.value.code == "HTTP_403"
+
+
+@respx.mock
+async def test_presign_429_with_ok_status_not_trusted() -> None:
+    # L1：presign 只认 2xx；429 带 status=OK+url 也不返回 URL。
+    respx.post(PRESIGN_PATH).mock(
+        return_value=httpx.Response(429, json=_presign_ok_body("UPLOAD", "PUT"))
+    )
+    with pytest.raises(WedapError) as exc:
+        await _do_presign(_import_client())
+    assert exc.value.code == "HTTP_429"
+
+
+@respx.mock
+async def test_unwrap_error_text_blank_msg_falls_to_message() -> None:
+    # L2：msg 为纯空白时不得遮住有效 message。
+    respx.post(f"{BASE}/api/v1/loans/p2p-disbursements").mock(
+        return_value=httpx.Response(200, json={"code": "500", "msg": " ", "message": "REAL_REASON"})
+    )
+    with pytest.raises(WedapError) as exc:
+        await _client().submit_disbursement(tenant_id="WBTHK01", request_id="r", payload={})
+    assert "REAL_REASON" in str(exc.value)
+
+
+@respx.mock
+async def test_unwrap_error_text_both_missing_stable_fallback() -> None:
+    # L2：msg/message 均缺失 → 稳定兜底文案，不再输出字符串 "None"。
+    respx.post(f"{BASE}/api/v1/loans/p2p-disbursements").mock(
+        return_value=httpx.Response(200, json={"code": "500"})
+    )
+    with pytest.raises(WedapError) as exc:
+        await _client().submit_disbursement(tenant_id="WBTHK01", request_id="r", payload={})
+    assert "<no error message>" in str(exc.value)
+
+
+@respx.mock
+async def test_notify_400_common_response_no_status_raises_with_code() -> None:
+    # 400 位的网关 CommonResponse（有 code 无 status）→ 按其 code 抛。
+    respx.post(NOTIFY_PATH).mock(
+        return_value=httpx.Response(400, json={"code": "GW_400", "message": "bad request"})
+    )
+    with pytest.raises(WedapError) as exc:
+        await _import_client().notify_batch_uploaded(payload=_payload())
+    assert exc.value.code == "GW_400"
+    assert "bad request" in str(exc.value)
+
+
+@respx.mock
+async def test_presign_200_common_response_no_status_raises_with_code() -> None:
+    # 2xx 位但体是 CommonResponse（有 code 无 status/url）→ 按其 code 抛，不落 PRESIGN_FAILED。
+    respx.post(PRESIGN_PATH).mock(
+        return_value=httpx.Response(200, json={"code": "GW_200_WRAPPED", "message": "unexpected"})
+    )
+    with pytest.raises(WedapError) as exc:
+        await _do_presign(_import_client())
+    assert exc.value.code == "GW_200_WRAPPED"
+
+
+# ---------------------------------------------------------------------------
+# 兜底评审修复回归：受理类 status 只信任 2xx 位；拒绝类 status 保留任意 4xx 业务位
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_notify_400_with_accepted_status_not_trusted() -> None:
+    # 400 位 + 受理体是矛盾响应（web2-core 契约 400 只承载拒绝类）→ 抛，不记 DELIVERED。
+    respx.post(NOTIFY_PATH).mock(return_value=httpx.Response(400, json={"status": "ACCEPTED"}))
+    with pytest.raises(WedapError) as exc:
+        await _import_client().notify_batch_uploaded(payload=_payload())
+    assert exc.value.code == "HTTP_400"
+
+
+@respx.mock
+async def test_notify_202_with_accepted_status_returns_body() -> None:
+    # 受理类 status 在任意 2xx 位可信（201/202 等非 200 成功位不误伤为 FAILED 对账分叉）。
+    respx.post(NOTIFY_PATH).mock(
+        return_value=httpx.Response(202, json={"status": "ACCEPTED", "processingId": "P2"})
+    )
+    resp = await _import_client().notify_batch_uploaded(payload=_payload())
+    assert resp["processingId"] == "P2"
+
+
+@respx.mock
+async def test_notify_422_with_rejection_status_returns_body() -> None:
+    # 拒绝类 status 在非 400 的 4xx 位（REST 惯例 422/409）保留业务拒因，不降级泛化 HTTP 码。
+    respx.post(NOTIFY_PATH).mock(
+        return_value=httpx.Response(422, json={"status": "CHECKSUM_MISMATCH", "message": "bad"})
+    )
+    resp = await _import_client().notify_batch_uploaded(payload=_payload())
+    assert resp["status"] == "CHECKSUM_MISMATCH"
+
+
+@respx.mock
+async def test_notify_unknown_status_with_code_uses_code_not_unknown() -> None:
+    # 未识别 status 但带 code（中间层混合体）→ 用 code/message，不吞成 UNKNOWN_STATUS。
+    respx.post(NOTIFY_PATH).mock(
+        return_value=httpx.Response(
+            200, json={"status": "REJECTED", "code": "GW_RATE_LIMIT", "message": "throttled"}
+        )
+    )
+    with pytest.raises(WedapError) as exc:
+        await _import_client().notify_batch_uploaded(payload=_payload())
+    assert exc.value.code == "GW_RATE_LIMIT"
+    assert "throttled" in str(exc.value)
+
+
+@respx.mock
+async def test_unwrap_error_text_non_string_payload_stringified() -> None:
+    # 非字符串 truthy 错误载荷（数字码/结构化对象）str 化保留，不丢诊断信息。
+    respx.post(f"{BASE}/api/v1/loans/p2p-disbursements").mock(
+        return_value=httpx.Response(
+            200, json={"code": "500", "message": {"detail": "checksum mismatch at line 3"}}
+        )
+    )
+    with pytest.raises(WedapError) as exc:
+        await _client().submit_disbursement(tenant_id="WBTHK01", request_id="r", payload={})
+    assert "checksum mismatch at line 3" in str(exc.value)

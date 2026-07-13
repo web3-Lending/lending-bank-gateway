@@ -1,35 +1,14 @@
-import base64
-import hashlib
-import hmac
 import json
 import re
-import time
-import uuid
 from typing import Any
 
 import httpx
 
-# flow-import notify 的入站路径（APISIX 专用 route5，见 ADR-0001 P2）；HMAC 签名串用它。
+# flow-import notify 端点（web2-core BatchUploadedNotificationController 自带 /bank 前缀；
+# 经 gw-internal /external/web2-core 路由或直连 web2-core 均为此路径）。
 _IMPORT_PATH = "/bank/api/v1/import/batch-uploaded"
-# flow-import presign 签发端点（ADR-0001 P4 预签名投递）；HMAC 签名串用它。
+# flow-import presign 签发端点（web2-core PresignController，P4 预签名投递）。
 _PRESIGN_PATH = "/bank/api/v1/import/presign"
-# 银行南向 API（放款/还款/归集/分发/状态）经 APISIX 时的路由前缀。直连 baffle 无此前缀。
-# bank_signing_secret 配置 = 切流到 APISIX：路径加 /bank + apikey + HMAC 签名头；
-# 空 = 直连 baffle（向后兼容，路径不变、不签名）。
-_BANK_APISIX_PREFIX = "/bank"
-
-
-def _hmac_sign(secret: str, *, method: str, path: str, timestamp: str, body: str) -> str:
-    """按 wedap APISIX hmac-sign 契约签名：HMAC-SHA256(METHOD\\nPATH\\nTIMESTAMP\\nBODY) → base64。
-
-    与 recon 回调的签名方案不同（那个签 X-Body-SHA256）；此处对齐 APISIX hmac-sign.lua：
-    签名串 = ``METHOD + "\\n" + PATH + "\\n" + TIMESTAMP + "\\n" + BODY``（BODY 非空时才拼）。
-    """
-    sign_str = f"{method}\n{path}\n{timestamp}"
-    if body:
-        sign_str += f"\n{body}"
-    digest = hmac.new(secret.encode(), sign_str.encode(), hashlib.sha256).digest()
-    return base64.b64encode(digest).decode()
 
 
 def _header_safe(value: object, *, max_len: int = 80) -> str:
@@ -41,7 +20,7 @@ def _header_safe(value: object, *, max_len: int = 80) -> str:
     return re.sub(r"[^A-Za-z0-9._:-]", "-", str(value))[:max_len]
 
 
-# web2-core BatchUploadedResponse.Status 的 7 值枚举（ADR-0001 §外部错误契约）。
+# web2-core BatchUploadedResponse.Status 的 7 值枚举（外部错误契约）。
 # lending 须对这 7 值全覆盖分支；未识别 / 缺失 status 直接抛 WedapError（不静默返回，
 # 否则会被 dispatch_delivery_once 当作正常返回记为 DELIVERED → 误当受理成功）。
 KNOWN_BATCH_STATUS = frozenset(
@@ -56,6 +35,10 @@ KNOWN_BATCH_STATUS = frozenset(
     }
 )
 
+# 受理类 status（幂等受理也算）；其余 5 值为业务拒绝类。受理类只信任 2xx 位（见
+# notify_batch_uploaded 判定），dispatch 据此集合决定 DELIVERED / WedapBatchRejected。
+ACCEPTED_BATCH_STATUS = frozenset({"ACCEPTED", "DUPLICATE_BATCH"})
+
 
 class WedapError(Exception):
     def __init__(self, code: str, msg: str) -> None:
@@ -63,28 +46,53 @@ class WedapError(Exception):
         self.code = code
 
 
-class WedapGatewayRejected(WedapError):
-    """网关（APISIX）拒绝：响应带 ``success=false``。区别于上游应用层 401 / 业务响应。
+def _error_text(body: dict[str, Any]) -> str:
+    """错误文案兼容取 ``msg`` 或 ``message``。
 
-    ADR-0001 §外部错误契约：lending 唯一可靠的"网关拒绝"锚点 = ``success`` 字段为 ``false``。
-    ``http_status`` 承载网关拒绝的 HTTP 码，供上层按错误契约表分类重试（401/403/400 不重试；
-    429/502/503 退避重试）——分类目前尚未接入 dispatch_delivery_once（当前统一退避重试到上限），
-    见 FU（P1b 重试策略）。注意本类是 WedapError 子类，调用方若按错误契约分流，须先 ``except
-    WedapGatewayRejected`` 再 ``except WedapError``，否则网关拒绝会被后者吞掉。
+    baffle 的 envelope 用 ``msg``；真 wedap（adapter AdapterResponse / gw-internal
+    CommonResponse）用 ``message``。只认其一会把另一侧的错误文案丢成 "None"。
+    空串 / 纯空白视同缺失（防 ``msg: " "`` 遮住有效 ``message``）；非字符串的
+    truthy 载荷（数字码 / 结构化对象，部分 Java 网关会给）str 化保留，不丢诊断信息。
     """
+    for key in ("msg", "message"):
+        val = body.get(key)
+        if isinstance(val, str):
+            if val.strip():
+                return val
+            continue
+        if val is not None:
+            return str(val)
+    return "<no error message>"
 
-    def __init__(self, http_status: int, code: str | None, message: str | None) -> None:
-        super().__init__(
-            code or "GATEWAY_REJECTED",
-            message or f"gateway rejected (HTTP {http_status})",
-        )
-        self.http_status = http_status
+
+def _flow_import_error(body: dict[str, Any], *, fallback_code: str, detail: str) -> "WedapError":
+    """flow-import 非受理响应 → WedapError 统一构造（notify / presign 共用）。
+
+    gw-internal 网关错误统一形态 CommonResponse{code,message}（无 status）→ 用其
+    ``code``；code 缺失或为 null → ``fallback_code`` 兜底（防 str(None) 污染
+    调用方按 code 的分流与日志口径）。文案带上下文 detail 便于排障。
+    """
+    code = body.get("code")
+    eff_code = str(code) if code is not None else fallback_code
+    return WedapError(eff_code, f"{_error_text(body)} ({detail})")
 
 
 class WedapClient:
     """南向 client：所有外呼带 timeout（规范07 §1），写操作不自动重试。
 
     幂等靠上层 RESULT_UNKNOWN 收敛。
+
+    对接形态（2026-07 起走 wedap gw-internal，Phase 1 无网关鉴权）：
+
+    - 银行南向（放款/还款/归集/分发/状态/查询）：``base_url`` 直拼原始路径。
+      经 gw-internal 时 base_url 自带 ``/lending-gw`` 前缀
+      （如 ``http://<gw-internal>:8000/lending-gw``）；直连 baffle 时为
+      ``http://baffle:8021``。两种形态请求头一致（X-Tenant-Id / X-Request-Id）。
+    - flow-import（notify / presign）：``import_base_url`` 直拼
+      ``/bank/api/v1/import/*``（web2-core controller 自带 /bank 前缀）。经
+      gw-internal 时自带 ``/external/web2-core`` 前缀；鉴权是 web2-core 应用层
+      ``apikey``（FLOW_IMPORT_API_KEYS 白名单），与网关无关。
+    - gw-internal Phase 2 的 lending 鉴权（app-JWT）尚未启用；启用时按彼时契约实现。
     """
 
     def __init__(
@@ -93,20 +101,15 @@ class WedapClient:
         base_url: str,
         timeout_seconds: float,
         import_api_key: str | None = None,
-        import_signing_secret: str | None = None,
-        bank_api_key: str | None = None,
-        bank_signing_secret: str | None = None,
+        import_base_url: str | None = None,
     ) -> None:
         self._base = base_url.rstrip("/")
         self._timeout = timeout_seconds
         self._import_api_key = import_api_key
-        # HMAC 签名密钥（对齐 APISIX LENDING consumer 的 signing_key）。为空 = 不签名
-        # （P0/P1 直连 baffle 无 APISIX 时；切流到 APISIX 后必须配，否则被 hmac-sign 拦 400）。
-        self._import_signing_secret = import_signing_secret
-        # 银行南向 API（放款/还款/归集/分发/状态）的 APISIX 凭证。签名密钥配置 = 切流到 APISIX
-        # （路径加 /bank 前缀 + apikey + HMAC 签名头）；空 = 直连 baffle（向后兼容，不签名）。
-        self._bank_api_key = bank_api_key
-        self._bank_signing_secret = bank_signing_secret
+        # flow-import 独立 base：银行南向与 import 经 gw-internal 的路由前缀不同
+        # （/lending-gw vs /external/web2-core），一个 base 罩不住。空 = 回落
+        # base_url（local/test 场景，import 链路默认关闭）。
+        self._import_base = (import_base_url or base_url).rstrip("/")
 
     def _headers(self, tenant_id: str, request_id: str) -> dict[str, str]:
         return {
@@ -115,65 +118,13 @@ class WedapClient:
             "Content-Type": "application/json",
         }
 
-    def _import_headers(self, *, path: str, request_id: str, body_bytes: bytes) -> dict[str, str]:
-        """flow-import 系接口（notify / presign）经 APISIX 的鉴权 + 签名头。
-
-        ``apikey`` 头鉴权（FLOW_IMPORT_API_KEYS）。切流到 APISIX 后须带 X-Request-Id +
-        HMAC 签名头（request-id-check / hmac-sign / anti-replay 缺则 400）；签名密钥未配 =
-        直连 baffle 模式，不加签名头（向后兼容）。签名对 ``path`` 与实际发送的 ``body_bytes``
-        字节一致，故调用方须用同一 body_bytes 发送。
-        """
-        headers = {
+    def _import_headers(self, *, request_id: str) -> dict[str, str]:
+        """flow-import（notify / presign）请求头：应用层 apikey 鉴权 + 追踪头。"""
+        return {
             "apikey": self._import_api_key or "",
             "Content-Type": "application/json",
-        }
-        if self._import_signing_secret:
-            timestamp = str(int(time.time()))
-            headers["X-Request-Id"] = request_id
-            headers["X-Timestamp"] = timestamp
-            headers["X-Nonce"] = uuid.uuid4().hex
-            headers["X-Signature"] = _hmac_sign(
-                self._import_signing_secret,
-                method="POST",
-                path=path,
-                timestamp=timestamp,
-                body=body_bytes.decode(),
-            )
-        return headers
-
-    def _bank_request(
-        self, *, method: str, path: str, tenant_id: str, request_id: str, body_bytes: bytes
-    ) -> tuple[str, dict[str, str]]:
-        """银行南向 API 的 (url, headers)。
-
-        APISIX 模式（bank_signing_secret 配置）：路径加 ``/bank`` 前缀 + apikey +
-        X-Request-Id/X-Timestamp/X-Nonce/X-Signature（HMAC-SHA256(METHOD\\nPATH\\nTS[\\nBODY])→base64，
-        PATH 用加了 /bank 的实际发送路径、不含 query；GET 空 body 不加 body 段）。X-Tenant-Id
-        经 APISIX 按 consumer 自动写入，仍带上以兼容直连。签名对实际发送的 ``body_bytes`` 字节
-        一致，故 POST 调用方须以同一 body_bytes 发送。
-
-        baffle 模式（未配签名密钥）：路径不变、不签名，退回 ``_headers``（向后兼容）。
-        """
-        if not self._bank_signing_secret:
-            return f"{self._base}{path}", self._headers(tenant_id, request_id)
-        sent_path = f"{_BANK_APISIX_PREFIX}{path}"
-        timestamp = str(int(time.time()))
-        headers = {
-            "apikey": self._bank_api_key or "",
-            "X-Tenant-Id": tenant_id,
             "X-Request-Id": request_id,
-            "X-Timestamp": timestamp,
-            "X-Nonce": uuid.uuid4().hex,
-            "X-Signature": _hmac_sign(
-                self._bank_signing_secret,
-                method=method,
-                path=sent_path,
-                timestamp=timestamp,
-                body=body_bytes.decode() if body_bytes else "",
-            ),
-            "Content-Type": "application/json",
         }
-        return f"{self._base}{sent_path}", headers
 
     async def _post(
         self,
@@ -183,18 +134,14 @@ class WedapClient:
         request_id: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        # APISIX 模式须对「实际发送字节」签名，故自行序列化 + content= 发送（非 json=，
-        # 避免 httpx 默认带空格序列化导致签名串与请求体不一致）。
+        # 紧凑序列化（无空格），与既有落盘/重放字节形态保持一致。
         body_bytes = json.dumps(payload, separators=(",", ":")).encode()
-        url, headers = self._bank_request(
-            method="POST",
-            path=path,
-            tenant_id=tenant_id,
-            request_id=request_id,
-            body_bytes=body_bytes,
-        )
         async with httpx.AsyncClient(timeout=self._timeout) as client:
-            r = await client.post(url, content=body_bytes, headers=headers)
+            r = await client.post(
+                f"{self._base}{path}",
+                content=body_bytes,
+                headers=self._headers(tenant_id, request_id),
+            )
         return self._unwrap(r)
 
     async def _get(
@@ -205,15 +152,12 @@ class WedapClient:
         request_id: str,
         params: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        url, headers = self._bank_request(
-            method="GET",
-            path=path,
-            tenant_id=tenant_id,
-            request_id=request_id,
-            body_bytes=b"",
-        )
         async with httpx.AsyncClient(timeout=self._timeout) as client:
-            r = await client.get(url, params=params, headers=headers)
+            r = await client.get(
+                f"{self._base}{path}",
+                params=params,
+                headers=self._headers(tenant_id, request_id),
+            )
         return self._unwrap(r)
 
     @staticmethod
@@ -221,7 +165,7 @@ class WedapClient:
         r.raise_for_status()
         body: dict[str, Any] = r.json()
         if str(body.get("code")) != "200":
-            raise WedapError(str(body.get("code")), str(body.get("msg")))
+            raise WedapError(str(body.get("code")), _error_text(body))
         return dict(body.get("data") or {})
 
     async def submit_disbursement(
@@ -375,29 +319,28 @@ class WedapClient:
     async def notify_batch_uploaded(self, *, payload: dict[str, Any]) -> dict[str, Any]:
         """通知 wedap 批次文件已上传 S3（flow-import，spec §5）。
 
-        与南向资金接口不同契约：``apikey`` 头鉴权、响应非 ``{code,data}`` envelope，
-        而是 ``{status, processingId, resultFilePath, message}``。
+        与南向资金接口不同契约：``apikey`` 头鉴权（web2-core 应用层）、响应非
+        ``{code,data}`` envelope，而是 ``{status, processingId, resultFilePath, message}``。
         payload 必填 dataType/channelId/importBatchNo/importDate/fileChecksum/fileSize，
         可选 payloadSchemaVersion/totalCount/replacesBatchNo。
 
-        响应判定（ADR-0001 §外部错误契约，顺序敏感）：
-          - ``success`` 字段为 ``false`` → 网关（APISIX）拒绝 → raise WedapGatewayRejected
-            （唯一可靠锚点；含 401 key-auth 等 APISIX 内置/自定义插件拒绝）。
-          - HTTP 401 且无 success 字段 → 上游应用层 401（apikey 未对齐）→ raise WedapError("401")。
-          - 5xx → 服务端错误 → raise（可重试）。
+        响应判定（外部错误契约 · gw-internal 修订版，顺序敏感）：
+          - HTTP 401 → apikey 未对齐（web2-core 应用层拒绝）→ raise WedapError("401")。
+          - 5xx → 服务端 / 网关转发错误 → raise（可重试）。
           - 其余（200/400 业务响应）→ ``status`` 须属 7 值枚举则返回响应体；
-            缺失 / 未识别 status → raise WedapError（不静默返回，否则会被上层记为 DELIVERED）。
+            body 无 ``status`` 但有 ``code``（gw-internal GlobalErrorWebExceptionHandler
+            的 CommonResponse{code,message} 网关错误形态）→ 按其 code/message 抛；
+            其余缺失 / 未识别 status → raise WedapError（不静默返回，否则会被
+            dispatch_delivery_once 记为 DELIVERED → 误当受理成功）。
         """
-        # 自行序列化 body → 签名的字节与发送的字节完全一致（json= 会重新序列化，可能不一致）。
+        # 紧凑序列化，与南向 _post 字节形态一致。
         body_bytes = json.dumps(payload, separators=(",", ":")).encode()
         headers = self._import_headers(
-            path=_IMPORT_PATH,
             request_id=f"wedap-import-{_header_safe(payload.get('importBatchNo', ''))}",
-            body_bytes=body_bytes,
         )
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             r = await client.post(
-                f"{self._base}{_IMPORT_PATH}",
+                f"{self._import_base}{_IMPORT_PATH}",
                 content=body_bytes,
                 headers=headers,
             )
@@ -408,30 +351,32 @@ class WedapClient:
         # 仅 dict 体可解析；list / null / 标量一律视作无体（后续按 status 缺失处理）。
         body = raw if isinstance(raw, dict) else {}
 
-        # 1) 网关拒绝唯一锚点：success 字段存在且为 false（APISIX/error-response 契约）。
-        if body.get("success") is False:
-            err = body.get("error")
-            if not isinstance(
-                err, dict
-            ):  # error 可能是字符串/缺失 → 兜底空 dict，防 .get 抛 AttributeError
-                err = {}
-            raise WedapGatewayRejected(r.status_code, err.get("code"), err.get("message"))
-        # 2) 上游应用层 401（无 success 字段，Spring 形态）→ apikey 未对齐。
+        # 1) 401 → apikey 未对齐（web2-core 应用层 ApiKeyAuthInterceptor 拒绝）。
         if r.status_code == 401:
             raise WedapError("401", "import apikey rejected")
-        # 3) 服务端错误 → raise（可重试）。
+        # 2) 服务端 / 网关转发错误 → raise（可重试）。
         if r.status_code >= 500:
             r.raise_for_status()
-        # 4) 业务响应：status 须属 7 值枚举才算合法受理响应；缺失 / 未识别 → 抛（不静默）。
-        #    否则 body={} 或未知 status 会正常返回 → dispatch 记 DELIVERED → 误当受理成功。
+        # 3) 合法枚举 status：受理类只信任 2xx 位——非成功位 + 受理体（如 403+ACCEPTED）
+        #    是矛盾响应，返回会被 dispatch 记 DELIVERED（批次实际未受理，等 RESULT_OVERDUE
+        #    才暴露）。拒绝类 status 任意非 401/5xx 位均保留（400/409/422 带业务拒因供
+        #    排障与修复重传，不降级成泛化 HTTP 码）。
         status = body.get("status")
-        if status not in KNOWN_BATCH_STATUS:
-            raise WedapError(
-                "UNKNOWN_STATUS",
-                f"unrecognized/missing wedap batch status: {status!r} "
-                f"(batch={payload.get('importBatchNo')})",
-            )
-        return body
+        if status in KNOWN_BATCH_STATUS:
+            if status in ACCEPTED_BATCH_STATUS and not (200 <= r.status_code < 300):
+                raise WedapError(
+                    f"HTTP_{r.status_code}",
+                    f"acceptance status {status!r} on non-2xx position not trusted "
+                    f"(batch={payload.get('importBatchNo')})",
+                )
+            return body
+        # 4) 非枚举响应：gw-internal CommonResponse{code,message} 用其 code，缺 code
+        #    兜底 UNKNOWN_STATUS（不静默返回，否则被上层记 DELIVERED 误当受理成功）。
+        raise _flow_import_error(
+            body,
+            fallback_code="UNKNOWN_STATUS",
+            detail=f"status={status!r} http={r.status_code} batch={payload.get('importBatchNo')}",
+        )
 
     async def request_presign(
         self,
@@ -442,18 +387,18 @@ class WedapClient:
         import_date: str,
         import_batch_no: str,
     ) -> str:
-        """向 web2-core 申请 presigned URL（ADR-0001 P4：lending 无需长期 wedap S3 凭证）。
+        """向 web2-core 申请 presigned URL（P4 预签名投递：lending 无需长期 wedap S3 凭证）。
 
-        POST /bank/api/v1/import/presign，复用 flow-import 系鉴权 + HMAC 签名机制（同 notify，
-        经 APISIX）。operation="UPLOAD" 拿投递上传 URL（PUT），"RESULT" 拿结果读取 URL（GET）。
+        POST /bank/api/v1/import/presign，复用 flow-import 应用层 ``apikey`` 鉴权（同
+        notify）。operation="UPLOAD" 拿投递上传 URL（PUT），"RESULT" 拿结果读取 URL（GET）。
         契约响应：``{status:"OK", operation, method, url, objectKey, expiresInSeconds}``；返回
         解析出的 ``url``。
 
         判定顺序对齐 notify_batch_uploaded：
-          - ``success`` 为 false → 网关拒绝 → raise WedapGatewayRejected。
-          - HTTP 401 无 success 字段 → 上游应用层 401 → raise WedapError("401")。
+          - HTTP 401 → apikey 未对齐 → raise WedapError("401")。
           - 5xx → raise（可重试）。
-          - 200 但 status != "OK" / 缺 url → raise WedapError（不静默返回空 url）。
+          - 200 但 status != "OK" / 缺 url → raise（网关 CommonResponse{code,message}
+            错误形态优先按其 code/message 抛；不静默返回空 url）。
         """
         payload: dict[str, Any] = {
             "operation": operation,
@@ -462,16 +407,13 @@ class WedapClient:
             "importDate": import_date,
             "importBatchNo": import_batch_no,
         }
-        # 自行序列化 → 签名字节与发送字节一致（同 notify）。
         body_bytes = json.dumps(payload, separators=(",", ":")).encode()
         headers = self._import_headers(
-            path=_PRESIGN_PATH,
             request_id=f"wedap-presign-{operation}-{_header_safe(import_batch_no)}",
-            body_bytes=body_bytes,
         )
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             r = await client.post(
-                f"{self._base}{_PRESIGN_PATH}",
+                f"{self._import_base}{_PRESIGN_PATH}",
                 content=body_bytes,
                 headers=headers,
             )
@@ -481,22 +423,30 @@ class WedapClient:
             raw = None  # 5xx / 非 JSON 错误体
         body = raw if isinstance(raw, dict) else {}
 
-        # 1) 网关拒绝唯一锚点：success 字段存在且为 false。
-        if body.get("success") is False:
-            err = body.get("error")
-            if not isinstance(err, dict):
-                err = {}
-            raise WedapGatewayRejected(r.status_code, err.get("code"), err.get("message"))
-        # 2) 上游应用层 401（无 success 字段）→ apikey 未对齐。
+        # 1) 401 → apikey 未对齐。
         if r.status_code == 401:
             raise WedapError("401", "import apikey rejected")
-        # 3) 服务端错误 → raise（可重试）。
+        # 2) 服务端 / 网关转发错误 → raise（可重试）。
         if r.status_code >= 500:
             r.raise_for_status()
+        # 3) presign 成功响应只认 2xx；非 2xx（网关限流等）即使体里带 status=OK 也不可信。
+        if not (200 <= r.status_code < 300):
+            raise _flow_import_error(
+                body,
+                fallback_code=f"HTTP_{r.status_code}",
+                detail=f"op={operation} batch={import_batch_no}",
+            )
         # 4) 业务响应：status 须为 OK 且带非空 url，否则抛（不静默返回空 url）。
         status = body.get("status")
         url = body.get("url")
         if status != "OK" or not isinstance(url, str) or not url:
+            if "status" not in body and "code" in body:
+                # gw-internal 网关错误统一形态 CommonResponse{code,message}（无 status）。
+                raise _flow_import_error(
+                    body,
+                    fallback_code="PRESIGN_FAILED",
+                    detail=f"op={operation} batch={import_batch_no}",
+                )
             raise WedapError(
                 "PRESIGN_FAILED",
                 f"presign not OK: status={status!r} url={url!r} "
