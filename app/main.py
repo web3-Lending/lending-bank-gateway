@@ -5,7 +5,7 @@ import sys
 import traceback
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
@@ -36,20 +36,20 @@ logger = logging.getLogger(__name__)
 
 _logging_configured = False
 
-_CST = timezone(timedelta(hours=8))
-
 
 def _log_time(created: float) -> str:
-    """+0800 without a colon (e.g. 2026-07-13T14:30:00.123+0800). CloudWatch Agent /
-    华为云 ICAgent parse this; isoformat's '+08:00' breaks the CW %z pattern. Matches
-    core/recon/baffle's format so one lending agent timestamp_format covers all."""
-    dt = datetime.fromtimestamp(created, tz=_CST)
-    return dt.strftime(f"%Y-%m-%dT%H:%M:%S.{dt.microsecond // 1000:03d}+0800")
+    """Aware UTC ISO-8601 with millisecond precision, e.g. 2026-07-13T06:44:02.284+00:00.
+    lending time SSOT (11-datetime-timezone-standard §2/§6) mandates UTC internally; any
+    local-offset (+0800) / camelCase an external platform needs is produced at the log
+    agent / sink adapter, NOT in the app (05-observability-audit §2)."""
+    dt = datetime.fromtimestamp(created, tz=UTC)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}+00:00"
 
 
 class _JsonLogFormatter(logging.Formatter):
     """Single-line structured JSON to stdout so 华为云 ICAgent / CloudWatch Agent
-    ingest without an app-side parse rule — no code change when either is added."""
+    ingest without an app-side parse rule — no code change when either is added.
+    Internal format is UTC + snake_case; agent出口 转外部平台格式。"""
 
     def format(self, record: logging.LogRecord) -> str:
         try:
@@ -63,7 +63,7 @@ class _JsonLogFormatter(logging.Formatter):
             "level": record.levelname,
             "logger": record.name,
             "msg": record.getMessage(),
-            "traceId": trace_id,
+            "trace_id": trace_id,
         }
         if record.exc_info and record.exc_info[0] is not None:
             entry["exception"] = traceback.format_exception(*record.exc_info)
