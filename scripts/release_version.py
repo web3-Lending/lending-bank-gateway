@@ -87,7 +87,9 @@ def conventional_bump_level(log_text: str) -> str:
 
 
 def auto_bump() -> dict[str, object]:
-    if run(["git", "status", "--porcelain"]).stdout.strip():
+    # --untracked-files=no：与 GIT_SHA 的 describe --dirty 同口径，只有 tracked
+    # 改动才算脏；untracked 杂物目录（.wt-*/.setting 等）不阻塞升版。
+    if run(["git", "status", "--porcelain", "--untracked-files=no"]).stdout.strip():
         return {"autoBump": "skipped-dirty-tree", "appVersion": read_source_version()}
     anchor = run(
         ["git", "log", "-1", "--format=%H", "-G", r"^version\s*=", "--", "pyproject.toml"],

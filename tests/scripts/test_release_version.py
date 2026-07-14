@@ -72,9 +72,22 @@ class TestAutoBumpShortCircuits:
 
     def test_dirty_tree_skipped(self) -> None:
         rv = _load()
-        self._stub_run(rv, {("git", "status"): " M app/main.py\n"})
+        seen: list[list[str]] = []
+
+        def fake_run(args: list[str], **kwargs: Any):
+            seen.append(list(args))
+
+            class R:
+                stdout = " M app/main.py\n"
+                returncode = 0
+
+            return R()
+
+        rv.run = fake_run
         facts = rv.auto_bump()
         assert facts["autoBump"] == "skipped-dirty-tree"
+        # 与 GIT_SHA describe --dirty 同口径：只算 tracked 改动，untracked 不阻塞升版
+        assert "--untracked-files=no" in seen[0]
 
     def test_anchor_missing(self) -> None:
         rv = _load()
