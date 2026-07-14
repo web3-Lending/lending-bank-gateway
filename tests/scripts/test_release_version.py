@@ -51,8 +51,7 @@ class TestConventionalBumpLevel:
     def test_breaking_footer_major(self) -> None:
         rv = _load()
         assert (
-            rv.conventional_bump_level("refactor: 重排\n\nBREAKING CHANGE: 删字段\n\x00")
-            == "major"
+            rv.conventional_bump_level("refactor: 重排\n\nBREAKING CHANGE: 删字段\n\x00") == "major"
         )
 
 
@@ -61,6 +60,7 @@ class TestAutoBumpShortCircuits:
         def fake_run(args: list[str], **kwargs: Any):
             for prefix, result in mapping.items():
                 if tuple(args[: len(prefix)]) == prefix:
+
                     class R:
                         stdout = result
                         returncode = 0
