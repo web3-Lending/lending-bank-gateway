@@ -114,10 +114,6 @@ class Settings(BaseSettings):
     """order 未达终态多久视为待兜底（GW_ORDER_RECONCILE_STALE_AFTER_SECONDS）。"""
     order_reconcile_max_age_seconds: float = 604800.0
     """只兜底此窗口内 order，避免无限扫古单（默认 7d）。GW_ORDER_RECONCILE_MAX_AGE_SECONDS"""
-    order_reconcile_leg_backfill_seconds: float = 3600.0
-    """终态无 leg 的 leg 补拉窗（按 finalized_at，默认 1h）：超此窗放弃补拉，避免 CLT/无 composite
-    明细的终态单每轮热重试打爆 wedap。超窗 = 明细永缺（CLT residual risk）。
-    GW_ORDER_RECONCILE_LEG_BACKFILL_SECONDS"""
     order_reconcile_batch_limit: int = 100
     """每轮兜底处理的 order 上限（GW_ORDER_RECONCILE_BATCH_LIMIT）。"""
     archive_dir: str = "/srv/archive"

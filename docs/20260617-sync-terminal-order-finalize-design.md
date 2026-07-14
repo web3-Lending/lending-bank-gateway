@@ -1,5 +1,12 @@
 # lending-bank-gateway · 同步优先终态收口改造设计（V2）
 
+> ⚠️ **部分废止（2026-07-14 · ADR-0001）**：本设计中所有 **leg 相关部分已按 C5 口径拆除**——
+> §3.4 明细补拉、worker 候选②「终态但 legs 缺失」、apply_legs 聚合收口、`bank_txn_leg` 表
+> （alembic 0019 删表）。order 级部分（统一终态收口 finalize / CAS 防倒退 / G2 status-query /
+> G6 stuck alert / 转发不分叉）**继续有效**。回调路径现行实现见
+> `app/services/callback_finalize.py`；决策全文见
+> [`decisions/ADR-0001-20260714-按C5拆除leg下钻-order级终态收口.md`](decisions/ADR-0001-20260714-按C5拆除leg下钻-order级终态收口.md)。
+
 > 2026-06-17 · 分支 `fix/gateway-sync-terminal` · 经 codex 对抗评审（NEEDS-ATTENTION → V2 收口）后定稿
 
 ## 1. 背景

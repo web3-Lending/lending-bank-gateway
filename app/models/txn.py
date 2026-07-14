@@ -4,7 +4,6 @@ from decimal import Decimal
 from sqlalchemy import (
     BigInteger,
     DateTime,
-    ForeignKeyConstraint,
     Integer,
     Numeric,
     String,
@@ -23,7 +22,7 @@ class BankTxnOrder(Base, TenantMixin, TimestampMixin):
     __tablename__ = "bank_txn_order"
     __table_args__ = (
         UniqueConstraint("tenant_id", "biz_seq_no", name="uq_order_tenant_biz"),
-        # 为 BankTxnLeg 复合 FK 提供父键：(id, tenant_id) 唯一
+        # 历史遗留：原为 bank_txn_leg 复合 FK 提供父键（leg 已按 C5 拆除，索引保留与 DB 一致）
         UniqueConstraint("id", "tenant_id", name="uq_order_id_tenant"),
     )
 
@@ -39,39 +38,6 @@ class BankTxnOrder(Base, TenantMixin, TimestampMixin):
     submitted_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     acked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     finalized_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
-    # 终态来源留痕：SYNC（同步 HTTP 终态）/ CALLBACK（回调 leg 聚合）/ RECONCILE（兜底 worker）
+    # 终态来源留痕：SYNC（同步 HTTP 终态）/ CALLBACK（回调收口）/ RECONCILE（兜底 worker）
     # 给 recon 对账「同步 vs 回调谁收口」+ 排查重复 webhook 用
     finalized_via: Mapped[str | None] = mapped_column(String(12))
-
-
-class BankTxnLeg(Base, TenantMixin, TimestampMixin):
-    __tablename__ = "bank_txn_leg"
-    __table_args__ = (
-        UniqueConstraint("tenant_id", "external_system", "external_ref", name="uq_leg_tenant_ext"),
-        UniqueConstraint("tenant_id", "biz_seq_no", "step_seq", name="uq_leg_tenant_biz_step"),
-        # 复合 FK：leg.order_id + leg.tenant_id → order.id + order.tenant_id
-        # 防止跨租户引用：leg 只能指向同一 tenant 的 order
-        ForeignKeyConstraint(
-            ["order_id", "tenant_id"],
-            ["bank_txn_order.id", "bank_txn_order.tenant_id"],
-            name="fk_leg_order_tenant",
-        ),
-    )
-
-    id: Mapped[int] = mapped_column(_BIG_PK, primary_key=True, autoincrement=True)
-    order_id: Mapped[int] = mapped_column(
-        BigInteger().with_variant(Integer, "sqlite"),
-        nullable=False,
-    )
-    biz_seq_no: Mapped[str] = mapped_column(String(32), nullable=False)
-    external_system: Mapped[str] = mapped_column(String(16), nullable=False, default="WEDAP_BANK")
-    external_ref: Mapped[str] = mapped_column(String(64), nullable=False)
-    step_type: Mapped[str] = mapped_column(String(40), nullable=False)
-    step_seq: Mapped[int] = mapped_column(Integer, nullable=False)
-    amount: Mapped[Decimal] = mapped_column(Numeric(21, 4), nullable=False)
-    currency: Mapped[str] = mapped_column(String(3), nullable=False)
-    payer_account: Mapped[str | None] = mapped_column(String(64))
-    payee_account: Mapped[str | None] = mapped_column(String(64))
-    status: Mapped[str] = mapped_column(String(16), nullable=False)
-    txn_date: Mapped[str | None] = mapped_column(String(8))  # BANK_TIMEZONE YYYYMMDD 透传不重算
-    posted_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))

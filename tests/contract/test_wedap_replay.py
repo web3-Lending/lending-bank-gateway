@@ -107,25 +107,6 @@ async def test_replay_funds_status_fixture_dsb() -> None:
 
 
 # ---------------------------------------------------------------------------
-# composite steps
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_replay_steps_fixture() -> None:
-    """steps_two_legs.json：两步结构、sysRefNo 顺序、必填字段全覆盖。"""
-    body = _fix("steps_two_legs.json")
-    biz_seq_no = "DSB-20260611-0001234567890"
-    respx.get(f"{_BASE}/api/v1/composite-transactions/{biz_seq_no}/steps").mock(
-        return_value=httpx.Response(200, json=body)
-    )
-    steps = await _client().get_composite_steps(tenant_id=_TENANT, biz_seq_no=biz_seq_no)
-    assert [s["sysRefNo"] for s in steps] == ["HSBC202606110001", "HSBC202606110002"]
-    assert all({"stepType", "stepSeq", "amount", "status"} <= set(s) for s in steps)
-
-
-# ---------------------------------------------------------------------------
 # deposit
 # ---------------------------------------------------------------------------
 

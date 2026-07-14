@@ -6,7 +6,7 @@ lending 体系与 wedap 资金系统之间的**统一资金网关**服务（ADR-
 
 - **北向（inbound）**：接收 lending-lifecycel / lending-core 的资金指令，通过标准化 envelope（消息信封 v0.2）转发至 wedap
 - **南向（outbound）**：wedap 回调经 inbox-outbox 幂等入库，再通过对账摄取接口供 lending-recon 消费
-- **对账数据消费**：lending-recon 通过跨库只读 collector 直读 gateway 库的对账结果表（`recon_result_*`，wedap T+1 三方对账）与 `bank_txn_order`（订单受理状态，业务单维度），按 `biz_seq_no` 业务键对账，**不下钻 `bank_txn_leg`**（组合交易对 lending 透明）；不提供 `/fiat-vault/transactions`、`/recon/inflows`、`/recon/outflows` 等 HTTP 供数端点
+- **对账数据消费**：lending-recon 通过跨库只读 collector 直读 gateway 库的对账结果表（`recon_result_*`，wedap T+1 三方对账）与 `bank_txn_order`（订单受理状态，业务单维度），按 `biz_seq_no` 业务键对账，**不下钻 leg**（组合交易对 lending 透明；`bank_txn_leg` 表已于 2026-07-14 按 C5 拆除，见 `docs/decisions/ADR-0001`）；不提供 `/fiat-vault/transactions`、`/recon/inflows`、`/recon/outflows` 等 HTTP 供数端点
 
 ## 端口
 

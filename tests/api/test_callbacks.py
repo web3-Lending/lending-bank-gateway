@@ -435,10 +435,10 @@ def test_replay_received_row_after_ingest_fails_again(client: TestClient) -> Non
 
 
 def test_after_ingest_enqueues_outbox_row(client: TestClient) -> None:
-    """V2：终态回调 → apply_legs 聚合 SUCCEEDED → finalize 转发 outbox（稳定 dedup key）。
+    """order 级回调收口（C5）：终态回调 body txnStatus=SUCCESS → CAS 收口 → finalize 转发 outbox。
 
-    同步优先 V2 后转发并入 apply_legs 的终态收口（finalize_terminal_in_session），仅终态转发，
-    dedup_key 用业务稳定键 fwd-{tenant}-{biz}-{status}（替代易分叉的 fwd-{request_id}）。
+    不下钻 leg/steps：收口只用 body txnStatus；dedup_key 用业务稳定键
+    fwd-{tenant}-{biz}-{status}，与同步/兜底路径共用同一收口。
     """
     from decimal import Decimal
 
@@ -466,20 +466,6 @@ def test_after_ingest_enqueues_outbox_row(client: TestClient) -> None:
 
     asyncio.run(_seed())
 
-    wedap = AsyncMock()
-    wedap.get_composite_steps.return_value = [
-        {
-            "stepSeq": 1,
-            "sysRefNo": "REF-OUT-1",
-            "stepType": "REPAYMENT",
-            "amount": "100.0000",
-            "currencyCode": "USD",
-            "status": "SUCCESS",
-            "txnDate": "20260611",
-        }
-    ]
-    client.app.state.wedap = wedap  # type: ignore[union-attr]
-
     async def _query_outbox(engine: Any) -> list[Any]:
         async with engine.connect() as conn:
             result = await conn.execute(
@@ -496,20 +482,34 @@ def test_after_ingest_enqueues_outbox_row(client: TestClient) -> None:
     assert rows[0].target == "lifecycle"  # type: ignore[union-attr]
     assert rows[0].dedup_key == "fwd-OCBC-BSQ-20260611-0001-SUCCEEDED"  # type: ignore[union-attr]
 
+    async def _order_state() -> tuple[str, str | None]:
+        engine = client.app.state.engine  # type: ignore[union-attr]
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    select(BankTxnOrder.status, BankTxnOrder.finalized_via).where(
+                        BankTxnOrder.tenant_id == "OCBC",
+                        BankTxnOrder.biz_seq_no == "BSQ-20260611-0001",
+                    )
+                )
+            ).one()
+            return str(row[0]), row[1]
 
-def test_after_ingest_atomic_enqueue_failure_rolls_back_legs(client: TestClient) -> None:
-    """A-C-002 原子性：enqueue 失败 → 同事务回滚，leg 不落库、inbox 留 RECEIVED、outbox 0 行。
+    status, via = asyncio.run(_order_state())
+    assert status == "SUCCEEDED"
+    assert via == "CALLBACK"
 
-    旧实现 leg 同步与 enqueue 分两事务，leg 会先独立提交；改单事务后两者原子，enqueue 炸则
-    leg 一并回滚。这正是「leg 已落库但 outbox 未入队」崩溃窗口被消除的体现。
-    """
+
+def test_after_ingest_atomic_enqueue_failure_rolls_back_finalize(client: TestClient) -> None:
+    """A-C-002 原子性：enqueue 失败 → 同事务回滚，order 状态/收口留痕不落库、inbox 留 RECEIVED、
+    outbox 0 行；待重放收敛。"""
     from decimal import Decimal
     from unittest.mock import patch
 
     from sqlalchemy import func, select
 
     from app.models.callback import CallbackInbox, CallbackOutbox
-    from app.models.txn import BankTxnLeg, BankTxnOrder
+    from app.models.txn import BankTxnOrder
 
     biz = "DSB-20260611-0009000000001"
     body = {"bizSeqNo": biz, "type": "LOAN_DISBURSEMENT", "txnStatus": "SUCCESS"}
@@ -534,21 +534,6 @@ def test_after_ingest_atomic_enqueue_failure_rolls_back_legs(client: TestClient)
 
     asyncio.run(_seed())
 
-    # wedap 返回一个合法 step（apply_legs 会想 upsert 一条 leg）；enqueue_forward 强制抛错
-    wedap = AsyncMock()
-    wedap.get_composite_steps.return_value = [
-        {
-            "stepSeq": 1,
-            "sysRefNo": "REF-ATOMIC-1",
-            "stepType": "DISBURSEMENT_COLLECTION",
-            "amount": "100.0000",
-            "currencyCode": "USD",
-            "status": "SUCCESS",
-            "txnDate": "20260611",
-        }
-    ]
-    client.app.state.wedap = wedap  # type: ignore[union-attr]
-
     async def _count(engine: Any, model: Any) -> int:
         async with engine.connect() as conn:
             return int((await conn.execute(select(func.count()).select_from(model))).scalar_one())
@@ -563,8 +548,23 @@ def test_after_ingest_atomic_enqueue_failure_rolls_back_legs(client: TestClient)
     assert r.status_code == 200  # after_ingest 失败补偿仍 200
 
     engine = client.app.state.engine  # type: ignore[union-attr]
-    assert asyncio.run(_count(engine, BankTxnLeg)) == 0  # leg 随同事务回滚
     assert asyncio.run(_count(engine, CallbackOutbox)) == 0  # outbox 无行
+
+    async def _order_state() -> tuple[str, Any]:
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    select(BankTxnOrder.status, BankTxnOrder.finalized_at).where(
+                        BankTxnOrder.tenant_id == "OCBC",
+                        BankTxnOrder.biz_seq_no == biz,
+                    )
+                )
+            ).one()
+            return str(row[0]), row[1]
+
+    status, finalized_at = asyncio.run(_order_state())
+    assert status == "SUBMITTED"  # CAS 推进随同事务回滚
+    assert finalized_at is None
 
     async def _inbox_status() -> str:
         async with engine.connect() as conn:
