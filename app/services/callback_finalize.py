@@ -77,12 +77,27 @@ async def resolve_callback_terminal(
             biz_seq_no=biz_seq_no,
             source="CALLBACK",
         )
-        if not converged:
-            raise CallbackTerminalUnresolved(
-                f"callback without terminal txnStatus and status-query not converged "
-                f"{tenant_id}/{biz_seq_no}"
-            )
-        return
+        if converged:
+            return
+        # TOCTOU（codex P2）：首读非终态后，同步/兜底路径可能已并发收口，而
+        # status-query 对「已终态」也返 False——复读一次，已收口即视为已处理。
+        async with factory() as session:
+            recheck = (
+                await session.execute(
+                    select(BankTxnOrder).where(
+                        BankTxnOrder.tenant_id == tenant_id,
+                        BankTxnOrder.biz_seq_no == biz_seq_no,
+                    )
+                )
+            ).scalar_one_or_none()
+        if recheck is not None and (
+            recheck.finalized_at is not None or is_terminal(recheck.status)
+        ):
+            return
+        raise CallbackTerminalUnresolved(
+            f"callback without terminal txnStatus and status-query not converged "
+            f"{tenant_id}/{biz_seq_no}"
+        )
 
     async with factory() as session:
         async with session.begin():

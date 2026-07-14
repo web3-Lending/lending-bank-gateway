@@ -188,6 +188,37 @@ async def test_coll_no_txn_status_nonterminal_raises_for_replay(factory) -> None
 
 
 @pytest.mark.asyncio
+async def test_no_txn_status_toctou_concurrent_finalize_is_processed(factory) -> None:
+    """codex P2 回归（TOCTOU）：首读非终态后被并发路径收口、status-query 返 False →
+    复读发现已收口 → 视为已处理，不抛不滞留。"""
+    await _seed(factory)
+    wedap = AsyncMock()
+
+    async def _query_and_concurrently_finalize(**kwargs):
+        # 模拟并发：status-query 期间同步路径完成收口
+        async with factory() as s:
+            async with s.begin():
+                order = (
+                    await s.execute(select(BankTxnOrder).where(BankTxnOrder.biz_seq_no == BIZ))
+                ).scalar_one()
+                order.status = "SUCCEEDED"
+                order.finalized_at = dt.datetime.now(dt.UTC)
+                order.finalized_via = "SYNC"
+        return {"txnStatus": "PROCESSING"}  # helper 内 CAS 会发现已收口 → 返 False
+
+    wedap.query_funds_status.side_effect = _query_and_concurrently_finalize
+    await resolve_callback_terminal(
+        factory,
+        wedap=wedap,
+        tenant_id=TENANT,
+        body={"bizSeqNo": BIZ, "type": "collection"},
+    )  # 不抛
+    order = await _order(factory)
+    assert order.finalized_via == "SYNC"  # 收口归并发路径，本回调只是幂等确认
+    assert await _outbox_count(factory) == 0
+
+
+@pytest.mark.asyncio
 async def test_no_txn_status_not_converged_raises(factory) -> None:
     """body 无终态 + status-query 也非终态 → CallbackTerminalUnresolved 待重放。"""
     await _seed(factory)
