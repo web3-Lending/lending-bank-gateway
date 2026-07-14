@@ -259,19 +259,6 @@ class WedapClient:
             request_id=request_id,
         )
 
-    async def get_composite_steps(
-        self,
-        *,
-        tenant_id: str,
-        biz_seq_no: str,
-    ) -> list[dict[str, Any]]:
-        data = await self._get(
-            f"/api/v1/composite-transactions/{biz_seq_no}/steps",
-            tenant_id=tenant_id,
-            request_id=f"steps-{biz_seq_no}",
-        )
-        return list(data.get("steps") or [])
-
     async def get_deposit_balance_total(
         self,
         *,

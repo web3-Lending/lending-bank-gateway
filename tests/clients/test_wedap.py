@@ -80,35 +80,6 @@ async def test_submit_disbursement_missing_data_returns_empty() -> None:
 
 
 # ---------------------------------------------------------------------------
-# get_composite_steps
-# ---------------------------------------------------------------------------
-
-
-@respx.mock
-async def test_get_composite_steps() -> None:
-    biz_seq_no = "DSB-20260611-0001234567890"
-    route = respx.get(f"{BASE}/api/v1/composite-transactions/{biz_seq_no}/steps").mock(
-        return_value=httpx.Response(200, json=json.loads((FIX / "steps_two_legs.json").read_text()))
-    )
-    steps = await _client().get_composite_steps(tenant_id="OCBC", biz_seq_no=biz_seq_no)
-    assert len(steps) == 2
-    assert steps[0]["sysRefNo"] == "HSBC202606110001"
-    assert route.called
-    req = route.calls.last.request
-    assert req.headers["X-Tenant-Id"] == "OCBC"
-
-
-@respx.mock
-async def test_get_composite_steps_missing_steps_returns_empty() -> None:
-    biz_seq_no = "DSB-20260611-0001234567890"
-    respx.get(f"{BASE}/api/v1/composite-transactions/{biz_seq_no}/steps").mock(
-        return_value=httpx.Response(200, json={"code": "200", "msg": "SUCCESS", "data": {}})
-    )
-    steps = await _client().get_composite_steps(tenant_id="OCBC", biz_seq_no=biz_seq_no)
-    assert steps == []
-
-
-# ---------------------------------------------------------------------------
 # submit_repayment
 # ---------------------------------------------------------------------------
 

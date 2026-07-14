@@ -80,7 +80,7 @@ def db_session(mysql_engine: sa.Engine):
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 from app.models.callback import CallbackInbox  # noqa: E402
-from app.models.txn import BankTxnLeg, BankTxnOrder  # noqa: E402
+from app.models.txn import BankTxnOrder  # noqa: E402
 
 
 def _new_order(**kw) -> BankTxnOrder:
@@ -106,83 +106,6 @@ def test_order_uq_tenant_biz_seq_no_mysql(db_session: Session) -> None:
     db_session.add(_new_order())
     db_session.flush()
     db_session.add(_new_order())
-    with pytest.raises(IntegrityError):
-        db_session.flush()
-
-
-def test_leg_uq_tenant_ext_mysql(db_session: Session) -> None:
-    """MySQL uq_leg_tenant_ext: 同 tenant+external_system+external_ref 触发 IntegrityError。"""
-    order = _new_order()
-    db_session.add(order)
-    db_session.flush()
-
-    leg_base = dict(
-        tenant_id="WBTHK01",
-        order_id=order.id,
-        biz_seq_no=order.biz_seq_no,
-        external_system="WEDAP_BANK",
-        step_type="DISBURSEMENT_COLLECTION",
-        external_ref="HSBC202606110001",
-        amount=Decimal("100.0000"),
-        currency="USD",
-        status="SUCCESS",
-    )
-    db_session.add(BankTxnLeg(**{**leg_base, "step_seq": 1}))
-    db_session.flush()
-    # 同 external_ref 不同 step_seq → 仍撞 uq_leg_tenant_ext
-    db_session.add(BankTxnLeg(**{**leg_base, "step_seq": 2}))
-    with pytest.raises(IntegrityError):
-        db_session.flush()
-
-
-def test_leg_uq_tenant_biz_step_mysql(db_session: Session) -> None:
-    """MySQL：同 (tenant_id, biz_seq_no, step_seq) 触发 IntegrityError (uq_leg_tenant_biz_step)。"""
-    order = _new_order()
-    db_session.add(order)
-    db_session.flush()
-
-    leg_base = dict(
-        tenant_id="WBTHK01",
-        order_id=order.id,
-        biz_seq_no=order.biz_seq_no,
-        external_system="WEDAP_BANK",
-        step_type="DISBURSEMENT_COLLECTION",
-        step_seq=1,
-        amount=Decimal("100.0000"),
-        currency="USD",
-        status="SUCCESS",
-    )
-    db_session.add(BankTxnLeg(**{**leg_base, "external_ref": "HSBC202606110001"}))
-    db_session.flush()
-    # 不同 external_ref 同 step_seq=1 → 撞 uq_leg_tenant_biz_step
-    db_session.add(BankTxnLeg(**{**leg_base, "external_ref": "HSBC202606110002"}))
-    with pytest.raises(IntegrityError):
-        db_session.flush()
-
-
-def test_leg_cross_tenant_order_ref_rejected_mysql(db_session: Session) -> None:
-    """MySQL：leg.tenant_id != order.tenant_id 时复合 FK fk_leg_order_tenant 拒绝插入。
-
-    场景：order 属于 TENANT-A，leg 用 TENANT-B 引用该 order → IntegrityError。
-    复合 FK: leg.(order_id, tenant_id) → order.(id, tenant_id)。
-    """
-    order_a = _new_order(tenant_id="TENANT-A", biz_seq_no="DSB-A-CROSS-001")
-    db_session.add(order_a)
-    db_session.flush()
-
-    cross_leg = BankTxnLeg(
-        tenant_id="TENANT-B",  # 与 order_a.tenant_id 不同
-        order_id=order_a.id,
-        biz_seq_no="DSB-B-CROSS-001",
-        external_system="WEDAP_BANK",
-        external_ref="HSBC-CROSS-MYSQL-0001",
-        step_type="DISBURSEMENT_COLLECTION",
-        step_seq=1,
-        amount=Decimal("50.0000"),
-        currency="USD",
-        status="PENDING",
-    )
-    db_session.add(cross_leg)
     with pytest.raises(IntegrityError):
         db_session.flush()
 
@@ -279,6 +202,23 @@ def test_alembic_upgrade_head_and_on_update_mysql(mysql_engine: sa.Engine) -> No
     with mysql_engine.connect() as conn:
         alembic_cfg.attributes["connection"] = conn
         command.upgrade(alembic_cfg, "head")
+
+    # 1.5 0019 回归：upgrade head 后 bank_txn_leg 必须不存在（C5 拆除，ADR-0001）；
+    # 再走一次 downgrade 0018 → 表重建（含约束）→ upgrade head → 表再次删除，
+    # 保证 drop/重建/再删的迁移链可往返。
+    insp = sa.inspect(mysql_engine)
+    assert not insp.has_table("bank_txn_leg"), "0019 后 bank_txn_leg 应已删除"
+    with mysql_engine.connect() as conn:
+        alembic_cfg.attributes["connection"] = conn
+        command.downgrade(alembic_cfg, "a7b8c9d0e1f2")
+    insp = sa.inspect(mysql_engine)
+    assert insp.has_table("bank_txn_leg"), "downgrade 0018 应重建 bank_txn_leg"
+    leg_uqs = {u["name"] for u in insp.get_unique_constraints("bank_txn_leg")}
+    assert {"uq_leg_tenant_biz_step", "uq_leg_tenant_ext"} <= leg_uqs
+    with mysql_engine.connect() as conn:
+        alembic_cfg.attributes["connection"] = conn
+        command.upgrade(alembic_cfg, "head")
+    assert not sa.inspect(mysql_engine).has_table("bank_txn_leg")
 
     # 2. 插入一条记录，捕获初始 updated_at
     with mysql_engine.connect() as conn:

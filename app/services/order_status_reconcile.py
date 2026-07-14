@@ -1,7 +1,6 @@
-"""G2：RESULT_UNKNOWN / 非终态父单经 wedap status-query 主动复查收敛。
+"""G2：RESULT_UNKNOWN / 非终态父单经 wedap status-query 主动复查收敛（order 级，C5）。
 
-order_reconcile_worker 原本只靠 get_composite_steps 拉 leg 明细收敛；对 composite-steps
-拿不到明细的父单，父单态永卡。本服务调 wedap.query_funds_status 直接查父单终态：
+本服务调 wedap.query_funds_status 直接查父单终态：
 
 - 事务外查 wedap（DISB/RPMT/DIST 支持；COLL 等 UNSUPPORTED → 返 False 交 G6 升级）
 - 事务内 FOR UPDATE 重读父单做 CAS：已终态 / finalized_at 非空 → 跳过（防非法迁移与双转发）
@@ -36,6 +35,7 @@ async def resolve_terminal_via_status_query(
     wedap: Any,
     tenant_id: str,
     biz_seq_no: str,
+    source: str = "RECONCILE",
 ) -> bool:
     """对非终态父单经 wedap status-query 收敛终态。
 
@@ -102,7 +102,7 @@ async def resolve_terminal_via_status_query(
             await finalize_terminal_in_session(
                 session,
                 order=locked,
-                source="RECONCILE",
+                source=source,
                 trace_id=f"reconcile-{biz_seq_no}",
             )
     return True

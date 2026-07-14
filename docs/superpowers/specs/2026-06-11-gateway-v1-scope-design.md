@@ -1,3 +1,5 @@
+> ⚠️ **historical（2026-07-14 · ADR-0001）**：本 spec 中 `bank_txn_leg` / 内部拉 steps 落 leg 的设计已按 C5 口径整体拆除（表删除、legs.py 删除），终态收口全部 order 级。现行为以 `docs/decisions/ADR-0001-20260714-按C5拆除leg下钻-order级终态收口.md` 为准。
+
 # lending-bank-gateway v1 范围与口径设计（spec）
 
 > 定稿: 2026-06-11 | 状态: 用户已确认设计 + codex 两轮评审（方案对比 VERDICT:C / 全量评审 NEEDS-CHANGES 12 P1 全吸收）
