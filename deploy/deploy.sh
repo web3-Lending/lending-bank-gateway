@@ -47,6 +47,13 @@ if [[ "${1:-}" == "local" || "${1:-}" == "dev-hw" ]]; then
 fi
 ENV_FILE="$DEPLOY_DIR/env.${ENV}"
 
+# [REQ-5] dev-hw 发布前 conventional-commits 自动升版（semantic-release 模式）：
+# 树脏/无新提交自动跳过；NO_AUTO_BUMP=1 应急关闭。必须在算 GIT_SHA 之前跑——
+# bump 会产生一个 chore(release) commit，GIT_SHA 要指到它。bump 后记得 push。
+if [ "$ENV" = "dev-hw" ] && [ "${NO_AUTO_BUMP:-0}" != "1" ]; then
+    python3 "$PROJECT_ROOT/scripts/release_version.py" auto-bump
+fi
+
 # Git commit SHA baked into the image for GET /build-info anchoring.
 GIT_SHA="$(git -C "$PROJECT_ROOT" describe --always --dirty 2>/dev/null || echo unknown)"
 # Harden against command injection: git describe can emit tag names with shell
