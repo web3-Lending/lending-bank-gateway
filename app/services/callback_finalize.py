@@ -51,8 +51,25 @@ async def resolve_callback_terminal(
     terminal = map_wedap_txn_status(str(body.get("txnStatus", "")))
 
     if terminal is None:
-        # body 不带终态（非终态通知 / 字段缺失）→ order 级 status-query 主动收敛。
-        # COLL 无状态查询接口 → 不收敛，留 RECEIVED 等带终态的回调重放 / G6 告警。
+        # body 不带终态（非终态通知 / 字段缺失）。
+        # 先看 order 现状：已被同步/兜底路径收口 → 本回调视为已处理（幂等成功），
+        # 不能依赖 status-query 的布尔返回——它对「已终态」也返 False，会把正常
+        # 双出口回调误判成未收敛、inbox 永留 RECEIVED（codex P1）。
+        async with factory() as session:
+            order = (
+                await session.execute(
+                    select(BankTxnOrder).where(
+                        BankTxnOrder.tenant_id == tenant_id,
+                        BankTxnOrder.biz_seq_no == biz_seq_no,
+                    )
+                )
+            ).scalar_one_or_none()
+        if order is None:
+            raise CallbackTerminalUnresolved(f"unknown order {tenant_id}/{biz_seq_no}")
+        if order.finalized_at is not None or is_terminal(order.status):
+            return
+        # 非终态 → order 级 status-query 主动收敛。COLL 无状态查询接口 → 不收敛，
+        # 留 RECEIVED 等带终态的回调重放；order 侧超窗由 G6 stuck alert 兜底告警。
         converged = await resolve_terminal_via_status_query(
             factory,
             wedap=wedap,

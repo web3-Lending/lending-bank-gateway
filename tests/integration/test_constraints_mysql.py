@@ -203,6 +203,23 @@ def test_alembic_upgrade_head_and_on_update_mysql(mysql_engine: sa.Engine) -> No
         alembic_cfg.attributes["connection"] = conn
         command.upgrade(alembic_cfg, "head")
 
+    # 1.5 0019 回归：upgrade head 后 bank_txn_leg 必须不存在（C5 拆除，ADR-0001）；
+    # 再走一次 downgrade 0018 → 表重建（含约束）→ upgrade head → 表再次删除，
+    # 保证 drop/重建/再删的迁移链可往返。
+    insp = sa.inspect(mysql_engine)
+    assert not insp.has_table("bank_txn_leg"), "0019 后 bank_txn_leg 应已删除"
+    with mysql_engine.connect() as conn:
+        alembic_cfg.attributes["connection"] = conn
+        command.downgrade(alembic_cfg, "a7b8c9d0e1f2")
+    insp = sa.inspect(mysql_engine)
+    assert insp.has_table("bank_txn_leg"), "downgrade 0018 应重建 bank_txn_leg"
+    leg_uqs = {u["name"] for u in insp.get_unique_constraints("bank_txn_leg")}
+    assert {"uq_leg_tenant_biz_step", "uq_leg_tenant_ext"} <= leg_uqs
+    with mysql_engine.connect() as conn:
+        alembic_cfg.attributes["connection"] = conn
+        command.upgrade(alembic_cfg, "head")
+    assert not sa.inspect(mysql_engine).has_table("bank_txn_leg")
+
     # 2. 插入一条记录，捕获初始 updated_at
     with mysql_engine.connect() as conn:
         conn.execute(

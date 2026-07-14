@@ -150,6 +150,44 @@ async def test_no_txn_status_falls_back_to_status_query(factory) -> None:
 
 
 @pytest.mark.asyncio
+async def test_no_txn_status_order_already_finalized_is_processed(factory) -> None:
+    """codex P1 回归：无 txnStatus 回调 + order 已被同步路径收口 → 视为已处理（不抛、不重复转发）。
+
+    修前：status-query 对已终态返 False → 误判未收敛 → inbox 永留 RECEIVED。
+    """
+    await _seed(factory, status="SUCCEEDED", finalized_at=dt.datetime.now(dt.UTC))
+    wedap = AsyncMock()
+    await resolve_callback_terminal(
+        factory,
+        wedap=wedap,
+        tenant_id=TENANT,
+        body={"bizSeqNo": BIZ, "type": "collection"},
+    )
+    wedap.query_funds_status.assert_not_called()  # 已收口，无需外呼
+    assert await _outbox_count(factory) == 0  # 不重复转发
+
+
+@pytest.mark.asyncio
+async def test_coll_no_txn_status_nonterminal_raises_for_replay(factory) -> None:
+    """COLL 无 txnStatus + status-query UNSUPPORTED + order 非终态 → 留 RECEIVED 等重放；
+    order 侧超窗由 G6 stuck alert 兜底告警（非静默）。"""
+    from app.clients.wedap import WedapError
+
+    await _seed(factory, status="SUBMITTED")
+    wedap = AsyncMock()
+    wedap.query_funds_status.side_effect = WedapError("UNSUPPORTED", "no status api")
+    with pytest.raises(CallbackTerminalUnresolved):
+        await resolve_callback_terminal(
+            factory,
+            wedap=wedap,
+            tenant_id=TENANT,
+            body={"bizSeqNo": BIZ, "type": "collection"},
+        )
+    order = await _order(factory)
+    assert order.status == "SUBMITTED"  # 未被误推进
+
+
+@pytest.mark.asyncio
 async def test_no_txn_status_not_converged_raises(factory) -> None:
     """body 无终态 + status-query 也非终态 → CallbackTerminalUnresolved 待重放。"""
     await _seed(factory)

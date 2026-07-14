@@ -309,7 +309,7 @@ async def test_resolve_status_query_order_not_found(factory) -> None:
 
 @pytest.mark.asyncio
 async def test_reconcile_once_converges_via_status_query(factory) -> None:
-    """G2：非终态 stale 单经 status-query 收敛终态，免去 leg 兜底（sync_legs_for 不被调用）。"""
+    """G2：非终态 stale 单经 status-query（order 级）收敛终态。"""
     await _seed_order(factory, biz="DSB-SQ", status="RESULT_UNKNOWN")
     wedap = AsyncMock()
     wedap.query_funds_status.return_value = {"txnStatus": "SUCCESS"}

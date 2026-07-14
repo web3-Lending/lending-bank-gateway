@@ -209,12 +209,12 @@ async def query_status(
         reason = "no_status_api" if exc.code == "UNSUPPORTED" else "wedap_error"
         wedap_data = {"unavailable": True, "reason": reason}
         # COLL(归集)：wedap 无状态查询接口（_STATUS_PATH_TMPL 仅 DISB/RPMT/DIST），
-        # 故 reason=no_status_api。这是**预期降级而非故障**——归集单终态由回调 sync_legs
-        # 聚合驱动（biz_type 无关，db641e6 验证），不依赖 wedap status 轮询；orderStatus
+        # 故 reason=no_status_api。这是**预期降级而非故障**——归集单终态由回调 body
+        # txnStatus 做 order 级收口（C5，ADR-0001），不依赖 wedap status 轮询；orderStatus
         # （本地权威态）即可信状态。补 note 让降级自解释。
         if exc.code == "UNSUPPORTED" and row.biz_type == "COLL":
             wedap_data["note"] = (
-                "COLL 归集单 wedap 无状态查询接口，终态由回调驱动（sync_legs 聚合）收敛，"
+                "COLL 归集单 wedap 无状态查询接口，终态由回调（body txnStatus，order 级）收敛，"
                 "非故障；以 orderStatus 为准"
             )
 
