@@ -88,7 +88,9 @@ async def submit_order(
                             request_id=req.request_id,
                             # 通用状态回查供参（0020）：transType 存调用方原值——wedap 按
                             # (oriBizSeqNo, transType) 消歧，查询值必须等于提交值。
-                            trans_type=(str(req.wedap_payload.get("transType") or "")[:20] or None),
+                            # 无损落库（codex P1）：入口 pydantic 已强制必填且 ≤20，禁止
+                            # 静默截断（截断致回查值 != 提交值，单据永久查不到）。
+                            trans_type=(str(req.wedap_payload.get("transType") or "") or None),
                             ori_req_date=req.ori_req_date,
                         )
                     )

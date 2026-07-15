@@ -215,7 +215,12 @@ async def test_no_txn_status_toctou_concurrent_finalize_is_processed(factory) ->
                 order.status = "SUCCEEDED"
                 order.finalized_at = dt.datetime.now(dt.UTC)
                 order.finalized_via = "SYNC"
-        return {"txnStatus": "PROCESSING"}  # helper 内 CAS 会发现已收口 → 返 False
+        # 回显正确身份（过身份核对），让 CAS 分支成为唯一止损点
+        return {
+            "txnStatus": "PROCESSING",
+            "oriBizSeqNo": kwargs["ori_biz_seq_no"],
+            "transType": kwargs["trans_type"],
+        }
 
     wedap.query_transaction_status.side_effect = _query_and_concurrently_finalize
     await resolve_callback_terminal(
@@ -234,7 +239,8 @@ async def test_no_txn_status_not_converged_raises(factory) -> None:
     """body 无终态 + status-query 也非终态 → CallbackTerminalUnresolved 待重放。"""
     await _seed(factory)
     wedap = AsyncMock()
-    wedap.query_transaction_status.return_value = {"txnStatus": "PROCESSING"}
+    # 回显正确身份（过身份核对），断言确因 PROCESSING 非终态而不收敛
+    wedap.query_transaction_status.side_effect = lambda **kw: _identity_resp(kw, "PROCESSING")
     with pytest.raises(CallbackTerminalUnresolved):
         await resolve_callback_terminal(
             factory,
@@ -287,6 +293,23 @@ async def test_partially_reversed_to_reversed_callback_finalizes(factory) -> Non
     )
     order = await _order(factory)
     assert order.status == "REVERSED"
+
+
+@pytest.mark.asyncio
+async def test_succeeded_order_reversed_callback_stays_succeeded_no_forward(factory) -> None:
+    """已知边界固化（FU-GW-REVERSAL-INGESTION）：SUCCEEDED 已收口单收到 REVERSED 回调 →
+    保持 SUCCEEDED、零二次转发（divergence 只告警）——终态升级 ingestion 等 wedap 4.8。"""
+    await _seed(factory, status="SUCCEEDED", finalized_at=dt.datetime.now(dt.UTC))
+    await resolve_callback_terminal(
+        factory,
+        wedap=AsyncMock(),
+        tenant_id=TENANT,
+        body={"bizSeqNo": BIZ, "type": "disbursement", "txnStatus": "REVERSED"},
+    )  # 不抛（幂等处理）
+    order = await _order(factory)
+    assert order.status == "SUCCEEDED"  # 不被升级（当前边界）
+    assert order.finalized_via is None  # 本回调未触发收口路径（seed 未设 via）
+    assert await _outbox_count(factory) == 0  # 零二次转发
 
 
 @pytest.mark.asyncio

@@ -262,6 +262,47 @@ def test_collect_overlong_trans_type_rejected_422(client: TestClient) -> None:
     client.app.state.wedap.collect_from_users.assert_not_called()  # type: ignore[union-attr]
 
 
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        (
+            "/api/v1/bank-funds/distribute-to-users",
+            {"bizSeqNo": "DST-NOTT-0001", "currencyCode": "USD", "recipients": []},
+        ),
+        (
+            "/api/v1/bank-funds/refunds",
+            {
+                "bizSeqNo": "RFD-NOTT-0001",
+                "currencyCode": "USD",
+                "refundAmount": "1.00",
+                "oriBizSeqNo": "CLT-X",
+            },
+        ),
+        (
+            "/api/v1/loans/p2p-disbursements",
+            {
+                "bizSeqNo": "DSB-NOTT-0001",
+                "disbursementInfo": {"txnAmount": "1.00", "currencyCode": "USD"},
+            },
+        ),
+        (
+            "/api/v1/loans/p2p-repayments",
+            {
+                "bizSeqNo": "RPM-NOTT-0001",
+                "repaymentInfo": {"txnAmount": "1.00", "currencyCode": "USD"},
+            },
+        ),
+    ],
+)
+def test_all_submit_models_missing_trans_type_rejected_422(
+    client: TestClient, path: str, body: dict
+) -> None:
+    """五个提交模型逐个强制 transType 必填——缺失一律 422（collect 见上例，此处盖其余四个）。"""
+    headers = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-nt"}
+    r = client.post(path, json=body, headers=headers)
+    assert r.status_code == 422
+
+
 # ── Test 5：缺 X-Tenant-Id → 400 ─────────────────────────────────────────────
 
 
