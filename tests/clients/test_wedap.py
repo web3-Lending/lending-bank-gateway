@@ -212,6 +212,45 @@ async def test_distribute_to_users_missing_data_returns_empty() -> None:
 
 
 # ---------------------------------------------------------------------------
+# refund（POST /api/v1/transactions/refund，对接文档 v0.3.0 §4.7）
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_refund_posts_transactions_refund_path() -> None:
+    route = respx.post(f"{BASE}/api/v1/transactions/refund").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "code": "200",
+                "msg": "SUCCESS",
+                "data": {"txnStatus": "SUCCESS", "refundedTotalAmount": "0.30"},
+            },
+        )
+    )
+    resp = await _client().refund(
+        tenant_id="OCBC",
+        request_id="rfd-001",
+        payload={"bizSeqNo": "RFD-1", "oriBizSeqNo": "CLT-1", "refundAmount": "0.30"},
+    )
+    assert resp["txnStatus"] == "SUCCESS"
+    req = route.calls.last.request
+    assert req.headers["X-Tenant-Id"] == "OCBC"
+    assert b'"oriBizSeqNo":"CLT-1"' in req.content
+
+
+@respx.mock
+async def test_refund_business_error_raises() -> None:
+    """wedap 业务错误（如超额退款 422）→ WedapError。"""
+    respx.post(f"{BASE}/api/v1/transactions/refund").mock(
+        return_value=httpx.Response(200, json={"code": "422", "message": "over refund"})
+    )
+    with pytest.raises(WedapError) as exc_info:
+        await _client().refund(tenant_id="OCBC", request_id="r", payload={})
+    assert exc_info.value.code == "422"
+
+
+# ---------------------------------------------------------------------------
 # query_transaction_status（通用 GET /api/v1/transactions/status，对接文档 v0.3.0 §5.5）
 # ---------------------------------------------------------------------------
 

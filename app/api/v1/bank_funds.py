@@ -48,6 +48,18 @@ class DistributeRequest(BaseModel):
     """显式 null 视同缺省，契约 C 下 wedap 可选字段缺省=null 语义等价。"""
 
 
+class RefundRequest(BaseModel):
+    # 退款薄透传（对接文档 v0.3.0 §4.7）：gateway 只取记账/幂等所需最少键；
+    # bankAccountNo/custAccountNo/subaccountSerialNo/postscript 等经 extra=allow 原样透传。
+    # 累计退款 ≤ 原单金额等业务校验在 wedap 侧（FOR UPDATE 串行防并发超额），gateway 不复刻。
+    model_config = ConfigDict(extra="allow")
+    bizSeqNo: str
+    currencyCode: str
+    refundAmount: str
+    oriBizSeqNo: str
+    """关联被退款的原归集单（清算超收退款只对未分发归集单做，业务约束在调用方）。"""
+
+
 # ── 内部提交 helper ────────────────────────────────────────────────────────────
 
 
@@ -168,6 +180,34 @@ async def distribute_to_users(
         biz_type="DIST",
         business_scope="bank_distribute",
         wedap_method="distribute_to_users",
+        amount=amount,
+        currency=body.currencyCode,
+        wedap_payload=payload,
+    )
+
+
+@router.post("/refunds")
+async def refund_to_user(
+    body: RefundRequest,
+    request: Request,
+    ids: dict[str, str] = Depends(require_headers),
+) -> dict[str, Any]:
+    """退款北向端点（S5.6 拍板 2026-07-14：只补 refund，freeze/unfreeze 不做）。
+
+    清算资金链口径（liquidation 调研）只用 collect + refund；退款经 gateway 落
+    bank_txn_order（biz_type=RFND）保台账/幂等/对账覆盖，不允许上游直调 wedap 绕网关。
+    """
+    assert_idempotency_key_matches(request, body.bizSeqNo)
+    amount = parse_amount(body.refundAmount, body.currencyCode)
+    payload = body.model_dump(mode="json", exclude_none=True)
+    return await _submit(
+        request,
+        ids=ids,
+        biz_seq_no=body.bizSeqNo,
+        business_action="REFUND",
+        biz_type="RFND",
+        business_scope="bank_refund",
+        wedap_method="refund",
         amount=amount,
         currency=body.currencyCode,
         wedap_payload=payload,

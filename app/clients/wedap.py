@@ -226,6 +226,25 @@ class WedapClient:
             payload=payload,
         )
 
+    async def refund(
+        self,
+        *,
+        tenant_id: str,
+        request_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """退款（对接文档 v0.3.0 §4.7，wedap 已实现 adapter#73）：内部户 → 客户账户。
+
+        契约要点（wedap 侧强制，gateway 薄透传不复刻）：oriBizSeqNo 关联被退款的原归集单；
+        累计退款 ≤ 原单金额（FAILED 不计入）；currencyCode 须与原交易一致。
+        """
+        return await self._post(
+            "/api/v1/transactions/refund",
+            tenant_id=tenant_id,
+            request_id=request_id,
+            payload=payload,
+        )
+
     async def query_transaction_status(
         self,
         *,
