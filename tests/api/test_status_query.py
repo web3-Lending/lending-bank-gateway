@@ -51,6 +51,7 @@ async def _seed_pre_0020_order(app) -> None:  # type: ignore[no-untyped-def]
                 )
             )
 
+
 LEGACY_BIZ = "CLT-20260611-0001234567891"
 
 STATUS_URL = "/api/v1/bank-funds/status"
