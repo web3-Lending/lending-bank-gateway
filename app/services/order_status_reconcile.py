@@ -25,13 +25,14 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.clients.wedap import WedapError
 from app.domain.states import (
+    ABSORBING_STATUSES,
     IllegalTransition,
     OrderStatus,
     assert_transition,
     map_wedap_txn_status,
 )
 from app.models.txn import BankTxnOrder
-from app.services.order_finalize import finalize_terminal_in_session, is_terminal
+from app.services.order_finalize import finalize_terminal_in_session
 
 logger = logging.getLogger(__name__)
 
@@ -119,11 +120,24 @@ async def resolve_terminal_via_status_query(
             ).scalar_one_or_none()
             if locked is None:  # pragma: no cover - 两读之间被删，竞态防御
                 return False
-            if locked.finalized_at is not None or is_terminal(locked.status):
-                # 已知边界（codex P1 已评估延后）：SUCCEEDED→REVERSED 的「终态升级」在此被
-                # 幂等跳过——完整 reversal ingestion（终态后冲正的 audit/outbox 二次转发 +
-                # finalize 幂等键按状态细分）等 wedap 冲正 4.8（阶段3）落地一起做，
-                # FU-GW-REVERSAL-INGESTION-20260715-001。当前 wedap 不会产生 REVERSED 事件。
+            if locked.finalized_at is not None or OrderStatus(locked.status) in ABSORBING_STATUSES:
+                # 终态升级（reversal ingestion）：SUCCEEDED 已收口单查询到 REVERSED =
+                # counter 冲正（§3.6）——推进 + 状态级二次收口；重复事件由「status 已是
+                # REVERSED」幂等挡住。其余已收口场景照旧跳过（防倒退/双转发）。
+                if (
+                    OrderStatus(locked.status) == OrderStatus.SUCCEEDED
+                    and terminal == OrderStatus.REVERSED
+                ):
+                    assert_transition(OrderStatus(locked.status), terminal)
+                    locked.status = terminal
+                    await finalize_terminal_in_session(
+                        session,
+                        order=locked,
+                        source=source,
+                        trace_id=f"reconcile-{biz_seq_no}",
+                        upgrade_from=str(OrderStatus.SUCCEEDED),
+                    )
+                    return True
                 return False
             try:
                 assert_transition(OrderStatus(locked.status), terminal)

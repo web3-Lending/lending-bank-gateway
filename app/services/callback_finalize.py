@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.domain.states import (
+    ABSORBING_STATUSES,
     IllegalTransition,
     OrderStatus,
     assert_transition,
@@ -67,6 +68,29 @@ async def resolve_callback_terminal(
         if order is None:
             raise CallbackTerminalUnresolved(f"unknown order {tenant_id}/{biz_seq_no}")
         if order.finalized_at is not None or is_terminal(order.status):
+            # 已收口 SUCCEEDED 单：无终态回调是 reversal 核查的生产入口（codex P1——
+            # reconcile worker 只扫非终态，SUCCEEDED 单否则永无升级触发链）——经
+            # status-query 复查一次，wedap 若回 REVERSED 则走锁内升级；其余结果 no-op。
+            # 运营/上游重放一条无终态回调即可触发核查。本核查是**可选增强**：任何异常
+            # （含 resolver 未吞的响应解码/结构错误）都不得破坏「已收口回调幂等成功」
+            # 语义——no-throw 边界统一兜住并告警，下轮重放/人工再触发即可。
+            if OrderStatus(order.status) == OrderStatus.SUCCEEDED:
+                try:
+                    await resolve_terminal_via_status_query(
+                        factory,
+                        wedap=wedap,
+                        tenant_id=tenant_id,
+                        biz_seq_no=biz_seq_no,
+                        source="CALLBACK",
+                    )
+                except Exception:
+                    logger.warning(
+                        "reversal check failed (idempotent ack kept) %s/%s trace=%s",
+                        tenant_id,
+                        biz_seq_no,
+                        trace_id,
+                        exc_info=True,
+                    )
             return
         # 非终态 → order 级 status-query 主动收敛。COLL 无状态查询接口 → 不收敛，
         # 留 RECEIVED 等带终态的回调重放；order 侧超窗由 G6 stuck alert 兜底告警。
@@ -114,11 +138,27 @@ async def resolve_callback_terminal(
             if locked is None:
                 # 乱序回调（order 尚未创建）→ 留 RECEIVED 待重放
                 raise CallbackTerminalUnresolved(f"unknown order {tenant_id}/{biz_seq_no}")
-            if locked.finalized_at is not None or is_terminal(locked.status):
+            if locked.finalized_at is not None or OrderStatus(locked.status) in ABSORBING_STATUSES:
+                # 终态升级（reversal ingestion）：SUCCEEDED 已收口单收到 REVERSED 回调 =
+                # counter 冲正（§3.6），合法升级——推进 + 状态级二次收口（audit/outbox
+                # 按 REVERSED 键，不与首次 SUCCEEDED 收口互吞）。重复 REVERSED 回调时
+                # status 已是 REVERSED → 落入下方幂等 return。FAILED 无资金动作不可冲正、
+                # PARTIALLY_REVERSED 契约未定（wedap 4.8 阶段3）——均不升级。
+                if (
+                    OrderStatus(locked.status) == OrderStatus.SUCCEEDED
+                    and terminal == OrderStatus.REVERSED
+                ):
+                    assert_transition(OrderStatus(locked.status), terminal)
+                    locked.status = terminal
+                    await finalize_terminal_in_session(
+                        session,
+                        order=locked,
+                        source="CALLBACK",
+                        trace_id=trace_id,
+                        upgrade_from=str(OrderStatus.SUCCEEDED),
+                    )
+                    return
                 # 幂等：已收口。回调结论与已收口终态不一致 → 只告警不倒退（终态防倒退）。
-                # 已知边界：SUCCEEDED→REVERSED 的合法终态升级也会落到本分支被跳过——
-                # reversal ingestion 等 wedap 冲正 4.8 落地一起做（divergence 告警即人工
-                # 介入信号），FU-GW-REVERSAL-INGESTION-20260715-001。
                 if OrderStatus(locked.status) != terminal:
                     logger.error(
                         "callback terminal divergence %s/%s order=%s callback=%s（保持不倒退）",

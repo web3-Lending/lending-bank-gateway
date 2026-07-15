@@ -175,16 +175,19 @@ async def test_no_txn_status_order_already_finalized_is_processed(factory) -> No
     """codex P1 回归：无 txnStatus 回调 + order 已被同步路径收口 → 视为已处理（不抛、不重复转发）。
 
     修前：status-query 对已终态返 False → 误判未收敛 → inbox 永留 RECEIVED。
+    语义更新（reversal ingestion）：已收口 SUCCEEDED 单会经 status-query 做一次
+    reversal 核查（生产升级入口）——wedap 仍 SUCCESS 时零转发、状态不变、不抛。
     """
     await _seed(factory, status="SUCCEEDED", finalized_at=dt.datetime.now(dt.UTC))
     wedap = AsyncMock()
+    wedap.query_transaction_status.side_effect = lambda **kw: _identity_resp(kw, "SUCCESS")
     await resolve_callback_terminal(
         factory,
         wedap=wedap,
         tenant_id=TENANT,
         body={"bizSeqNo": BIZ, "type": "collection"},
     )
-    wedap.query_transaction_status.assert_not_called()  # 已收口，无需外呼
+    wedap.query_transaction_status.assert_called_once()  # reversal 核查恰好一次
     assert await _outbox_count(factory) == 0  # 不重复转发
 
 
@@ -306,20 +309,124 @@ async def test_partially_reversed_to_reversed_callback_finalizes(factory) -> Non
 
 
 @pytest.mark.asyncio
-async def test_succeeded_order_reversed_callback_stays_succeeded_no_forward(factory) -> None:
-    """已知边界固化（FU-GW-REVERSAL-INGESTION）：SUCCEEDED 已收口单收到 REVERSED 回调 →
-    保持 SUCCEEDED、零二次转发（divergence 只告警）——终态升级 ingestion 等 wedap 4.8。"""
+async def test_succeeded_order_reversed_callback_upgrades_and_forwards_once(factory) -> None:
+    """reversal ingestion：SUCCEEDED 已收口单收到 REVERSED 回调（counter 冲正）→ 升级
+    REVERSED + audit(upgraded_from) + 按状态键二次转发一次；重复 REVERSED 回调幂等零增量。"""
     await _seed(factory, status="SUCCEEDED", finalized_at=dt.datetime.now(dt.UTC))
+    body = {"bizSeqNo": BIZ, "type": "disbursement", "txnStatus": "REVERSED"}
+    await resolve_callback_terminal(factory, wedap=AsyncMock(), tenant_id=TENANT, body=body)
+    order = await _order(factory)
+    assert order.status == "REVERSED"
+    assert order.finalized_via == "CALLBACK"
+    assert order.finalized_at is not None  # 首次收口时间保留（非空即可）
+    assert await _outbox_count(factory) == 1  # fwd-…-REVERSED 新键，转发一次
+    # 重复冲正回调：status 已是 REVERSED → 幂等 return，零新转发
+    await resolve_callback_terminal(factory, wedap=AsyncMock(), tenant_id=TENANT, body=body)
+    assert await _outbox_count(factory) == 1
+
+
+@pytest.mark.asyncio
+async def test_no_terminal_callback_on_finalized_succeeded_triggers_reversal_check(
+    factory,
+) -> None:
+    """P1 生产链可达性：无终态回调撞已收口 SUCCEEDED 单 → 经 status-query 复查，
+    wedap 回 REVERSED 则升级（这是 reconcile 升级分支在生产的真实入口）。"""
+    await _seed(factory, status="SUCCEEDED", finalized_at=dt.datetime.now(dt.UTC))
+    wedap = AsyncMock()
+    wedap.query_transaction_status.side_effect = lambda **kw: _identity_resp(kw, "REVERSED")
+    await resolve_callback_terminal(
+        factory,
+        wedap=wedap,
+        tenant_id=TENANT,
+        body={"bizSeqNo": BIZ, "type": "disbursement"},  # 无 txnStatus
+    )  # 不抛
+    order = await _order(factory)
+    assert order.status == "REVERSED"
+    assert await _outbox_count(factory) == 1
+
+
+@pytest.mark.asyncio
+async def test_no_terminal_callback_on_finalized_succeeded_still_success_noop(
+    factory,
+) -> None:
+    """无终态回调撞已收口 SUCCEEDED 单，wedap 仍 SUCCESS → no-op 幂等返回（不抛不转发）。"""
+    await _seed(factory, status="SUCCEEDED", finalized_at=dt.datetime.now(dt.UTC))
+    wedap = AsyncMock()
+    wedap.query_transaction_status.side_effect = lambda **kw: _identity_resp(kw, "SUCCESS")
+    await resolve_callback_terminal(
+        factory,
+        wedap=wedap,
+        tenant_id=TENANT,
+        body={"bizSeqNo": BIZ, "type": "disbursement"},
+    )
+    order = await _order(factory)
+    assert order.status == "SUCCEEDED"
+    assert await _outbox_count(factory) == 0
+
+
+@pytest.mark.asyncio
+async def test_reversal_check_exception_does_not_break_idempotent_ack(factory) -> None:
+    """no-throw 边界：核查抛任意异常（如响应解码错）→ 告警吞掉，回调仍幂等成功不抛。"""
+    await _seed(factory, status="SUCCEEDED", finalized_at=dt.datetime.now(dt.UTC))
+    wedap = AsyncMock()
+    wedap.query_transaction_status.side_effect = ValueError("bad json from wedap")
+    await resolve_callback_terminal(
+        factory,
+        wedap=wedap,
+        tenant_id=TENANT,
+        body={"bizSeqNo": BIZ, "type": "collection"},
+    )  # 关键断言：不抛
+    order = await _order(factory)
+    assert order.status == "SUCCEEDED"
+    assert await _outbox_count(factory) == 0
+
+
+@pytest.mark.asyncio
+async def test_no_terminal_callback_on_finalized_failed_skips_query(factory) -> None:
+    """无终态回调撞已收口 FAILED 单 → 零外呼直接幂等返回（仅 SUCCEEDED 做 reversal 核查）。"""
+    await _seed(factory, status="FAILED", finalized_at=dt.datetime.now(dt.UTC))
+    wedap = AsyncMock()
+    await resolve_callback_terminal(
+        factory,
+        wedap=wedap,
+        tenant_id=TENANT,
+        body={"bizSeqNo": BIZ, "type": "collection"},
+    )
+    wedap.query_transaction_status.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("absorbing", ["CANCELLED", "EXPIRED"])
+async def test_cancelled_expired_reversed_callback_divergence_not_stuck(
+    factory, absorbing: str
+) -> None:
+    """P2 吸收态：CANCELLED/EXPIRED（finalized_at 为空）收到 REVERSED 回调 → divergence
+    告警后视为已处理（不抛 → inbox 不会永留 RECEIVED 重放），状态不变零转发。"""
+    await _seed(factory, status=absorbing)  # finalized_at=None
     await resolve_callback_terminal(
         factory,
         wedap=AsyncMock(),
         tenant_id=TENANT,
         body={"bizSeqNo": BIZ, "type": "disbursement", "txnStatus": "REVERSED"},
-    )  # 不抛（幂等处理）
+    )  # 关键断言：不抛 CallbackTerminalUnresolved
     order = await _order(factory)
-    assert order.status == "SUCCEEDED"  # 不被升级（当前边界）
-    assert order.finalized_via is None  # 本回调未触发收口路径（seed 未设 via）
-    assert await _outbox_count(factory) == 0  # 零二次转发
+    assert order.status == absorbing
+    assert await _outbox_count(factory) == 0
+
+
+@pytest.mark.asyncio
+async def test_failed_order_reversed_callback_stays_failed(factory) -> None:
+    """FAILED 无资金动作不可冲正：REVERSED 回调只 divergence 告警，不升级不转发。"""
+    await _seed(factory, status="FAILED", finalized_at=dt.datetime.now(dt.UTC))
+    await resolve_callback_terminal(
+        factory,
+        wedap=AsyncMock(),
+        tenant_id=TENANT,
+        body={"bizSeqNo": BIZ, "type": "disbursement", "txnStatus": "REVERSED"},
+    )
+    order = await _order(factory)
+    assert order.status == "FAILED"
+    assert await _outbox_count(factory) == 0
 
 
 @pytest.mark.asyncio

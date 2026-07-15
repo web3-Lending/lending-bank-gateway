@@ -302,6 +302,25 @@ class WedapClient:
             params=params,
         )
 
+    async def get_deposit_account_detail(
+        self,
+        *,
+        tenant_id: str,
+        request_id: str,
+        params: dict[str, str],
+    ) -> dict[str, Any]:
+        """账户详情（对接文档 §5.3，底层银行 302）。契约 C 薄透传。
+
+        已知：wedap dev 数据面缺陷 D-5（真实账号 Account not found，2026-07-15 实测）——
+        gateway 仅代理转发，wedap 修复后即通，本端点不做兜底。
+        """
+        return await self._get(
+            "/api/v1/deposit/account/detail",
+            tenant_id=tenant_id,
+            request_id=request_id,
+            params=params,
+        )
+
     async def get_deposit_accounts(
         self,
         *,

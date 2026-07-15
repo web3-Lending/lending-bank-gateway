@@ -354,6 +354,34 @@ async def test_query_transaction_status_missing_data_returns_empty() -> None:
 
 
 # ---------------------------------------------------------------------------
+# get_deposit_account_detail（§5.3 透传）
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_get_deposit_account_detail_passthrough() -> None:
+    route = respx.get(f"{BASE}/api/v1/deposit/account/detail").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "code": "200",
+                "msg": "SUCCESS",
+                "data": {"custAccountNo": "6222021234567890123", "accountStatus": "ACTIVE"},
+            },
+        )
+    )
+    resp = await _client().get_deposit_account_detail(
+        tenant_id="OCBC",
+        request_id="dtl-001",
+        params={"custAccountNo": "6222021234567890123", "subaccountSerialNo": "01"},
+    )
+    assert resp["accountStatus"] == "ACTIVE"
+    req = route.calls.last.request
+    assert req.headers["X-Tenant-Id"] == "OCBC"
+    assert "custAccountNo=6222021234567890123" in str(req.url)
+
+
+# ---------------------------------------------------------------------------
 # get_deposit_balance_total
 # ---------------------------------------------------------------------------
 

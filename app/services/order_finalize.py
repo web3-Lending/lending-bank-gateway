@@ -58,23 +58,35 @@ async def finalize_terminal_in_session(
     source: str,
     trace_id: str,
     caller_service: str = "gateway",
+    upgrade_from: str | None = None,
 ) -> None:
     """order.status 已被推进到终态后调用：幂等收口（finalized_at/via + audit + 转发）。
 
     前置：调用方已把 order.status 设为终态并持有该 order 行（同事务）。
-    幂等：order.finalized_at 已非空 → 直接 return（同步与回调任一先收口，后到者跳过）。
+    幂等：order.finalized_at 已非空且非升级 → 直接 return（同步与回调任一先收口，后到者跳过）。
+
+    终态升级（reversal ingestion，FU-GW-REVERSAL-INGESTION）：``upgrade_from`` 非空表示
+    「已收口单被 counter 冲正」（当前仅 SUCCEEDED→REVERSED）——幂等键按**状态**细分：
+    保留首次 finalized_at（首次收口时间），finalized_via 更新为本次来源，audit 记
+    ORDER_REVERSED（payload 带 upgraded_from），outbox dedup_key ``fwd-…-REVERSED``
+    与首次 ``fwd-…-SUCCEEDED`` 天然不同键 → lifecycle 各收一次、互不吞并。
+    重复冲正事件的幂等由调用方保证（status 已是 REVERSED → 不再进入升级路径）。
     """
-    if order.finalized_at is not None:
+    if order.finalized_at is not None and upgrade_from is None:
         return
-    order.finalized_at = dt.datetime.now(dt.UTC)
+    if order.finalized_at is None:
+        order.finalized_at = dt.datetime.now(dt.UTC)
     order.finalized_via = source
+    audit_payload: dict[str, Any] = {"finalized_via": source}
+    if upgrade_from is not None:
+        audit_payload["upgraded_from"] = upgrade_from
     await write_audit(
         session,
         tenant_id=order.tenant_id,
         actor=f"svc:{caller_service}",
         action=f"ORDER_{order.status}",
         entity=f"bank_txn_order:{order.biz_seq_no}",
-        payload={"finalized_via": source},
+        payload=audit_payload,
     )
     await enqueue_forward(
         session,
