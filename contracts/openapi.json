@@ -269,6 +269,50 @@
         }
       }
     },
+    "/api/v1/bank-funds/refunds": {
+      "post": {
+        "tags": [
+          "bank-funds"
+        ],
+        "summary": "Refund To User",
+        "description": "退款北向端点（S5.6 拍板 2026-07-14：只补 refund，freeze/unfreeze 不做）。\n\n清算资金链口径（liquidation 调研）只用 collect + refund；退款经 gateway 落\nbank_txn_order（biz_type=RFND）保台账/幂等/对账覆盖，不允许上游直调 wedap 绕网关。",
+        "operationId": "refund_to_user_api_v1_bank_funds_refunds_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefundRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Refund To User Api V1 Bank Funds Refunds Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/bank-funds/status": {
       "get": {
         "tags": [
@@ -654,6 +698,12 @@
             "type": "string",
             "title": "Currencycode"
           },
+          "transType": {
+            "type": "string",
+            "maxLength": 20,
+            "minLength": 1,
+            "title": "Transtype"
+          },
           "txnAmount": {
             "anyOf": [
               {
@@ -681,7 +731,8 @@
         "type": "object",
         "required": [
           "bizSeqNo",
-          "currencyCode"
+          "currencyCode",
+          "transType"
         ],
         "title": "CollectRequest"
       },
@@ -724,6 +775,12 @@
             "type": "string",
             "title": "Currencycode"
           },
+          "transType": {
+            "type": "string",
+            "maxLength": 20,
+            "minLength": 1,
+            "title": "Transtype"
+          },
           "recipients": {
             "anyOf": [
               {
@@ -744,7 +801,8 @@
         "type": "object",
         "required": [
           "bizSeqNo",
-          "currencyCode"
+          "currencyCode",
+          "transType"
         ],
         "title": "DistributeRequest"
       },
@@ -829,8 +887,9 @@
           },
           "transType": {
             "type": "string",
-            "title": "Transtype",
-            "default": ""
+            "maxLength": 20,
+            "minLength": 1,
+            "title": "Transtype"
           },
           "disbursementInfo": {
             "$ref": "#/components/schemas/DisbursementInfo"
@@ -855,6 +914,7 @@
         "type": "object",
         "required": [
           "bizSeqNo",
+          "transType",
           "disbursementInfo"
         ],
         "title": "P2PDisbursementRequest"
@@ -865,6 +925,12 @@
             "type": "string",
             "title": "Bizseqno"
           },
+          "transType": {
+            "type": "string",
+            "maxLength": 20,
+            "minLength": 1,
+            "title": "Transtype"
+          },
           "repaymentInfo": {
             "$ref": "#/components/schemas/RepaymentInfo"
           }
@@ -873,9 +939,46 @@
         "type": "object",
         "required": [
           "bizSeqNo",
+          "transType",
           "repaymentInfo"
         ],
         "title": "P2PRepaymentRequest"
+      },
+      "RefundRequest": {
+        "properties": {
+          "bizSeqNo": {
+            "type": "string",
+            "title": "Bizseqno"
+          },
+          "currencyCode": {
+            "type": "string",
+            "title": "Currencycode"
+          },
+          "transType": {
+            "type": "string",
+            "maxLength": 20,
+            "minLength": 1,
+            "title": "Transtype"
+          },
+          "refundAmount": {
+            "type": "string",
+            "title": "Refundamount"
+          },
+          "oriBizSeqNo": {
+            "type": "string",
+            "title": "Oribizseqno"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "bizSeqNo",
+          "currencyCode",
+          "transType",
+          "refundAmount",
+          "oriBizSeqNo"
+        ],
+        "title": "RefundRequest"
       },
       "RepaymentInfo": {
         "properties": {

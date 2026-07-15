@@ -5,11 +5,12 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from app.api.deps import (
     assert_idempotency_key_matches,
+    bank_req_date,
     parse_amount,
     require_headers,
     validate_detail_consistency,
@@ -33,6 +34,9 @@ class CollectRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
     bizSeqNo: str
     currencyCode: str
+    # wedap 必填且 ≤20（W2 实测硬限）；gateway 落库供状态回查（提交值==查询值），
+    # 缺失/超长在入口显式拒绝——静默截断会造成「回查值 != 提交值」永久查不到（codex P1）。
+    transType: str = Field(min_length=1, max_length=20)
     txnAmount: str | None = None
     totalAmount: str | None = None
 
@@ -43,8 +47,22 @@ class DistributeRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
     bizSeqNo: str
     currencyCode: str
+    transType: str = Field(min_length=1, max_length=20)
     recipients: list[dict[str, Any]] | None = None
     """显式 null 视同缺省，契约 C 下 wedap 可选字段缺省=null 语义等价。"""
+
+
+class RefundRequest(BaseModel):
+    # 退款薄透传（对接文档 v0.3.0 §4.7）：gateway 只取记账/幂等所需最少键；
+    # bankAccountNo/custAccountNo/subaccountSerialNo/postscript 等经 extra=allow 原样透传。
+    # 累计退款 ≤ 原单金额等业务校验在 wedap 侧（FOR UPDATE 串行防并发超额），gateway 不复刻。
+    model_config = ConfigDict(extra="allow")
+    bizSeqNo: str
+    currencyCode: str
+    transType: str = Field(min_length=1, max_length=20)
+    refundAmount: str
+    oriBizSeqNo: str
+    """关联被退款的原归集单（清算超收退款只对未分发归集单做，业务约束在调用方）。"""
 
 
 # ── 内部提交 helper ────────────────────────────────────────────────────────────
@@ -79,6 +97,7 @@ async def _submit(
                 request_id=ids["request_id"],
                 business_scope=business_scope,
                 wedap_payload=wedap_payload,
+                ori_req_date=bank_req_date(request),
             ),
         )
     except ValueError as exc:
@@ -172,6 +191,34 @@ async def distribute_to_users(
     )
 
 
+@router.post("/refunds")
+async def refund_to_user(
+    body: RefundRequest,
+    request: Request,
+    ids: dict[str, str] = Depends(require_headers),
+) -> dict[str, Any]:
+    """退款北向端点（S5.6 拍板 2026-07-14：只补 refund，freeze/unfreeze 不做）。
+
+    清算资金链口径（liquidation 调研）只用 collect + refund；退款经 gateway 落
+    bank_txn_order（biz_type=RFND）保台账/幂等/对账覆盖，不允许上游直调 wedap 绕网关。
+    """
+    assert_idempotency_key_matches(request, body.bizSeqNo)
+    amount = parse_amount(body.refundAmount, body.currencyCode)
+    payload = body.model_dump(mode="json", exclude_none=True)
+    return await _submit(
+        request,
+        ids=ids,
+        biz_seq_no=body.bizSeqNo,
+        business_action="REFUND",
+        biz_type="RFND",
+        business_scope="bank_refund",
+        wedap_method="refund",
+        amount=amount,
+        currency=body.currencyCode,
+        wedap_payload=payload,
+    )
+
+
 @router.get("/status")
 async def query_status(
     request: Request,
@@ -193,30 +240,30 @@ async def query_status(
             detail={"code": "GW_404_ORDER", "message": f"order not found: {biz_seq_no}"},
         )
 
-    # 查询 wedap 实时状态；失败降级，不向外抛 500
-    try:
-        wedap_data: dict[str, Any] = await request.app.state.wedap.query_funds_status(
-            tenant_id=ids["tenant_id"],
-            request_id=ids["request_id"],
-            biz_seq_no=biz_seq_no,
-            biz_type=row.biz_type,
-        )
-    except (httpx.TimeoutException, httpx.TransportError):
-        wedap_data = {"unavailable": True, "reason": "timeout"}
-    except httpx.HTTPStatusError:
-        wedap_data = {"unavailable": True, "reason": "http_error"}
-    except WedapError as exc:
-        reason = "no_status_api" if exc.code == "UNSUPPORTED" else "wedap_error"
-        wedap_data = {"unavailable": True, "reason": reason}
-        # COLL(归集)：wedap 无状态查询接口（_STATUS_PATH_TMPL 仅 DISB/RPMT/DIST），
-        # 故 reason=no_status_api。这是**预期降级而非故障**——归集单终态由回调 body
-        # txnStatus 做 order 级收口（C5，ADR-0001），不依赖 wedap status 轮询；orderStatus
-        # （本地权威态）即可信状态。补 note 让降级自解释。
-        if exc.code == "UNSUPPORTED" and row.biz_type == "COLL":
-            wedap_data["note"] = (
-                "COLL 归集单 wedap 无状态查询接口，终态由回调（body txnStatus，order 级）收敛，"
-                "非故障；以 orderStatus 为准"
+    # 查询 wedap 实时状态（通用 /transactions/status，真实现；旧 per-type 桩已弃用——
+    # 桩对假单也回 SUCCESS，该视图曾不可信）；失败降级，不向外抛 500
+    if not row.trans_type or not row.ori_req_date:
+        # 0020 前存量单缺回查供参：不打 wedap，以 orderStatus（本地权威态）为准
+        wedap_data: dict[str, Any] = {
+            "unavailable": True,
+            "reason": "missing_trans_type",
+            "note": "0020 前存量单缺 trans_type/ori_req_date，无法通用回查；以 orderStatus 为准",
+        }
+    else:
+        try:
+            wedap_data = await request.app.state.wedap.query_transaction_status(
+                tenant_id=ids["tenant_id"],
+                request_id=ids["request_id"],
+                ori_biz_seq_no=biz_seq_no,
+                trans_type=row.trans_type,
+                ori_req_date=row.ori_req_date,
             )
+        except (httpx.TimeoutException, httpx.TransportError):
+            wedap_data = {"unavailable": True, "reason": "timeout"}
+        except httpx.HTTPStatusError:
+            wedap_data = {"unavailable": True, "reason": "http_error"}
+        except WedapError:
+            wedap_data = {"unavailable": True, "reason": "wedap_error"}
 
     result: dict[str, Any] = {
         "bizSeqNo": row.biz_seq_no,

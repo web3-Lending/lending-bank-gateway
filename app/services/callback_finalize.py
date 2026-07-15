@@ -116,6 +116,9 @@ async def resolve_callback_terminal(
                 raise CallbackTerminalUnresolved(f"unknown order {tenant_id}/{biz_seq_no}")
             if locked.finalized_at is not None or is_terminal(locked.status):
                 # 幂等：已收口。回调结论与已收口终态不一致 → 只告警不倒退（终态防倒退）。
+                # 已知边界：SUCCEEDED→REVERSED 的合法终态升级也会落到本分支被跳过——
+                # reversal ingestion 等 wedap 冲正 4.8 落地一起做（divergence 告警即人工
+                # 介入信号），FU-GW-REVERSAL-INGESTION-20260715-001。
                 if OrderStatus(locked.status) != terminal:
                     logger.error(
                         "callback terminal divergence %s/%s order=%s callback=%s（保持不倒退）",

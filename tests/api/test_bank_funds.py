@@ -17,6 +17,7 @@ HEADERS = {
 }
 COLLECT_BODY = {
     "bizSeqNo": "CLT-20260611-0001234567890",
+    "transType": "LOAN_COLLECT",
     "totalAmount": "500.0000",
     "currencyCode": "USD",
     "userList": [{"userId": "U1", "amount": "500.0000"}],
@@ -24,6 +25,7 @@ COLLECT_BODY = {
 DISTRIBUTE_BODY = {
     # 分发 wedap 真契约：顶层 currencyCode + recipients[].distributeAmount（无 totalAmount）。
     "bizSeqNo": "DST-20260611-0001234567890",
+    "transType": "BANK_FUND_DISTRIBUTE",
     "currencyCode": "USD",
     "recipients": [{"userId": "U2", "distributeAmount": "200.0000", "currencyCode": "USD"}],
 }
@@ -170,6 +172,7 @@ def test_collect_without_userlist_passes_validation(client: TestClient) -> None:
     """
     body = {
         "bizSeqNo": "CLT-20260611-0002000000001",
+        "transType": "LOAN_COLLECT",
         "totalAmount": "500.0000",
         "currencyCode": "USD",
         # 不传 userList
@@ -183,6 +186,7 @@ def test_collect_without_userlist_payload_excludes_key(client: TestClient) -> No
     """缺 userList 时，透传给 wedap 的 payload 不含 userList 键（契约 C：不注入伪字段）。"""
     body = {
         "bizSeqNo": "CLT-20260611-0002000000002",
+        "transType": "LOAN_COLLECT",
         "totalAmount": "300.0000",
         "currencyCode": "USD",
     }
@@ -219,6 +223,7 @@ def test_collect_txnamount_preferred_over_totalamount(client: TestClient) -> Non
     """同时给 txnAmount 与 totalAmount → 取扁平 txnAmount(777)；旧 totalAmount 不透传 wedap。"""
     body = {
         "bizSeqNo": "CLT-20260611-0002000000005",
+        "transType": "LOAN_COLLECT",
         "txnAmount": "777.0000",
         "totalAmount": "500.0000",
         "currencyCode": "USD",
@@ -234,7 +239,12 @@ def test_collect_txnamount_preferred_over_totalamount(client: TestClient) -> Non
 
 def test_collect_empty_txnamount_falls_back_or_400(client: TestClient) -> None:
     """txnAmount 空串且无 totalAmount → 400 missing（C1：空串视为缺，不报误导的 bad amount）。"""
-    body = {"bizSeqNo": "CLT-20260611-0002000000006", "txnAmount": "", "currencyCode": "USD"}
+    body = {
+        "bizSeqNo": "CLT-20260611-0002000000006",
+        "transType": "LOAN_COLLECT",
+        "txnAmount": "",
+        "currencyCode": "USD",
+    }
     h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-empty-txn"}
     r = client.post("/api/v1/bank-funds/collect-from-users", json=body, headers=h)
     assert r.status_code == 400
@@ -245,6 +255,7 @@ def test_distribute_without_recipients_passes_validation(client: TestClient) -> 
     """distribute-to-users 缺 recipients → 跳过明细校验（金额 Σ=0），200 受理（契约 C 薄透传）。"""
     body = {
         "bizSeqNo": "DST-20260611-0002000000004",
+        "transType": "BANK_FUND_DISTRIBUTE",
         "currencyCode": "USD",
     }
     h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-dst-no-rcp"}
@@ -256,6 +267,7 @@ def test_distribute_amount_summed_and_recipients_passthrough(client: TestClient)
     """分发金额 = Σ recipients[].distributeAmount；recipients+bankAccountNo 经 extra=allow 透传。"""
     body = {
         "bizSeqNo": "DST-20260611-0002000000010",
+        "transType": "BANK_FUND_DISTRIBUTE",
         "currencyCode": "USD",
         "recipients": [
             {
@@ -284,6 +296,7 @@ def test_distribute_recipient_currency_mismatch_400(client: TestClient) -> None:
     """recipient.currencyCode 与顶层 currencyCode 不一致 → 400 GW_400_VALIDATION。"""
     body = {
         "bizSeqNo": "DST-20260611-0002000000011",
+        "transType": "BANK_FUND_DISTRIBUTE",
         "currencyCode": "USD",
         "recipients": [{"userId": "U1", "distributeAmount": "100.0000", "currencyCode": "EUR"}],
     }
@@ -297,6 +310,7 @@ def test_distribute_empty_recipients_400(client: TestClient) -> None:
     """显式 recipients=[] → 400 empty recipients。"""
     body = {
         "bizSeqNo": "DST-20260611-0002000000012",
+        "transType": "BANK_FUND_DISTRIBUTE",
         "currencyCode": "USD",
         "recipients": [],
     }
@@ -310,6 +324,7 @@ def test_distribute_recipient_without_amount_skips_sum(client: TestClient) -> No
     """recipient 缺 distributeAmount（wedap 自动分配场景）→ sum 校验跳过，金额 Σ=0，200 受理。"""
     body = {
         "bizSeqNo": "DST-20260611-0002000000013",
+        "transType": "BANK_FUND_DISTRIBUTE",
         "currencyCode": "USD",
         "recipients": [{"userId": "U1", "currencyCode": "USD"}],
     }
@@ -323,6 +338,7 @@ def test_distribute_recipient_null_amount_skipped(client: TestClient) -> None:
     回归 review Finding 2：原 str(None) 会误炸 400 "bad amount: None"。"""
     body = {
         "bizSeqNo": "DST-20260611-0002000000014",
+        "transType": "BANK_FUND_DISTRIBUTE",
         "currencyCode": "USD",
         "recipients": [{"userId": "U1", "distributeAmount": None, "currencyCode": "USD"}],
     }

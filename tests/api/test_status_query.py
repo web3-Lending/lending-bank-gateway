@@ -24,8 +24,35 @@ COLLECT_BODY = {
     "bizSeqNo": "CLT-20260611-0001234567890",
     "totalAmount": "500.0000",
     "currencyCode": "USD",
+    "transType": "LOAN_COLLECT",
     "userList": [{"userId": "U1", "amount": "500.0000"}],
 }
+
+
+async def _seed_pre_0020_order(app) -> None:  # type: ignore[no-untyped-def]
+    """直插 0020 前形态存量行（trans_type/ori_req_date 为 NULL）——不走 API：
+    新 POST 已强制 transType 必填，无法再产生 NULL 行（codex P2 修法）。"""
+    from decimal import Decimal
+
+    from app.models.txn import BankTxnOrder
+
+    async with app.state.session_factory() as s:
+        async with s.begin():
+            s.add(
+                BankTxnOrder(
+                    tenant_id="OCBC",
+                    biz_seq_no=LEGACY_BIZ,
+                    business_action="COLLECT",
+                    biz_type="COLL",
+                    amount=Decimal("500.0000"),
+                    currency="USD",
+                    caller_service="lifecycle",
+                    status="SUBMITTED",
+                )
+            )
+
+
+LEGACY_BIZ = "CLT-20260611-0001234567891"
 
 STATUS_URL = "/api/v1/bank-funds/status"
 
@@ -45,9 +72,9 @@ def client() -> TestClient:
     wedap = AsyncMock()
     wedap.collect_from_users.return_value = {"txnStatus": "PROCESSING"}
     wedap.distribute_to_users.return_value = {"txnStatus": "PROCESSING"}
-    wedap.query_funds_status.return_value = {
+    wedap.query_transaction_status.return_value = {
         "txnStatus": "SUBMITTED",
-        "bizSeqNo": COLLECT_BODY["bizSeqNo"],
+        "oriBizSeqNo": COLLECT_BODY["bizSeqNo"],
     }
     app.state.wedap = wedap
     return TestClient(app)
@@ -73,9 +100,11 @@ def test_status_after_submit_returns_order_and_wedap(client: TestClient) -> None
     assert data["orderStatus"] == "SUBMITTED"
     assert data["bizSeqNo"] == COLLECT_BODY["bizSeqNo"]
     assert data["wedap"]["txnStatus"] == "SUBMITTED"
-    # 验证 biz_type 从 order 取出并传给 query_funds_status（COLL = lifecycel 真码归集）
-    call_kwargs = client.app.state.wedap.query_funds_status.call_args  # type: ignore[union-attr]
-    assert call_kwargs.kwargs["biz_type"] == "COLL"
+    # 验证通用回查供参从 order 取出：trans_type=提交原值，ori_req_date=提交日 YYYYMMDD
+    call_kwargs = client.app.state.wedap.query_transaction_status.call_args  # type: ignore[union-attr]
+    assert call_kwargs.kwargs["trans_type"] == "LOAN_COLLECT"
+    assert len(call_kwargs.kwargs["ori_req_date"]) == 8
+    assert call_kwargs.kwargs["ori_biz_seq_no"] == COLLECT_BODY["bizSeqNo"]
 
 
 # ── Test 2：未知 bizSeqNo → 404 GW_404_ORDER ─────────────────────────────────
@@ -115,12 +144,12 @@ def test_status_cross_tenant_isolation_404(client: TestClient) -> None:
 
 
 def test_status_wedap_timeout_degrades_gracefully(client: TestClient) -> None:
-    """wedap query_funds_status 超时 → HTTP 200 且 data.wedap.unavailable is True。"""
+    """wedap query_transaction_status 超时 → HTTP 200 且 data.wedap.unavailable is True。"""
     # 种单
     client.post("/api/v1/bank-funds/collect-from-users", json=COLLECT_BODY, headers=HEADERS)
 
     # 让 wedap 超时
-    client.app.state.wedap.query_funds_status.side_effect = httpx.TimeoutException("timeout")  # type: ignore[union-attr]
+    client.app.state.wedap.query_transaction_status.side_effect = httpx.TimeoutException("timeout")  # type: ignore[union-attr]
 
     r = client.get(
         STATUS_URL,
@@ -137,9 +166,9 @@ def test_status_wedap_timeout_degrades_gracefully(client: TestClient) -> None:
 
 
 def test_status_wedap_transport_error_degrades_gracefully(client: TestClient) -> None:
-    """wedap query_funds_status TransportError → HTTP 200 + unavailable=True。"""
+    """wedap query_transaction_status TransportError → HTTP 200 + unavailable=True。"""
     client.post("/api/v1/bank-funds/collect-from-users", json=COLLECT_BODY, headers=HEADERS)
-    client.app.state.wedap.query_funds_status.side_effect = httpx.TransportError("conn reset")  # type: ignore[union-attr]
+    client.app.state.wedap.query_transaction_status.side_effect = httpx.TransportError("conn reset")  # type: ignore[union-attr]
 
     r = client.get(
         STATUS_URL,
@@ -154,9 +183,9 @@ def test_status_wedap_transport_error_degrades_gracefully(client: TestClient) ->
 
 
 def test_status_wedap_error_degrades_gracefully(client: TestClient) -> None:
-    """wedap query_funds_status WedapError → HTTP 200 + unavailable=True。"""
+    """wedap query_transaction_status WedapError → HTTP 200 + unavailable=True。"""
     client.post("/api/v1/bank-funds/collect-from-users", json=COLLECT_BODY, headers=HEADERS)
-    client.app.state.wedap.query_funds_status.side_effect = WedapError("500", "internal")  # type: ignore[union-attr]
+    client.app.state.wedap.query_transaction_status.side_effect = WedapError("500", "internal")  # type: ignore[union-attr]
 
     r = client.get(
         STATUS_URL,
@@ -167,16 +196,15 @@ def test_status_wedap_error_degrades_gracefully(client: TestClient) -> None:
     assert r.json()["data"]["wedap"]["unavailable"] is True
 
 
-# ── Test 4d：wedap UNSUPPORTED（如 CLT 无状态接口）→ 200 + reason=no_status_api ─
+# ── Test 4c2：wedap HTTP 状态错误也降级 ──────────────────────────────────────
 
 
-def test_status_wedap_unsupported_biz_type_degrades_with_no_status_api(
-    client: TestClient,
-) -> None:
-    """wedap query_funds_status WedapError(UNSUPPORTED) → HTTP 200 + reason=no_status_api。"""
+def test_status_wedap_http_status_error_degrades_gracefully(client: TestClient) -> None:
+    """wedap query_transaction_status HTTPStatusError（非 2xx）→ HTTP 200 + reason=http_error。"""
     client.post("/api/v1/bank-funds/collect-from-users", json=COLLECT_BODY, headers=HEADERS)
-    client.app.state.wedap.query_funds_status.side_effect = WedapError(  # type: ignore[union-attr]
-        "UNSUPPORTED", "no status api for CLT"
+    resp = httpx.Response(502, request=httpx.Request("GET", "http://wedap/status"))
+    client.app.state.wedap.query_transaction_status.side_effect = httpx.HTTPStatusError(  # type: ignore[union-attr]
+        "bad gateway", request=resp.request, response=resp
     )
 
     r = client.get(
@@ -187,10 +215,92 @@ def test_status_wedap_unsupported_biz_type_degrades_with_no_status_api(
     assert r.status_code == 200
     wedap = r.json()["data"]["wedap"]
     assert wedap["unavailable"] is True
-    assert wedap["reason"] == "no_status_api"
-    # CLT(归集)单：补 note 说明这是预期降级（终态由回调驱动），非故障
-    assert "note" in wedap
-    assert "回调" in wedap["note"]
+    assert wedap["reason"] == "http_error"
+
+
+# ── Test 4d：0020 前存量单（trans_type NULL）→ 200 + reason=missing_trans_type ──
+
+
+def test_status_missing_trans_type_degrades_without_wedap_call(
+    client: TestClient,
+) -> None:
+    """直插 0020 前形态行（trans_type NULL）→ 不打 wedap，reason=missing_trans_type + note。"""
+    asyncio.run(_seed_pre_0020_order(client.app))
+
+    r = client.get(
+        STATUS_URL,
+        params={"bizSeqNo": LEGACY_BIZ},
+        headers=HEADERS,
+    )
+    assert r.status_code == 200
+    wedap = r.json()["data"]["wedap"]
+    assert wedap["unavailable"] is True
+    assert wedap["reason"] == "missing_trans_type"
+    # 存量单：补 note 说明以本地 orderStatus 为准，非故障
+    assert "orderStatus" in wedap["note"]
+    client.app.state.wedap.query_transaction_status.assert_not_called()  # type: ignore[union-attr]
+
+
+# ── Test 4e：新单缺 transType → 422（必填强校验，禁止再产生 NULL 供参行）─────────
+
+
+def test_collect_missing_trans_type_rejected_422(client: TestClient) -> None:
+    """新 POST 缺 transType → 422（pydantic 必填），不落单不外呼（codex P1 修法）。"""
+    body = {k: v for k, v in COLLECT_BODY.items() if k != "transType"}
+    headers = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-no-tt"}
+    r = client.post("/api/v1/bank-funds/collect-from-users", json=body, headers=headers)
+    assert r.status_code == 422
+    client.app.state.wedap.collect_from_users.assert_not_called()  # type: ignore[union-attr]
+
+
+def test_collect_overlong_trans_type_rejected_422(client: TestClient) -> None:
+    """transType 超 20 字符 → 422（不静默截断，防回查值 != 提交值）。"""
+    body = {**COLLECT_BODY, "transType": "X" * 21}
+    headers = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-long-tt"}
+    r = client.post("/api/v1/bank-funds/collect-from-users", json=body, headers=headers)
+    assert r.status_code == 422
+    client.app.state.wedap.collect_from_users.assert_not_called()  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        (
+            "/api/v1/bank-funds/distribute-to-users",
+            {"bizSeqNo": "DST-NOTT-0001", "currencyCode": "USD", "recipients": []},
+        ),
+        (
+            "/api/v1/bank-funds/refunds",
+            {
+                "bizSeqNo": "RFD-NOTT-0001",
+                "currencyCode": "USD",
+                "refundAmount": "1.00",
+                "oriBizSeqNo": "CLT-X",
+            },
+        ),
+        (
+            "/api/v1/loans/p2p-disbursements",
+            {
+                "bizSeqNo": "DSB-NOTT-0001",
+                "disbursementInfo": {"txnAmount": "1.00", "currencyCode": "USD"},
+            },
+        ),
+        (
+            "/api/v1/loans/p2p-repayments",
+            {
+                "bizSeqNo": "RPM-NOTT-0001",
+                "repaymentInfo": {"txnAmount": "1.00", "currencyCode": "USD"},
+            },
+        ),
+    ],
+)
+def test_all_submit_models_missing_trans_type_rejected_422(
+    client: TestClient, path: str, body: dict
+) -> None:
+    """五个提交模型逐个强制 transType 必填——缺失一律 422（collect 见上例，此处盖其余四个）。"""
+    headers = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-nt"}
+    r = client.post(path, json=body, headers=headers)
+    assert r.status_code == 422
 
 
 # ── Test 5：缺 X-Tenant-Id → 400 ─────────────────────────────────────────────

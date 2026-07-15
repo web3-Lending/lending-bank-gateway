@@ -38,6 +38,8 @@ class SubmitRequest:
     request_id: str
     business_scope: str
     wedap_payload: dict[str, Any]
+    # 提交日 YYYYMMDD（bank_timezone，API 层换算注入）：wedap 通用状态回查 oriReqDate 供参。
+    ori_req_date: str | None = None
 
 
 async def submit_order(
@@ -84,6 +86,12 @@ async def submit_order(
                             caller_service=req.caller_service,
                             status=OrderStatus.ACCEPTED,
                             request_id=req.request_id,
+                            # 通用状态回查供参（0020）：transType 存调用方原值——wedap 按
+                            # (oriBizSeqNo, transType) 消歧，查询值必须等于提交值。
+                            # 无损落库（codex P1）：入口 pydantic 已强制必填且 ≤20，禁止
+                            # 静默截断（截断致回查值 != 提交值，单据永久查不到）。
+                            trans_type=(str(req.wedap_payload.get("transType") or "") or None),
+                            ori_req_date=req.ori_req_date,
                         )
                     )
             except IntegrityError:

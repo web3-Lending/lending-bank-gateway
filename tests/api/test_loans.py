@@ -121,6 +121,7 @@ def test_idempotent_replay_no_extra_call(client: TestClient) -> None:
 def test_repayment_endpoint_works(client: TestClient) -> None:
     body = {
         "bizSeqNo": "RPY-20260611-0001234567890",
+        "transType": "REPAYMENT",
         "repaymentInfo": {"txnAmount": "50.0000", "currencyCode": "USD"},
     }
     r = client.post(
@@ -219,6 +220,7 @@ def test_repayment_lenders_txnamount_sum_ok(client: TestClient) -> None:
     """还款 lenders[].txnAmount 之和 == repaymentInfo.txnAmount → 200（lending 按占比拆分）。"""
     body = {
         "bizSeqNo": "RPY-20260611-0002000000001",
+        "transType": "REPAYMENT",
         "repaymentInfo": {"txnAmount": "100.0000", "currencyCode": "USD"},
         "lenders": [
             {"userId": "L1", "txnAmount": "60.0000"},
@@ -234,6 +236,7 @@ def test_repayment_lenders_txnamount_mismatch_400(client: TestClient) -> None:
     """lenders[].txnAmount 之和 != repaymentInfo.txnAmount → 400（原 shareAmount 会漏判此错）。"""
     body = {
         "bizSeqNo": "RPY-20260611-0002000000002",
+        "transType": "REPAYMENT",
         "repaymentInfo": {"txnAmount": "100.0000", "currencyCode": "USD"},
         "lenders": [
             {"userId": "L1", "txnAmount": "60.0000"},
@@ -250,6 +253,7 @@ def test_repayment_extra_fields_passthrough(client: TestClient) -> None:
     """extra=allow：repaymentInfo 嵌套必填字段 + 顶层 lenders[] 全透传（修复前被静默丢致拒单）。"""
     body = {
         "bizSeqNo": "RPY-20260611-0002000000003",
+        "transType": "REPAYMENT",
         "repaymentInfo": {
             "txnAmount": "100.0000",
             "currencyCode": "USD",

@@ -30,6 +30,7 @@ HEADERS = {
 
 COLLECT_BODY = {
     "bizSeqNo": "CLT-20260611-0001234567890",
+    "transType": "LOAN_COLLECT",
     "totalAmount": "500.0000",
     "currencyCode": "USD",
     "userList": [{"userId": "U1", "amount": "500.0000"}],
@@ -72,7 +73,7 @@ def status_client() -> TestClient:
     asyncio.run(_create_tables(app.state.engine))
     wedap = AsyncMock()
     wedap.collect_from_users.return_value = {"txnStatus": "PROCESSING"}
-    wedap.query_funds_status.return_value = {"txnStatus": "SUBMITTED"}
+    wedap.query_transaction_status.return_value = {"txnStatus": "SUBMITTED"}
     app.state.wedap = wedap
     return TestClient(app)
 
@@ -121,7 +122,7 @@ def test_status_upstream_http_error_degrades_gracefully(status_client: TestClien
     # 先种单
     status_client.post("/api/v1/bank-funds/collect-from-users", json=COLLECT_BODY, headers=HEADERS)
 
-    status_client.app.state.wedap.query_funds_status.side_effect = (  # type: ignore[union-attr]
+    status_client.app.state.wedap.query_transaction_status.side_effect = (  # type: ignore[union-attr]
         _make_http_status_error(503)
     )
 

@@ -1,10 +1,17 @@
 """G2：RESULT_UNKNOWN / 非终态父单经 wedap status-query 主动复查收敛（order 级，C5）。
 
-本服务调 wedap.query_funds_status 直接查父单终态：
+本服务调 wedap.query_transaction_status（通用 `GET /api/v1/transactions/status`，
+对接文档 v0.3.0 §5.5，真实现）直接查父单终态：
 
-- 事务外查 wedap（DISB/RPMT/DIST 支持；COLL 等 UNSUPPORTED → 返 False 交 G6 升级）
-- 事务内 FOR UPDATE 重读父单做 CAS：已终态 / finalized_at 非空 → 跳过（防非法迁移与双转发）
-- 仅当前态非终态且映射为终态时 assert_transition + finalize（复用同步/回调同一收口）
+- 旧 per-type 状态端点是桩（假单也回 SUCCESS，W7）——曾把资金半程滞留单假收敛成
+  SUCCEEDED（2026-07-14 Round 1 双样本实锤，FU-GW-RECONCILE-FALSE-FINALIZE），已弃用。
+- 通用接口四必填供参存于 order（0020）：trans_type（提交原值）+ ori_req_date（提交日）。
+  存量行两列 NULL → 返 False 不回查（交 G6 stuck alert 人工处置），不做 biz_type 反推
+  兜底——反推错了就是又一轮假终态。
+- 事务外查 wedap；事务内 FOR UPDATE 重读父单做 CAS：已终态 / finalized_at 非空 → 跳过
+  （防非法迁移与双转发）
+- 仅当前态非终态且映射为终态（含 REVERSED，counter 人工冲正回传）时
+  assert_transition + finalize（复用同步/回调同一收口）
 """
 
 from __future__ import annotations
@@ -41,7 +48,7 @@ async def resolve_terminal_via_status_query(
 
     返回 True=本次收敛到终态；False=未收敛（不支持 / 暂态 / 已终态 / 非终态结果）。
     """
-    # 1. 事务外轻量读 biz_type
+    # 1. 事务外轻量读通用回查供参（trans_type/ori_req_date，0020）
     async with factory() as session:
         order = (
             await session.execute(
@@ -53,17 +60,44 @@ async def resolve_terminal_via_status_query(
         ).scalar_one_or_none()
         if order is None:
             return False
-        biz_type = order.biz_type
+        trans_type = order.trans_type
+        ori_req_date = order.ori_req_date
 
-    # 2. 事务外查 wedap；UNSUPPORTED（COLL 归集）/ 暂态 HTTP 错误 → 不收敛，交下轮 / G6
+    # 供参缺失（0020 前存量单）→ 不回查（交 G6 升级），禁 biz_type 反推防假终态
+    if not trans_type or not ori_req_date:
+        logger.warning(
+            "status-reconcile skip %s/%s: missing trans_type/ori_req_date (pre-0020 order)",
+            tenant_id,
+            biz_seq_no,
+        )
+        return False
+
+    # 2. 事务外查 wedap；wedap 业务错误 / 暂态 HTTP 错误 → 不收敛，交下轮 / G6
     try:
-        data = await wedap.query_funds_status(
+        data = await wedap.query_transaction_status(
             tenant_id=tenant_id,
             request_id=f"status-reconcile-{biz_seq_no}",
-            biz_seq_no=biz_seq_no,
-            biz_type=biz_type,
+            ori_biz_seq_no=biz_seq_no,
+            trans_type=trans_type,
+            ori_req_date=ori_req_date,
         )
     except (WedapError, httpx.HTTPError):
+        return False
+
+    # 响应身份核对（codex P1）：oriBizSeqNo/transType 必须与请求一致才允许推进——
+    # 防 wedap 侧任何形式的串单/错路由把别人的终态收到本单头上。缺失视同不一致（保守，
+    # 不收敛交下轮/G6，方向安全）。
+    resp_ori = str(data.get("oriBizSeqNo") or "")
+    resp_type = str(data.get("transType") or "")
+    if resp_ori != biz_seq_no or resp_type != trans_type:
+        logger.error(
+            "status-reconcile identity mismatch %s/%s: resp ori=%s type=%s (expect type=%s)",
+            tenant_id,
+            biz_seq_no,
+            resp_ori,
+            resp_type,
+            trans_type,
+        )
         return False
 
     terminal = map_wedap_txn_status(str(data.get("txnStatus", "")))
@@ -86,6 +120,10 @@ async def resolve_terminal_via_status_query(
             if locked is None:  # pragma: no cover - 两读之间被删，竞态防御
                 return False
             if locked.finalized_at is not None or is_terminal(locked.status):
+                # 已知边界（codex P1 已评估延后）：SUCCEEDED→REVERSED 的「终态升级」在此被
+                # 幂等跳过——完整 reversal ingestion（终态后冲正的 audit/outbox 二次转发 +
+                # finalize 幂等键按状态细分）等 wedap 冲正 4.8（阶段3）落地一起做，
+                # FU-GW-REVERSAL-INGESTION-20260715-001。当前 wedap 不会产生 REVERSED 事件。
                 return False
             try:
                 assert_transition(OrderStatus(locked.status), terminal)

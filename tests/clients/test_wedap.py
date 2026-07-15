@@ -1,3 +1,4 @@
+import hashlib
 import json
 import pathlib
 
@@ -212,96 +213,142 @@ async def test_distribute_to_users_missing_data_returns_empty() -> None:
 
 
 # ---------------------------------------------------------------------------
-# query_funds_status（biz_type 感知，wedap 无统一状态接口）
+# refund（POST /api/v1/transactions/refund，对接文档 v0.3.0 §4.7）
 # ---------------------------------------------------------------------------
 
 
 @respx.mock
-async def test_query_funds_status_dsb_routes_to_disbursement_status() -> None:
-    """DISB → GET /api/v1/loans/p2p-disbursements/{biz}/status。"""
-    biz = "DSB-20260612-0001"
-    route = respx.get(f"{BASE}/api/v1/loans/p2p-disbursements/{biz}/status").mock(
+async def test_refund_posts_transactions_refund_path() -> None:
+    route = respx.post(f"{BASE}/api/v1/transactions/refund").mock(
         return_value=httpx.Response(
             200,
             json={
                 "code": "200",
                 "msg": "SUCCESS",
-                "data": {"txnStatus": "SUCCESS", "bizSeqNo": biz},
+                "data": {"txnStatus": "SUCCESS", "refundedTotalAmount": "0.30"},
             },
         )
     )
-    resp = await _client().query_funds_status(
-        tenant_id="OCBC", request_id="qry-dsb-001", biz_seq_no=biz, biz_type="DISB"
+    resp = await _client().refund(
+        tenant_id="OCBC",
+        request_id="rfd-001",
+        payload={"bizSeqNo": "RFD-1", "oriBizSeqNo": "CLT-1", "refundAmount": "0.30"},
+    )
+    assert resp["txnStatus"] == "SUCCESS"
+    req = route.calls.last.request
+    assert req.headers["X-Tenant-Id"] == "OCBC"
+    assert b'"oriBizSeqNo":"CLT-1"' in req.content
+
+
+@respx.mock
+async def test_refund_business_error_raises() -> None:
+    """wedap 业务错误（如超额退款 422）→ WedapError。"""
+    respx.post(f"{BASE}/api/v1/transactions/refund").mock(
+        return_value=httpx.Response(200, json={"code": "422", "message": "over refund"})
+    )
+    with pytest.raises(WedapError) as exc_info:
+        await _client().refund(tenant_id="OCBC", request_id="r", payload={})
+    assert exc_info.value.code == "422"
+
+
+# ---------------------------------------------------------------------------
+# query_transaction_status（通用 GET /api/v1/transactions/status，对接文档 v0.3.0 §5.5）
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_query_transaction_status_sends_four_required_params() -> None:
+    """四必填 query 参数齐全：bizSeqNo/channelId/transType/oriReqDate/oriBizSeqNo。"""
+    biz = "DSB-20260714-0001"
+    route = respx.get(f"{BASE}/api/v1/transactions/status").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "code": "200",
+                "msg": "SUCCESS",
+                "data": {"txnStatus": "SUCCESS", "oriBizSeqNo": biz},
+            },
+        )
+    )
+    resp = await _client().query_transaction_status(
+        tenant_id="OCBC",
+        request_id="qry-dsb-001",
+        ori_biz_seq_no=biz,
+        trans_type="DISBURSEMENT",
+        ori_req_date="20260714",
     )
     assert resp["txnStatus"] == "SUCCESS"
     req = route.calls.last.request
     assert req.headers["X-Tenant-Id"] == "OCBC"
     assert req.headers["X-Request-Id"] == "qry-dsb-001"
+    params = dict(httpx.QueryParams(req.url.query))
+    assert params["oriBizSeqNo"] == biz
+    assert params["transType"] == "DISBURSEMENT"
+    assert params["oriReqDate"] == "20260714"
+    assert params["channelId"] == "LEN"
+    # 查询号 = gsq- + 完整查询身份（原单号|类型|日期）sha256 前 28 hex（防头部截断碰撞）
+    expected = "gsq-" + hashlib.sha256(f"{biz}|DISBURSEMENT|20260714".encode()).hexdigest()[:28]
+    assert params["bizSeqNo"] == expected
+    assert len(params["bizSeqNo"]) == 32
 
 
 @respx.mock
-async def test_query_funds_status_rpy_routes_to_repayment_status() -> None:
-    """RPMT → GET /api/v1/loans/p2p-repayments/{biz}/status。"""
-    biz = "RPY-20260612-0001"
-    route = respx.get(f"{BASE}/api/v1/loans/p2p-repayments/{biz}/status").mock(
+async def test_query_transaction_status_query_biz_distinct_for_similar_oris() -> None:
+    """前 28 位相同的两个原单号 → 查询号不同（哈希身份防碰撞，codex P1）；同身份查询号稳定。"""
+    seen = []
+    route = respx.get(f"{BASE}/api/v1/transactions/status").mock(
         return_value=httpx.Response(
             200,
-            json={
-                "code": "200",
-                "msg": "SUCCESS",
-                "data": {"txnStatus": "PROCESSING", "bizSeqNo": biz},
-            },
+            json={"code": "200", "msg": "SUCCESS", "data": {"txnStatus": "PROCESSING"}},
         )
     )
-    resp = await _client().query_funds_status(
-        tenant_id="OCBC", request_id="qry-rpy-001", biz_seq_no=biz, biz_type="RPMT"
-    )
-    assert resp["txnStatus"] == "PROCESSING"
-    req = route.calls.last.request
-    assert req.headers["X-Tenant-Id"] == "OCBC"
+    for biz in ("A" * 31 + "1", "A" * 31 + "2", "A" * 31 + "1"):
+        await _client().query_transaction_status(
+            tenant_id="OCBC",
+            request_id="r",
+            ori_biz_seq_no=biz,
+            trans_type="REPAYMENT",
+            ori_req_date="20260714",
+        )
+        params = dict(httpx.QueryParams(route.calls.last.request.url.query))
+        assert len(params["bizSeqNo"]) == 32
+        seen.append(params["bizSeqNo"])
+    assert seen[0] != seen[1]  # 不同原单号 → 不同查询号
+    assert seen[0] == seen[2]  # 同一查询身份 → 稳定（幂等友好）
 
 
 @respx.mock
-async def test_query_funds_status_dst_routes_to_user_distributions() -> None:
-    """DIST → GET /api/v1/bank-funds/user-distributions/{biz}。"""
-    biz = "DST-20260612-0001"
-    route = respx.get(f"{BASE}/api/v1/bank-funds/user-distributions/{biz}").mock(
+async def test_query_transaction_status_business_error_raises() -> None:
+    """wedap 业务错误（如 1001C00000004 原交易不存在）→ WedapError。"""
+    respx.get(f"{BASE}/api/v1/transactions/status").mock(
         return_value=httpx.Response(
             200,
-            json={
-                "code": "200",
-                "msg": "SUCCESS",
-                "data": {"txnStatus": "SUCCESS", "bizSeqNo": biz},
-            },
+            json={"code": "1001C00000004", "message": "Original transaction not found"},
         )
     )
-    resp = await _client().query_funds_status(
-        tenant_id="OCBC", request_id="qry-dst-001", biz_seq_no=biz, biz_type="DIST"
-    )
-    assert resp["txnStatus"] == "SUCCESS"
-    req = route.calls.last.request
-    assert req.headers["X-Tenant-Id"] == "OCBC"
-
-
-async def test_query_funds_status_unsupported_biz_type_raises() -> None:
-    """COLL(归集) 等无状态接口的类型 → WedapError(UNSUPPORTED)。"""
     with pytest.raises(WedapError) as exc_info:
-        await _client().query_funds_status(
-            tenant_id="OCBC", request_id="r", biz_seq_no="COLL-001", biz_type="COLL"
+        await _client().query_transaction_status(
+            tenant_id="OCBC",
+            request_id="r",
+            ori_biz_seq_no="NOPE-001",
+            trans_type="LOAN_COLLECT",
+            ori_req_date="20260714",
         )
-    assert exc_info.value.code == "UNSUPPORTED"
-    assert "COLL" in str(exc_info.value)
+    assert exc_info.value.code == "1001C00000004"
 
 
 @respx.mock
-async def test_query_funds_status_dsb_missing_data_returns_empty() -> None:
+async def test_query_transaction_status_missing_data_returns_empty() -> None:
     """wedap 返回 code=200 但 data 为空 → 返回 {}。"""
-    biz = "DSB-20260612-0002"
-    respx.get(f"{BASE}/api/v1/loans/p2p-disbursements/{biz}/status").mock(
+    respx.get(f"{BASE}/api/v1/transactions/status").mock(
         return_value=httpx.Response(200, json={"code": "200", "msg": "SUCCESS"})
     )
-    resp = await _client().query_funds_status(
-        tenant_id="OCBC", request_id="r", biz_seq_no=biz, biz_type="DISB"
+    resp = await _client().query_transaction_status(
+        tenant_id="OCBC",
+        request_id="r",
+        ori_biz_seq_no="DSB-20260714-0002",
+        trans_type="DISBURSEMENT",
+        ori_req_date="20260714",
     )
     assert resp == {}
 
@@ -852,12 +899,16 @@ async def test_bank_direct_mode_no_prefix_no_sign() -> None:
 async def test_bank_base_url_carries_gw_internal_prefix() -> None:
     # 经 gw-internal 时 base_url 自带 /lending-gw 前缀，client 不做任何路径改写。
     gw_base = "http://gw-internal:8000/lending-gw"
-    route = respx.get(f"{gw_base}/api/v1/loans/p2p-disbursements/DSB-9/status").mock(
+    route = respx.get(f"{gw_base}/api/v1/transactions/status").mock(
         return_value=httpx.Response(200, json={"code": "200", "data": {"txnStatus": "SUCCESS"}})
     )
     c = WedapClient(base_url=gw_base, timeout_seconds=1.0)
-    resp = await c.query_funds_status(
-        tenant_id="WBTHK01", request_id="r", biz_seq_no="DSB-9", biz_type="DISB"
+    resp = await c.query_transaction_status(
+        tenant_id="WBTHK01",
+        request_id="r",
+        ori_biz_seq_no="DSB-9",
+        trans_type="DISBURSEMENT",
+        ori_req_date="20260714",
     )
     assert resp["txnStatus"] == "SUCCESS"
     assert route.called

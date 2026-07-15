@@ -64,6 +64,16 @@
       "nullable": true,
       "length": 12
     },
+    "trans_type": {
+      "python_type": "str",
+      "nullable": true,
+      "length": 20
+    },
+    "ori_req_date": {
+      "python_type": "str",
+      "nullable": true,
+      "length": 8
+    },
     "tenant_id": {
       "python_type": "str",
       "nullable": false,

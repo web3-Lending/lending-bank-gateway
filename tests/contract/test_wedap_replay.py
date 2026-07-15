@@ -93,17 +93,23 @@ async def test_replay_distribute_fixture() -> None:
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_replay_funds_status_fixture_dsb() -> None:
-    """funds_status.json：DISB→/api/v1/loans/p2p-disbursements/{biz}/status，txnStatus=SUCCESS。"""
-    body = _fix("funds_status.json")
-    biz = "DSB-20260611-0001234567890"
-    respx.get(f"{_BASE}/api/v1/loans/p2p-disbursements/{biz}/status").mock(
+async def test_replay_transaction_status_fixture() -> None:
+    """transaction_status.json（2026-07-14 wedap dev 真实捕获）：通用 /transactions/status
+    解包正确，txnStatus=SUCCESS + oriResponse 原文透出。"""
+    body = _fix("transaction_status.json")
+    respx.get(f"{_BASE}/api/v1/transactions/status").mock(
         return_value=httpx.Response(200, json=body)
     )
-    data = await _client().query_funds_status(
-        tenant_id=_TENANT, request_id=_REQ_ID, biz_seq_no=biz, biz_type="DISB"
+    data = await _client().query_transaction_status(
+        tenant_id=_TENANT,
+        request_id=_REQ_ID,
+        ori_biz_seq_no="LNB-CLC-07141832",
+        trans_type="USER_COLLECTION",
+        ori_req_date="20260714",
     )
     assert data["txnStatus"] == "SUCCESS"
+    assert data["oriBizSeqNo"] == "LNB-CLC-07141832"
+    assert "sysRefNo" in data["oriResponse"]
 
 
 # ---------------------------------------------------------------------------
