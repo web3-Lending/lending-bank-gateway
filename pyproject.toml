@@ -7,7 +7,7 @@ packages = ["app"]
 
 [project]
 name = "lending-bank-gateway"
-version = "0.3.0"
+version = "0.3.1"
 requires-python = ">=3.12"
 dependencies = [
   "fastapi>=0.115", "uvicorn[standard]>=0.30",
