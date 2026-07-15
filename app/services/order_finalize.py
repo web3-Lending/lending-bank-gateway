@@ -9,7 +9,7 @@
   - order.finalized_at 已非空 → 直接 return，**防同步终态 + 回调双收口重复转发**。
   - 稳定 dedup_key 跨路径一致 → outbox 去重，lifecycle 只收一次终态事件；
     且该 key 作下游 X-Request-Id 保证下游幂等（替代易分叉的 fwd-{request_id}）。
-  - 仅**终态**（SUCCEEDED/FAILED）转发；非终态（SUBMITTED/PROCESSING）不转发。
+  - 仅**终态**（SUCCEEDED/FAILED/REVERSED）转发；非终态（SUBMITTED/PROCESSING）不转发。
 """
 
 from __future__ import annotations
@@ -22,12 +22,15 @@ from app.models.txn import BankTxnOrder
 from app.services.audit import write_audit
 from app.services.outbox import enqueue_forward
 
-# 触发收口（finalized_at/via + 转发）的终态集合：wedap 同步/回调的两类业务终态。
-TERMINAL_STATUSES: frozenset[OrderStatus] = frozenset({OrderStatus.SUCCEEDED, OrderStatus.FAILED})
+# 触发收口（finalized_at/via + 转发）的终态集合：wedap 同步/回调/状态查询的三类业务终态。
+# REVERSED（§3.6 counter 人工冲正回传）同为业务终态：finalize + 转发，上游须知悉被冲正。
+TERMINAL_STATUSES: frozenset[OrderStatus] = frozenset(
+    {OrderStatus.SUCCEEDED, OrderStatus.FAILED, OrderStatus.REVERSED}
+)
 
 
 def is_terminal(status: str) -> bool:
-    """status 是否属于触发终态收口的集合（SUCCEEDED/FAILED）。"""
+    """status 是否属于触发终态收口的集合（SUCCEEDED/FAILED/REVERSED）。"""
     return OrderStatus(status) in TERMINAL_STATUSES
 
 

@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict
 
 from app.api.deps import (
     assert_idempotency_key_matches,
+    bank_req_date,
     parse_amount,
     require_headers,
     validate_detail_consistency,
@@ -88,6 +89,7 @@ async def _submit(
                 request_id=ids["request_id"],
                 business_scope=business_scope,
                 wedap_payload=wedap_payload,
+                ori_req_date=bank_req_date(request),
             ),
         )
     except ValueError as exc:

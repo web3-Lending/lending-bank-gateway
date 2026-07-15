@@ -43,6 +43,8 @@ async def _seed(factory, *, status="SUBMITTED", finalized_at=None, biz=BIZ) -> N
                     caller_service="lifecycle",
                     status=status,
                     finalized_at=finalized_at,
+                    trans_type="DISBURSEMENT",
+                    ori_req_date="20260714",
                 )
             )
 
@@ -137,7 +139,7 @@ async def test_no_txn_status_falls_back_to_status_query(factory) -> None:
     """body 无终态信息 → 回落 wedap status-query 收敛（finalized_via=CALLBACK）。"""
     await _seed(factory)
     wedap = AsyncMock()
-    wedap.query_funds_status.return_value = {"txnStatus": "SUCCESS"}
+    wedap.query_transaction_status.return_value = {"txnStatus": "SUCCESS"}
     await resolve_callback_terminal(
         factory,
         wedap=wedap,
@@ -163,7 +165,7 @@ async def test_no_txn_status_order_already_finalized_is_processed(factory) -> No
         tenant_id=TENANT,
         body={"bizSeqNo": BIZ, "type": "collection"},
     )
-    wedap.query_funds_status.assert_not_called()  # 已收口，无需外呼
+    wedap.query_transaction_status.assert_not_called()  # 已收口，无需外呼
     assert await _outbox_count(factory) == 0  # 不重复转发
 
 
@@ -175,7 +177,7 @@ async def test_coll_no_txn_status_nonterminal_raises_for_replay(factory) -> None
 
     await _seed(factory, status="SUBMITTED")
     wedap = AsyncMock()
-    wedap.query_funds_status.side_effect = WedapError("UNSUPPORTED", "no status api")
+    wedap.query_transaction_status.side_effect = WedapError("UNSUPPORTED", "no status api")
     with pytest.raises(CallbackTerminalUnresolved):
         await resolve_callback_terminal(
             factory,
@@ -206,7 +208,7 @@ async def test_no_txn_status_toctou_concurrent_finalize_is_processed(factory) ->
                 order.finalized_via = "SYNC"
         return {"txnStatus": "PROCESSING"}  # helper 内 CAS 会发现已收口 → 返 False
 
-    wedap.query_funds_status.side_effect = _query_and_concurrently_finalize
+    wedap.query_transaction_status.side_effect = _query_and_concurrently_finalize
     await resolve_callback_terminal(
         factory,
         wedap=wedap,
@@ -223,7 +225,7 @@ async def test_no_txn_status_not_converged_raises(factory) -> None:
     """body 无终态 + status-query 也非终态 → CallbackTerminalUnresolved 待重放。"""
     await _seed(factory)
     wedap = AsyncMock()
-    wedap.query_funds_status.return_value = {"txnStatus": "PROCESSING"}
+    wedap.query_transaction_status.return_value = {"txnStatus": "PROCESSING"}
     with pytest.raises(CallbackTerminalUnresolved):
         await resolve_callback_terminal(
             factory,
@@ -237,12 +239,26 @@ async def test_no_txn_status_not_converged_raises(factory) -> None:
 
 @pytest.mark.asyncio
 async def test_illegal_transition_raises_unresolved(factory) -> None:
-    """非法迁移（REVERSED 无出边 → SUCCESS 回调）→ CallbackTerminalUnresolved。"""
-    await _seed(factory, status="REVERSED")
+    """非法迁移（PARTIALLY_REVERSED 仅允许 → REVERSED，FAILED 回调非法）→ Unresolved。"""
+    await _seed(factory, status="PARTIALLY_REVERSED")
     with pytest.raises(CallbackTerminalUnresolved):
         await resolve_callback_terminal(
             factory,
             wedap=AsyncMock(),
             tenant_id=TENANT,
-            body={"bizSeqNo": BIZ, "type": "disbursement", "txnStatus": "SUCCESS"},
+            body={"bizSeqNo": BIZ, "type": "disbursement", "txnStatus": "FAILED"},
         )
+
+
+@pytest.mark.asyncio
+async def test_reversed_order_success_callback_is_idempotent_divergence(factory) -> None:
+    """REVERSED 已是终态（§3.6 counter 冲正）：SUCCESS 回调 → 幂等返回（分歧只告警不倒退）。"""
+    await _seed(factory, status="REVERSED")
+    await resolve_callback_terminal(
+        factory,
+        wedap=AsyncMock(),
+        tenant_id=TENANT,
+        body={"bizSeqNo": BIZ, "type": "disbursement", "txnStatus": "SUCCESS"},
+    )
+    order = await _order(factory)
+    assert order.status == "REVERSED"  # 不被 SUCCESS 回调倒退

@@ -1,11 +1,22 @@
 """FastAPI 依赖：header 校验 + 金额解析 + 明细一致性前置校验。"""
 
+import datetime as dt
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, Request
 
 from app.core.context import current_ids
+
+
+def bank_req_date(request: Request) -> str:
+    """提交日 YYYYMMDD（bank_timezone 换算）——wedap 通用状态回查 oriReqDate 供参（0020）。
+
+    用银行时区而非 UTC：wedap/银行按其本地交易日登记原单，UTC 跨午夜会差一天查不到。
+    """
+    tz = ZoneInfo(request.app.state.settings.bank_timezone)
+    return dt.datetime.now(tz).strftime("%Y%m%d")
 
 
 def assert_idempotency_key_matches(request: Request, biz_seq_no: str) -> None:

@@ -226,37 +226,37 @@ class WedapClient:
             payload=payload,
         )
 
-    # biz_type → wedap 状态查询路径映射（wedap 无统一 /bank-funds/status 接口）
-    _STATUS_PATH_TMPL: dict[str, str] = {
-        "DISB": "/api/v1/loans/p2p-disbursements/{biz}/status",
-        "RPMT": "/api/v1/loans/p2p-repayments/{biz}/status",
-        "DIST": "/api/v1/bank-funds/user-distributions/{biz}",
-    }
-
-    async def query_funds_status(
+    async def query_transaction_status(
         self,
         *,
         tenant_id: str,
         request_id: str,
-        biz_seq_no: str,
-        biz_type: str,
+        ori_biz_seq_no: str,
+        trans_type: str,
+        ori_req_date: str,
     ) -> dict[str, Any]:
-        """按业务类型路由到对应的 wedap 状态查询接口。
+        """wedap 通用交易状态查询 `GET /api/v1/transactions/status`（对接文档 v0.3.0 §5.5）。
 
-        wedap 无统一 /bank-funds/status；路径因 biz_type 而异（biz_type 对齐 lifecycel 真码）：
-          - DISB → GET /api/v1/loans/p2p-disbursements/{bizSeqNo}/status
-          - RPMT → GET /api/v1/loans/p2p-repayments/{bizSeqNo}/status
-          - DIST → GET /api/v1/bank-funds/user-distributions/{bizSeqNo}
-        不支持的 biz_type（如 COLL 归集）raise WedapError("UNSUPPORTED", ...)，调用方走降级路径。
+        替代已废弃的 per-type 状态端点（旧 DISB/RPMT/DIST 三桩是假实现，假单也回
+        SUCCESS——W7；曾致 reconcile 假终态）。通用接口是真实现（2026-07-14 DEV 验证），
+        四必填：bizSeqNo（本次查询流水号）+ transType（须等于提交值，wedap 按
+        (oriBizSeqNo, transType) 消歧同号多行）+ oriReqDate（原单提交日 YYYYMMDD，
+        bank_timezone）+ oriBizSeqNo。data.txnStatus ∈ PENDING/PROCESSING/SUCCESS/
+        FAILED/REVERSED。COLL 归集同样支持（不再有 UNSUPPORTED 降级）。
         """
-        tmpl = self._STATUS_PATH_TMPL.get(biz_type)
-        if tmpl is None:
-            raise WedapError("UNSUPPORTED", f"no status api for {biz_type}")
-        path = tmpl.format(biz=biz_seq_no)
+        # 查询自身流水号：gsq- 前缀 + 原单号截断，满足 ≤32 · [A-Za-z0-9_-] 硬校验
+        query_biz = f"gsq-{ori_biz_seq_no}"[:32]
         return await self._get(
-            path,
+            "/api/v1/transactions/status",
             tenant_id=tenant_id,
             request_id=request_id,
+            params={
+                "bizSeqNo": query_biz,
+                "channelId": "LEN",
+                "transType": trans_type,
+                "oriReqDate": ori_req_date,
+                "oriBizSeqNo": ori_biz_seq_no,
+            },
         )
 
     async def get_deposit_balance_total(

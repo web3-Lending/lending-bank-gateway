@@ -41,3 +41,8 @@ class BankTxnOrder(Base, TenantMixin, TimestampMixin):
     # 终态来源留痕：SYNC（同步 HTTP 终态）/ CALLBACK（回调收口）/ RECONCILE（兜底 worker）
     # 给 recon 对账「同步 vs 回调谁收口」+ 排查重复 webhook 用
     finalized_via: Mapped[str | None] = mapped_column(String(12))
+    # wedap 通用状态回查四必填参数的本单供参（0020）：trans_type=提交时调用方 transType 原值
+    # （wedap 按 (oriBizSeqNo, transType) 消歧，查询值必须等于提交值，不可由 biz_type 反推）；
+    # ori_req_date=提交日 YYYYMMDD（bank_timezone）。存量行 NULL → 回查跳过交 G6。
+    trans_type: Mapped[str | None] = mapped_column(String(20))
+    ori_req_date: Mapped[str | None] = mapped_column(String(8))

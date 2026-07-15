@@ -10,6 +10,7 @@ from sqlalchemy import select
 
 from app.api.deps import (
     assert_idempotency_key_matches,
+    bank_req_date,
     parse_amount,
     require_headers,
     validate_detail_consistency,
@@ -79,6 +80,7 @@ async def _submit(
                 request_id=ids["request_id"],
                 business_scope=business_scope,
                 wedap_payload=wedap_payload,
+                ori_req_date=bank_req_date(request),
             ),
         )
     except ValueError as exc:
@@ -193,30 +195,30 @@ async def query_status(
             detail={"code": "GW_404_ORDER", "message": f"order not found: {biz_seq_no}"},
         )
 
-    # 查询 wedap 实时状态；失败降级，不向外抛 500
-    try:
-        wedap_data: dict[str, Any] = await request.app.state.wedap.query_funds_status(
-            tenant_id=ids["tenant_id"],
-            request_id=ids["request_id"],
-            biz_seq_no=biz_seq_no,
-            biz_type=row.biz_type,
-        )
-    except (httpx.TimeoutException, httpx.TransportError):
-        wedap_data = {"unavailable": True, "reason": "timeout"}
-    except httpx.HTTPStatusError:
-        wedap_data = {"unavailable": True, "reason": "http_error"}
-    except WedapError as exc:
-        reason = "no_status_api" if exc.code == "UNSUPPORTED" else "wedap_error"
-        wedap_data = {"unavailable": True, "reason": reason}
-        # COLL(归集)：wedap 无状态查询接口（_STATUS_PATH_TMPL 仅 DISB/RPMT/DIST），
-        # 故 reason=no_status_api。这是**预期降级而非故障**——归集单终态由回调 body
-        # txnStatus 做 order 级收口（C5，ADR-0001），不依赖 wedap status 轮询；orderStatus
-        # （本地权威态）即可信状态。补 note 让降级自解释。
-        if exc.code == "UNSUPPORTED" and row.biz_type == "COLL":
-            wedap_data["note"] = (
-                "COLL 归集单 wedap 无状态查询接口，终态由回调（body txnStatus，order 级）收敛，"
-                "非故障；以 orderStatus 为准"
+    # 查询 wedap 实时状态（通用 /transactions/status，真实现；旧 per-type 桩已弃用——
+    # 桩对假单也回 SUCCESS，该视图曾不可信）；失败降级，不向外抛 500
+    if not row.trans_type or not row.ori_req_date:
+        # 0020 前存量单缺回查供参：不打 wedap，以 orderStatus（本地权威态）为准
+        wedap_data: dict[str, Any] = {
+            "unavailable": True,
+            "reason": "missing_trans_type",
+            "note": "0020 前存量单缺 trans_type/ori_req_date，无法通用回查；以 orderStatus 为准",
+        }
+    else:
+        try:
+            wedap_data = await request.app.state.wedap.query_transaction_status(
+                tenant_id=ids["tenant_id"],
+                request_id=ids["request_id"],
+                ori_biz_seq_no=biz_seq_no,
+                trans_type=row.trans_type,
+                ori_req_date=row.ori_req_date,
             )
+        except (httpx.TimeoutException, httpx.TransportError):
+            wedap_data = {"unavailable": True, "reason": "timeout"}
+        except httpx.HTTPStatusError:
+            wedap_data = {"unavailable": True, "reason": "http_error"}
+        except WedapError:
+            wedap_data = {"unavailable": True, "reason": "wedap_error"}
 
     result: dict[str, Any] = {
         "bizSeqNo": row.biz_seq_no,

@@ -139,7 +139,15 @@ async def test_finalize_idempotent_skips_when_already_finalized(factory) -> None
 # ── order_reconcile worker ────────────────────────────────────────────────────
 
 
-async def _seed_order(factory, *, biz, status, finalized_at=None) -> None:
+async def _seed_order(
+    factory,
+    *,
+    biz,
+    status,
+    finalized_at=None,
+    trans_type="DISBURSEMENT",
+    ori_req_date="20260714",
+) -> None:
     async with factory() as s:
         async with s.begin():
             s.add(
@@ -154,6 +162,8 @@ async def _seed_order(factory, *, biz, status, finalized_at=None) -> None:
                     status=status,
                     submitted_at=dt.datetime.now(dt.UTC),
                     finalized_at=finalized_at,
+                    trans_type=trans_type,
+                    ori_req_date=ori_req_date,
                 )
             )
 
@@ -167,7 +177,7 @@ async def test_reconcile_once_picks_only_stale_nonterminal(factory) -> None:
     )  # 终态不选
     now = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=60)  # 让 stale_after 已过
     wedap = AsyncMock()
-    wedap.query_funds_status.return_value = {"txnStatus": "SUCCESS"}
+    wedap.query_transaction_status.return_value = {"txnStatus": "SUCCESS"}
     count = await reconcile_once(
         factory,
         wedap=wedap,
@@ -177,7 +187,7 @@ async def test_reconcile_once_picks_only_stale_nonterminal(factory) -> None:
         batch_limit=10,
     )
     assert count == 1
-    assert wedap.query_funds_status.await_count == 1  # 只有 DSB-STALE 被查
+    assert wedap.query_transaction_status.await_count == 1  # 只有 DSB-STALE 被查
 
     async def _status(biz: str) -> str:
         async with factory() as s:
@@ -198,7 +208,7 @@ async def test_reconcile_once_not_converged_waits_next_round(factory) -> None:
     await _seed_order(factory, biz="DSB-PENDING", status="SUBMITTED")
     now = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=60)
     wedap = AsyncMock()
-    wedap.query_funds_status.return_value = {"txnStatus": "PROCESSING"}
+    wedap.query_transaction_status.return_value = {"txnStatus": "PROCESSING"}
     count = await reconcile_once(
         factory,
         wedap=wedap,
@@ -220,7 +230,9 @@ def test_map_wedap_txn_status() -> None:
     assert map_wedap_txn_status("SUCCESS") == OrderStatus.SUCCEEDED
     assert map_wedap_txn_status("success") == OrderStatus.SUCCEEDED
     assert map_wedap_txn_status("FAILED") == OrderStatus.FAILED
+    assert map_wedap_txn_status("REVERSED") == OrderStatus.REVERSED
     assert map_wedap_txn_status("PROCESSING") is None
+    assert map_wedap_txn_status("PENDING") is None
     assert map_wedap_txn_status("") is None
     assert map_wedap_txn_status("WHATEVER") is None
 
@@ -230,7 +242,7 @@ async def test_resolve_status_query_success_finalizes(factory) -> None:
     """G2：RESULT_UNKNOWN 父单 status-query 返 SUCCESS → 锁内收敛 SUCCEEDED + 转发一次。"""
     await _seed_order(factory, biz="DSB-RU", status="RESULT_UNKNOWN")
     wedap = AsyncMock()
-    wedap.query_funds_status.return_value = {"txnStatus": "SUCCESS"}
+    wedap.query_transaction_status.return_value = {"txnStatus": "SUCCESS"}
     ok = await resolve_terminal_via_status_query(
         factory, wedap=wedap, tenant_id="OCBC", biz_seq_no="DSB-RU"
     )
@@ -252,7 +264,7 @@ async def test_resolve_status_query_skips_already_finalized(factory) -> None:
         factory, biz="DSB-DONE", status="SUCCEEDED", finalized_at=dt.datetime.now(dt.UTC)
     )
     wedap = AsyncMock()
-    wedap.query_funds_status.return_value = {"txnStatus": "SUCCESS"}
+    wedap.query_transaction_status.return_value = {"txnStatus": "SUCCESS"}
     ok = await resolve_terminal_via_status_query(
         factory, wedap=wedap, tenant_id="OCBC", biz_seq_no="DSB-DONE"
     )
@@ -263,11 +275,11 @@ async def test_resolve_status_query_skips_already_finalized(factory) -> None:
 
 
 @pytest.mark.asyncio
-async def test_resolve_status_query_unsupported_returns_false(factory) -> None:
-    """G2：CLT 等 query_funds_status UNSUPPORTED → 返 False（交 G6），父单不变。"""
+async def test_resolve_status_query_wedap_error_returns_false(factory) -> None:
+    """G2：wedap 业务错误（如原交易不存在）→ 返 False（交 G6），父单不变。"""
     await _seed_order(factory, biz="CLT-X", status="RESULT_UNKNOWN")
     wedap = AsyncMock()
-    wedap.query_funds_status.side_effect = WedapError("UNSUPPORTED", "no status api")
+    wedap.query_transaction_status.side_effect = WedapError("1001C00000004", "not found")
     ok = await resolve_terminal_via_status_query(
         factory, wedap=wedap, tenant_id="OCBC", biz_seq_no="CLT-X"
     )
@@ -280,11 +292,31 @@ async def test_resolve_status_query_unsupported_returns_false(factory) -> None:
 
 
 @pytest.mark.asyncio
+async def test_resolve_status_query_missing_trans_type_skips_without_call(factory) -> None:
+    """G2：0020 前存量单（trans_type/ori_req_date NULL）→ 返 False 且零外呼（交 G6），
+    禁 biz_type 反推防假终态。"""
+    await _seed_order(
+        factory, biz="OLD-X", status="RESULT_UNKNOWN", trans_type=None, ori_req_date=None
+    )
+    wedap = AsyncMock()
+    ok = await resolve_terminal_via_status_query(
+        factory, wedap=wedap, tenant_id="OCBC", biz_seq_no="OLD-X"
+    )
+    assert ok is False
+    wedap.query_transaction_status.assert_not_called()
+    async with factory() as s:
+        order = (
+            await s.execute(select(BankTxnOrder).where(BankTxnOrder.biz_seq_no == "OLD-X"))
+        ).scalar_one()
+    assert order.status == OrderStatus.RESULT_UNKNOWN
+
+
+@pytest.mark.asyncio
 async def test_resolve_status_query_nonterminal_noop(factory) -> None:
     """G2：status-query 返非终态(PROCESSING) → no-op，父单不变。"""
     await _seed_order(factory, biz="DSB-PROC", status="RESULT_UNKNOWN")
     wedap = AsyncMock()
-    wedap.query_funds_status.return_value = {"txnStatus": "PROCESSING"}
+    wedap.query_transaction_status.return_value = {"txnStatus": "PROCESSING"}
     ok = await resolve_terminal_via_status_query(
         factory, wedap=wedap, tenant_id="OCBC", biz_seq_no="DSB-PROC"
     )
@@ -304,7 +336,7 @@ async def test_resolve_status_query_order_not_found(factory) -> None:
         factory, wedap=wedap, tenant_id="OCBC", biz_seq_no="NOPE"
     )
     assert ok is False
-    wedap.query_funds_status.assert_not_called()
+    wedap.query_transaction_status.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -312,7 +344,7 @@ async def test_reconcile_once_converges_via_status_query(factory) -> None:
     """G2：非终态 stale 单经 status-query（order 级）收敛终态。"""
     await _seed_order(factory, biz="DSB-SQ", status="RESULT_UNKNOWN")
     wedap = AsyncMock()
-    wedap.query_funds_status.return_value = {"txnStatus": "SUCCESS"}
+    wedap.query_transaction_status.return_value = {"txnStatus": "SUCCESS"}
     now = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=60)
     count = await reconcile_once(
         factory,
@@ -338,11 +370,11 @@ async def test_reconcile_once_isolates_status_query_unexpected_error(factory) ->
     wedap = AsyncMock()
 
     async def _query(**kwargs):
-        if kwargs["biz_seq_no"] == "DSB-SQ-ERR":
+        if kwargs["ori_biz_seq_no"] == "DSB-SQ-ERR":
             raise RuntimeError("boom")  # resolve 不吞 → worker 兜
         return {"txnStatus": "SUCCESS"}
 
-    wedap.query_funds_status.side_effect = _query
+    wedap.query_transaction_status.side_effect = _query
     now = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=60)
     count = await reconcile_once(
         factory,
@@ -353,7 +385,7 @@ async def test_reconcile_once_isolates_status_query_unexpected_error(factory) ->
         batch_limit=10,
     )
     assert count == 1  # 错单隔离不计入，正常单收敛
-    assert wedap.query_funds_status.await_count == 2  # 两单都被尝试
+    assert wedap.query_transaction_status.await_count == 2  # 两单都被尝试
 
 
 # ---------------------------------------------------------------------------

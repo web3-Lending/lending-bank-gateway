@@ -1,0 +1,16 @@
+{
+  "code": "200", "msg": "SUCCESS",
+  "data": {
+    "oriBizSeqNo": "LNB-CLC-07141832",
+    "transType": "USER_COLLECTION",
+    "txnStatus": "SUCCESS",
+    "txnStatusDesc": "交易成功",
+    "oriTxnDate": "20260714",
+    "oriResponse": "{\"txnStatus\":\"SUCCESS\",\"bizSeqNo\":\"LNB-CLC-07141832\",\"sysRefNo\":\"26071418ABFD6B465607F40F8A400FA8\",\"collectionDetails\":[{\"custAccountNo\":\"12348401030101002088\",\"subaccountSerialNo\":\"01\",\"txnAmount\":3.00,\"txnStatus\":\"SUCCESS\"}]}",
+    "sysTime": 1784023485621,
+    "bizSeqNo": "LNB-GSQ2-07141836",
+    "requestId": "r-gsq-clc"
+  },
+  "traceId": null,
+  "timestamp": 1784023485623
+}
