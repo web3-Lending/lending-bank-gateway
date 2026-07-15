@@ -34,9 +34,21 @@ def is_terminal(status: str) -> bool:
     return OrderStatus(status) in TERMINAL_STATUSES
 
 
-def terminal_event(biz_seq_no: str, status: str, source: str) -> dict[str, Any]:
-    """gateway 派生终态事件（统一转发体，三路径一致；替代「转发原始回调 body」的语义分叉）。"""
-    return {"bizSeqNo": biz_seq_no, "txnStatus": str(status), "finalizedVia": source}
+def terminal_event(
+    biz_seq_no: str, status: str, source: str, business_action: str
+) -> dict[str, Any]:
+    """gateway 派生终态事件（统一转发体，三路径一致；替代「转发原始回调 body」的语义分叉）。
+
+    type 必带：9000 bank_inbound 的 BankTransactionCallback 硬校验 bizSeqNo + type
+    （dev-hw 2026-07-15 replay 实测缺 type 被 400 INVALID_REQUEST 拒），取 order 的
+    business_action（COLLECT/DISTRIBUTE/REFUND/DISBURSE...）。
+    """
+    return {
+        "bizSeqNo": biz_seq_no,
+        "type": business_action,
+        "txnStatus": str(status),
+        "finalizedVia": source,
+    }
 
 
 async def finalize_terminal_in_session(
@@ -68,7 +80,7 @@ async def finalize_terminal_in_session(
         session,
         tenant_id=order.tenant_id,
         target="lifecycle",
-        payload=terminal_event(order.biz_seq_no, order.status, source),
+        payload=terminal_event(order.biz_seq_no, order.status, source, order.business_action),
         dedup_key=f"fwd-{order.tenant_id}-{order.biz_seq_no}-{order.status}",
         trace_id=trace_id,
     )
