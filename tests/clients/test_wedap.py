@@ -1,3 +1,4 @@
+import hashlib
 import json
 import pathlib
 
@@ -285,30 +286,35 @@ async def test_query_transaction_status_sends_four_required_params() -> None:
     assert params["transType"] == "DISBURSEMENT"
     assert params["oriReqDate"] == "20260714"
     assert params["channelId"] == "LEN"
-    assert params["bizSeqNo"] == f"gsq-{biz}"
+    # 查询号 = gsq- + 完整查询身份（原单号|类型|日期）sha256 前 28 hex（防头部截断碰撞）
+    expected = "gsq-" + hashlib.sha256(f"{biz}|DISBURSEMENT|20260714".encode()).hexdigest()[:28]
+    assert params["bizSeqNo"] == expected
+    assert len(params["bizSeqNo"]) == 32
 
 
 @respx.mock
-async def test_query_transaction_status_query_biz_seq_no_truncated_to_32() -> None:
-    """查询自身流水号 gsq-{原单号} 超 32 字符时截断（bizSeqNo ≤32 硬约束）。"""
-    biz = "A" * 32  # 原单号打满 32 位 → gsq- 前缀后必须截断
+async def test_query_transaction_status_query_biz_distinct_for_similar_oris() -> None:
+    """前 28 位相同的两个原单号 → 查询号不同（哈希身份防碰撞，codex P1）；同身份查询号稳定。"""
+    seen = []
     route = respx.get(f"{BASE}/api/v1/transactions/status").mock(
         return_value=httpx.Response(
             200,
             json={"code": "200", "msg": "SUCCESS", "data": {"txnStatus": "PROCESSING"}},
         )
     )
-    resp = await _client().query_transaction_status(
-        tenant_id="OCBC",
-        request_id="r",
-        ori_biz_seq_no=biz,
-        trans_type="REPAYMENT",
-        ori_req_date="20260714",
-    )
-    assert resp["txnStatus"] == "PROCESSING"
-    params = dict(httpx.QueryParams(route.calls.last.request.url.query))
-    assert params["bizSeqNo"] == ("gsq-" + biz)[:32]
-    assert len(params["bizSeqNo"]) == 32
+    for biz in ("A" * 31 + "1", "A" * 31 + "2", "A" * 31 + "1"):
+        await _client().query_transaction_status(
+            tenant_id="OCBC",
+            request_id="r",
+            ori_biz_seq_no=biz,
+            trans_type="REPAYMENT",
+            ori_req_date="20260714",
+        )
+        params = dict(httpx.QueryParams(route.calls.last.request.url.query))
+        assert len(params["bizSeqNo"]) == 32
+        seen.append(params["bizSeqNo"])
+    assert seen[0] != seen[1]  # 不同原单号 → 不同查询号
+    assert seen[0] == seen[2]  # 同一查询身份 → 稳定（幂等友好）
 
 
 @respx.mock

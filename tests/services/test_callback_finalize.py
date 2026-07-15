@@ -29,6 +29,15 @@ async def factory():
     await engine.dispose()
 
 
+def _identity_resp(kwargs, status):
+    """mock 通用状态响应：回显请求身份，配 reconcile 响应身份核对。"""
+    return {
+        "txnStatus": status,
+        "oriBizSeqNo": kwargs["ori_biz_seq_no"],
+        "transType": kwargs["trans_type"],
+    }
+
+
 async def _seed(factory, *, status="SUBMITTED", finalized_at=None, biz=BIZ) -> None:
     async with factory() as s:
         async with s.begin():
@@ -139,7 +148,7 @@ async def test_no_txn_status_falls_back_to_status_query(factory) -> None:
     """body 无终态信息 → 回落 wedap status-query 收敛（finalized_via=CALLBACK）。"""
     await _seed(factory)
     wedap = AsyncMock()
-    wedap.query_transaction_status.return_value = {"txnStatus": "SUCCESS"}
+    wedap.query_transaction_status.side_effect = lambda **kw: _identity_resp(kw, "SUCCESS")
     await resolve_callback_terminal(
         factory,
         wedap=wedap,
@@ -248,6 +257,36 @@ async def test_illegal_transition_raises_unresolved(factory) -> None:
             tenant_id=TENANT,
             body={"bizSeqNo": BIZ, "type": "disbursement", "txnStatus": "FAILED"},
         )
+
+
+@pytest.mark.asyncio
+async def test_nonterminal_reversed_callback_finalizes(factory) -> None:
+    """非终态单收到 REVERSED 回调（counter 冲正）→ 收敛 REVERSED + 转发一次（§3.6）。"""
+    await _seed(factory, status="PROCESSING")
+    await resolve_callback_terminal(
+        factory,
+        wedap=AsyncMock(),
+        tenant_id=TENANT,
+        body={"bizSeqNo": BIZ, "type": "disbursement", "txnStatus": "REVERSED"},
+    )
+    order = await _order(factory)
+    assert order.status == "REVERSED"
+    assert order.finalized_via == "CALLBACK"
+    assert await _outbox_count(factory) == 1
+
+
+@pytest.mark.asyncio
+async def test_partially_reversed_to_reversed_callback_finalizes(factory) -> None:
+    """PARTIALLY_REVERSED（未收口）→ REVERSED 回调合法收敛。"""
+    await _seed(factory, status="PARTIALLY_REVERSED")
+    await resolve_callback_terminal(
+        factory,
+        wedap=AsyncMock(),
+        tenant_id=TENANT,
+        body={"bizSeqNo": BIZ, "type": "disbursement", "txnStatus": "REVERSED"},
+    )
+    order = await _order(factory)
+    assert order.status == "REVERSED"
 
 
 @pytest.mark.asyncio

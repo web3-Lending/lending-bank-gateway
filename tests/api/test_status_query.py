@@ -28,13 +28,30 @@ COLLECT_BODY = {
     "userList": [{"userId": "U1", "amount": "500.0000"}],
 }
 
-# 无 transType 的种单体：模拟 0020 前存量单（trans_type 落 NULL）的通用回查降级
-LEGACY_BODY = {
-    "bizSeqNo": "CLT-20260611-0001234567891",
-    "totalAmount": "500.0000",
-    "currencyCode": "USD",
-    "userList": [{"userId": "U1", "amount": "500.0000"}],
-}
+
+async def _seed_pre_0020_order(app) -> None:  # type: ignore[no-untyped-def]
+    """直插 0020 前形态存量行（trans_type/ori_req_date 为 NULL）——不走 API：
+    新 POST 已强制 transType 必填，无法再产生 NULL 行（codex P2 修法）。"""
+    from decimal import Decimal
+
+    from app.models.txn import BankTxnOrder
+
+    async with app.state.session_factory() as s:
+        async with s.begin():
+            s.add(
+                BankTxnOrder(
+                    tenant_id="OCBC",
+                    biz_seq_no=LEGACY_BIZ,
+                    business_action="COLLECT",
+                    biz_type="COLL",
+                    amount=Decimal("500.0000"),
+                    currency="USD",
+                    caller_service="lifecycle",
+                    status="SUBMITTED",
+                )
+            )
+
+LEGACY_BIZ = "CLT-20260611-0001234567891"
 
 STATUS_URL = "/api/v1/bank-funds/status"
 
@@ -206,14 +223,13 @@ def test_status_wedap_http_status_error_degrades_gracefully(client: TestClient) 
 def test_status_missing_trans_type_degrades_without_wedap_call(
     client: TestClient,
 ) -> None:
-    """种单体无 transType（存量单形态）→ 不打 wedap，reason=missing_trans_type + note。"""
-    headers = {**HEADERS, "Idempotency-Key": LEGACY_BODY["bizSeqNo"]}
-    client.post("/api/v1/bank-funds/collect-from-users", json=LEGACY_BODY, headers=headers)
+    """直插 0020 前形态行（trans_type NULL）→ 不打 wedap，reason=missing_trans_type + note。"""
+    asyncio.run(_seed_pre_0020_order(client.app))
 
     r = client.get(
         STATUS_URL,
-        params={"bizSeqNo": LEGACY_BODY["bizSeqNo"]},
-        headers=headers,
+        params={"bizSeqNo": LEGACY_BIZ},
+        headers=HEADERS,
     )
     assert r.status_code == 200
     wedap = r.json()["data"]["wedap"]
@@ -222,6 +238,27 @@ def test_status_missing_trans_type_degrades_without_wedap_call(
     # 存量单：补 note 说明以本地 orderStatus 为准，非故障
     assert "orderStatus" in wedap["note"]
     client.app.state.wedap.query_transaction_status.assert_not_called()  # type: ignore[union-attr]
+
+
+# ── Test 4e：新单缺 transType → 422（必填强校验，禁止再产生 NULL 供参行）─────────
+
+
+def test_collect_missing_trans_type_rejected_422(client: TestClient) -> None:
+    """新 POST 缺 transType → 422（pydantic 必填），不落单不外呼（codex P1 修法）。"""
+    body = {k: v for k, v in COLLECT_BODY.items() if k != "transType"}
+    headers = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-no-tt"}
+    r = client.post("/api/v1/bank-funds/collect-from-users", json=body, headers=headers)
+    assert r.status_code == 422
+    client.app.state.wedap.collect_from_users.assert_not_called()  # type: ignore[union-attr]
+
+
+def test_collect_overlong_trans_type_rejected_422(client: TestClient) -> None:
+    """transType 超 20 字符 → 422（不静默截断，防回查值 != 提交值）。"""
+    body = {**COLLECT_BODY, "transType": "X" * 21}
+    headers = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-long-tt"}
+    r = client.post("/api/v1/bank-funds/collect-from-users", json=body, headers=headers)
+    assert r.status_code == 422
+    client.app.state.wedap.collect_from_users.assert_not_called()  # type: ignore[union-attr]
 
 
 # ── Test 5：缺 X-Tenant-Id → 400 ─────────────────────────────────────────────

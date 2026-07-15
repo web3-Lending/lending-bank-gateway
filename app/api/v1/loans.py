@@ -4,7 +4,7 @@ from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.deps import (
     assert_idempotency_key_matches,
@@ -44,7 +44,8 @@ class P2PDisbursementRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
     bizSeqNo: str
     channelId: str = ""
-    transType: str = ""
+    # wedap 必填且 ≤20；落库供状态回查（提交值==查询值），缺失/超长入口显式拒绝（codex P1）
+    transType: str = Field(min_length=1, max_length=20)
     disbursementInfo: DisbursementInfo
     lenders: list[dict[str, Any]] | None = None
     """显式 null 视同缺省，契约 C 下 wedap 可选字段缺省=null 语义等价。"""
@@ -54,6 +55,7 @@ class P2PRepaymentRequest(BaseModel):
     # 顶层 extra=allow 透传 lenders[] 等字段（不显式声明 lenders，靠 extra 捕获并进 model_dump）。
     model_config = ConfigDict(extra="allow")
     bizSeqNo: str
+    transType: str = Field(min_length=1, max_length=20)
     repaymentInfo: RepaymentInfo
 
 

@@ -84,6 +84,22 @@ async def resolve_terminal_via_status_query(
     except (WedapError, httpx.HTTPError):
         return False
 
+    # 响应身份核对（codex P1）：oriBizSeqNo/transType 必须与请求一致才允许推进——
+    # 防 wedap 侧任何形式的串单/错路由把别人的终态收到本单头上。缺失视同不一致（保守，
+    # 不收敛交下轮/G6，方向安全）。
+    resp_ori = str(data.get("oriBizSeqNo") or "")
+    resp_type = str(data.get("transType") or "")
+    if resp_ori != biz_seq_no or resp_type != trans_type:
+        logger.error(
+            "status-reconcile identity mismatch %s/%s: resp ori=%s type=%s (expect type=%s)",
+            tenant_id,
+            biz_seq_no,
+            resp_ori,
+            resp_type,
+            trans_type,
+        )
+        return False
+
     terminal = map_wedap_txn_status(str(data.get("txnStatus", "")))
     if terminal is None:
         return False  # 非终态结果 → no-op，等下轮
@@ -104,6 +120,10 @@ async def resolve_terminal_via_status_query(
             if locked is None:  # pragma: no cover - 两读之间被删，竞态防御
                 return False
             if locked.finalized_at is not None or is_terminal(locked.status):
+                # 已知边界（codex P1 已评估延后）：SUCCEEDED→REVERSED 的「终态升级」在此被
+                # 幂等跳过——完整 reversal ingestion（终态后冲正的 audit/outbox 二次转发 +
+                # finalize 幂等键按状态细分）等 wedap 冲正 4.8（阶段3）落地一起做，
+                # FU-GW-REVERSAL-INGESTION-20260715-001。当前 wedap 不会产生 REVERSED 事件。
                 return False
             try:
                 assert_transition(OrderStatus(locked.status), terminal)

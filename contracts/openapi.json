@@ -698,6 +698,12 @@
             "type": "string",
             "title": "Currencycode"
           },
+          "transType": {
+            "type": "string",
+            "maxLength": 20,
+            "minLength": 1,
+            "title": "Transtype"
+          },
           "txnAmount": {
             "anyOf": [
               {
@@ -725,7 +731,8 @@
         "type": "object",
         "required": [
           "bizSeqNo",
-          "currencyCode"
+          "currencyCode",
+          "transType"
         ],
         "title": "CollectRequest"
       },
@@ -768,6 +775,12 @@
             "type": "string",
             "title": "Currencycode"
           },
+          "transType": {
+            "type": "string",
+            "maxLength": 20,
+            "minLength": 1,
+            "title": "Transtype"
+          },
           "recipients": {
             "anyOf": [
               {
@@ -788,7 +801,8 @@
         "type": "object",
         "required": [
           "bizSeqNo",
-          "currencyCode"
+          "currencyCode",
+          "transType"
         ],
         "title": "DistributeRequest"
       },
@@ -873,8 +887,9 @@
           },
           "transType": {
             "type": "string",
-            "title": "Transtype",
-            "default": ""
+            "maxLength": 20,
+            "minLength": 1,
+            "title": "Transtype"
           },
           "disbursementInfo": {
             "$ref": "#/components/schemas/DisbursementInfo"
@@ -899,6 +914,7 @@
         "type": "object",
         "required": [
           "bizSeqNo",
+          "transType",
           "disbursementInfo"
         ],
         "title": "P2PDisbursementRequest"
@@ -909,6 +925,12 @@
             "type": "string",
             "title": "Bizseqno"
           },
+          "transType": {
+            "type": "string",
+            "maxLength": 20,
+            "minLength": 1,
+            "title": "Transtype"
+          },
           "repaymentInfo": {
             "$ref": "#/components/schemas/RepaymentInfo"
           }
@@ -917,6 +939,7 @@
         "type": "object",
         "required": [
           "bizSeqNo",
+          "transType",
           "repaymentInfo"
         ],
         "title": "P2PRepaymentRequest"
@@ -930,6 +953,12 @@
           "currencyCode": {
             "type": "string",
             "title": "Currencycode"
+          },
+          "transType": {
+            "type": "string",
+            "maxLength": 20,
+            "minLength": 1,
+            "title": "Transtype"
           },
           "refundAmount": {
             "type": "string",
@@ -945,6 +974,7 @@
         "required": [
           "bizSeqNo",
           "currencyCode",
+          "transType",
           "refundAmount",
           "oriBizSeqNo"
         ],

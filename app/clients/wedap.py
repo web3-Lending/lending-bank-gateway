@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 from typing import Any
@@ -262,9 +263,17 @@ class WedapClient:
         (oriBizSeqNo, transType) 消歧同号多行）+ oriReqDate（原单提交日 YYYYMMDD，
         bank_timezone）+ oriBizSeqNo。data.txnStatus ∈ PENDING/PROCESSING/SUCCESS/
         FAILED/REVERSED。COLL 归集同样支持（不再有 UNSUPPORTED 降级）。
+
+        调用方注意：推进任何状态前必须核对响应身份（oriBizSeqNo/transType == 请求值），
+        不一致不得收口（防串单错收口，codex P1）。
         """
-        # 查询自身流水号：gsq- 前缀 + 原单号截断，满足 ≤32 · [A-Za-z0-9_-] 硬校验
-        query_biz = f"gsq-{ori_biz_seq_no}"[:32]
+        # 查询自身流水号：gsq- + 查询身份（原单号|类型|日期）的稳定摘要，≤32 ·
+        # [A-Za-z0-9_-] 硬校验。头部截断会碰撞（两个前 28 位相同的原单号得到同一查询号，
+        # 若 wedap 对查询流水做幂等/唯一校验会串单，codex P1）；摘要按完整身份生成，
+        # 同一查询天然幂等、不同查询实际不碰撞。非安全用途。
+        identity = f"{ori_biz_seq_no}|{trans_type}|{ori_req_date}"
+        digest = hashlib.sha256(identity.encode()).hexdigest()[:28]  # noqa: S324
+        query_biz = f"gsq-{digest}"
         return await self._get(
             "/api/v1/transactions/status",
             tenant_id=tenant_id,
