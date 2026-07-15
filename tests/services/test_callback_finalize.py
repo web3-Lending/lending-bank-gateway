@@ -85,6 +85,16 @@ async def test_terminal_success_finalizes_and_forwards(factory) -> None:
     assert order.finalized_via == "CALLBACK"
     assert order.finalized_at is not None
     assert await _outbox_count(factory) == 1
+    # 9000 bank_inbound schema 硬校验 bizSeqNo + type（dev-hw 2026-07-15 replay 实测缺
+    # type 被 400 INVALID_REQUEST 拒），type 取 order.business_action
+    async with factory() as s:
+        row = (await s.execute(select(CallbackOutbox))).scalar_one()
+    assert row.payload == {
+        "bizSeqNo": BIZ,
+        "type": "DISBURSE",
+        "txnStatus": "SUCCEEDED",
+        "finalizedVia": "CALLBACK",
+    }
 
 
 @pytest.mark.asyncio
