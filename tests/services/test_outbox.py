@@ -149,7 +149,7 @@ async def test_dispatch_sends_correct_headers(factory) -> None:
     await dispatch_once(factory, targets=TARGETS, max_attempts=3)
     assert route.called
     req = route.calls.last.request
-    assert req.headers.get("X-Caller-Service") == "lending-bank-gateway"
+    assert req.headers.get("X-Caller-Service") == "internal"
     assert req.headers.get("X-Tenant-Id") == "OCBC"
     assert req.headers.get("X-Trace-Id") == f"outbox-{oid}"
     assert req.headers.get("X-Request-Id") == f"outbox-{oid}"
