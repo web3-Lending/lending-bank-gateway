@@ -25,13 +25,14 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.clients.wedap import WedapError
 from app.domain.states import (
+    ABSORBING_STATUSES,
     IllegalTransition,
     OrderStatus,
     assert_transition,
     map_wedap_txn_status,
 )
 from app.models.txn import BankTxnOrder
-from app.services.order_finalize import finalize_terminal_in_session, is_terminal
+from app.services.order_finalize import finalize_terminal_in_session
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +120,7 @@ async def resolve_terminal_via_status_query(
             ).scalar_one_or_none()
             if locked is None:  # pragma: no cover - 两读之间被删，竞态防御
                 return False
-            if locked.finalized_at is not None or is_terminal(locked.status):
+            if locked.finalized_at is not None or OrderStatus(locked.status) in ABSORBING_STATUSES:
                 # 终态升级（reversal ingestion）：SUCCEEDED 已收口单查询到 REVERSED =
                 # counter 冲正（§3.6）——推进 + 状态级二次收口；重复事件由「status 已是
                 # REVERSED」幂等挡住。其余已收口场景照旧跳过（防倒退/双转发）。

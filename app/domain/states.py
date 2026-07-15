@@ -77,6 +77,21 @@ _ALLOWED: dict[OrderStatus, set[OrderStatus]] = {
 }
 
 
+# 吸收态：除「SUCCEEDED→REVERSED / PARTIALLY_REVERSED→REVERSED」升级外不再接受任何迁移的
+# 状态集合。与 TERMINAL_STATUSES（触发收口转发的业务终态）语义不同：CANCELLED/EXPIRED 不
+# 转发但同样不可再迁移——两谓词共用曾致 CANCELLED/EXPIRED+REVERSED 回调走到 assert_transition
+# 抛 IllegalTransition → inbox 永留 RECEIVED 无限重放（codex P2，2026-07-15）。
+ABSORBING_STATUSES: frozenset[OrderStatus] = frozenset(
+    {
+        OrderStatus.SUCCEEDED,
+        OrderStatus.FAILED,
+        OrderStatus.REVERSED,
+        OrderStatus.CANCELLED,
+        OrderStatus.EXPIRED,
+    }
+)
+
+
 class IllegalTransition(Exception):
     pass
 
