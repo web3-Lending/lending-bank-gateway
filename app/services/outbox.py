@@ -217,7 +217,11 @@ async def dispatch_once(
                         url,
                         json=payload,
                         headers={
-                            "X-Caller-Service": "lending-bank-gateway",
+                            # BFF CallerServiceMiddleware 对 /internal/* 只认封闭词表
+                            # {app,admin,internal,public}，S2S 入站必须 "internal"；
+                            # 服务真实身份由 BFF 按 IP-ACL 权威注入下游（svc JWT
+                            # caller claim + x-caller-service），自报服务名会被 400 拒。
+                            "X-Caller-Service": "internal",
                             "X-Tenant-Id": tenant_id,
                             "X-Trace-Id": fwd_trace,
                             "X-Request-Id": request_id,
