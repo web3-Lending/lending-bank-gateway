@@ -320,9 +320,9 @@ async def test_resolve_status_query_reversed_finalizes(factory) -> None:
 
 
 @pytest.mark.asyncio
-async def test_resolve_status_query_reversed_after_finalized_skips(factory) -> None:
-    """已知边界（FU-GW-REVERSAL-INGESTION）：SUCCEEDED 已收口单遇 REVERSED → 幂等跳过不倒退，
-    不产二次转发——终态升级 ingestion 等 wedap 冲正 4.8 落地。"""
+async def test_resolve_status_query_reversed_after_finalized_upgrades(factory) -> None:
+    """reversal ingestion：SUCCEEDED 已收口单查询到 REVERSED（counter 冲正）→ 升级 REVERSED
+    + 按状态键转发一次；候选单不再入选后天然无重复（终态不入 _NON_TERMINAL 扫描）。"""
     await _seed_order(
         factory, biz="DSB-RVDONE", status="SUCCEEDED", finalized_at=dt.datetime.now(dt.UTC)
     )
@@ -339,14 +339,23 @@ async def test_resolve_status_query_reversed_after_finalized_skips(factory) -> N
     ok = await resolve_terminal_via_status_query(
         factory, wedap=wedap, tenant_id="OCBC", biz_seq_no="DSB-RVDONE"
     )
-    assert ok is False
+    assert ok is True
     async with factory() as s:
         order = (
             await s.execute(select(BankTxnOrder).where(BankTxnOrder.biz_seq_no == "DSB-RVDONE"))
         ).scalar_one()
         outbox = (await s.execute(select(CallbackOutbox))).scalars().all()
-    assert order.status == OrderStatus.SUCCEEDED  # 不倒退不升级（当前边界）
-    assert outbox == []
+    assert order.status == OrderStatus.REVERSED
+    assert order.finalized_via == "RECONCILE"
+    assert len(outbox) == 1
+    # 再次收到同样 REVERSED：status 已 REVERSED（非 SUCCEEDED）→ 跳过，零新转发
+    ok2 = await resolve_terminal_via_status_query(
+        factory, wedap=wedap, tenant_id="OCBC", biz_seq_no="DSB-RVDONE"
+    )
+    assert ok2 is False
+    async with factory() as s:
+        outbox2 = (await s.execute(select(CallbackOutbox))).scalars().all()
+    assert len(outbox2) == 1
 
 
 @pytest.mark.asyncio

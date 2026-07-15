@@ -617,6 +617,30 @@
         }
       }
     },
+    "/api/v1/deposit/account/detail": {
+      "get": {
+        "tags": [
+          "deposit"
+        ],
+        "summary": "Deposit Account Detail",
+        "description": "账户详情查询（§5.3）：原样透传所有 query params（custAccountNo 等）+ 审计。",
+        "operationId": "deposit_account_detail_api_v1_deposit_account_detail_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Deposit Account Detail Api V1 Deposit Account Detail Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/users/info": {
       "get": {
         "tags": [

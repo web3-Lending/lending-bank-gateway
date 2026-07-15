@@ -76,6 +76,16 @@ async def _get_snapshots(session_factory, *, tenant_id: str) -> list[BalanceSnap
         return list(result.scalars().all())
 
 
+DETAIL_DATA = {
+    "custAccountNo": "12348401030101002088",
+    "accountName": "VH测试个人客户",
+    "currencyCode": "USD",
+    "accountBalance": "10004.0000",
+    "availableBalance": "10004.0000",
+    "accountStatus": "ACTIVE",
+}
+
+
 @pytest.fixture()
 def client() -> TestClient:
     app = create_app()
@@ -84,6 +94,7 @@ def client() -> TestClient:
     wedap.get_deposit_balance_total.return_value = BALANCE_DATA
     wedap.get_deposit_accounts.return_value = ACCOUNTS_DATA
     wedap.get_user_info.return_value = USER_INFO_DATA
+    wedap.get_deposit_account_detail.return_value = DETAIL_DATA
     app.state.wedap = wedap
     return TestClient(app)
 
@@ -316,3 +327,44 @@ def test_missing_cust_account_no_skips_snapshot_and_warns(
     assert len(snapshots) == 1
     assert snapshots[0].account_id == "ACC_GOOD"
     assert snapshots[0].balance == Decimal("150.0000")
+
+
+# ── 5.3 account/detail 透传（§5.3 新代理端点）──────────────────────────────────
+
+
+def test_account_detail_passthrough_and_audit(client: TestClient) -> None:
+    """账户详情：契约 C 全透传（custAccountNo/subaccountSerialNo 等）+ QueryAudit 1 行。"""
+    r = client.get(
+        "/api/v1/deposit/account/detail",
+        params={
+            "custAccountNo": "12348401030101002088",
+            "subaccountSerialNo": "01",
+            "bizSeqNo": "Q-DTL-01",
+            "channelId": "LEN",
+        },
+        headers=HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["success"] is True
+    assert body["data"] == DETAIL_DATA
+    call = client.app.state.wedap.get_deposit_account_detail.call_args  # type: ignore[union-attr]
+    assert call.kwargs["params"]["custAccountNo"] == "12348401030101002088"
+    assert call.kwargs["params"]["bizSeqNo"] == "Q-DTL-01"
+    sf = client.app.state.session_factory  # type: ignore[union-attr]
+    count = asyncio.run(_count_audit_rows(sf, tenant_id="OCBC", endpoint="deposit/account/detail"))
+    assert count == 1
+
+
+def test_account_detail_upstream_error_maps_502(client: TestClient) -> None:
+    """wedap 业务错误（如 D-5 Account not found 的 1001C…）→ 502 GW_502_UPSTREAM。"""
+    client.app.state.wedap.get_deposit_account_detail.side_effect = WedapError(  # type: ignore[union-attr]
+        "1001C00000001", "Account not found"
+    )
+    r = client.get(
+        "/api/v1/deposit/account/detail",
+        params={"custAccountNo": "X", "bizSeqNo": "Q-DTL-02", "channelId": "LEN"},
+        headers=HEADERS,
+    )
+    assert r.status_code == 502
+    assert r.json()["error"]["code"] == "GW_502_UPSTREAM"

@@ -115,10 +115,26 @@ async def resolve_callback_terminal(
                 # 乱序回调（order 尚未创建）→ 留 RECEIVED 待重放
                 raise CallbackTerminalUnresolved(f"unknown order {tenant_id}/{biz_seq_no}")
             if locked.finalized_at is not None or is_terminal(locked.status):
+                # 终态升级（reversal ingestion）：SUCCEEDED 已收口单收到 REVERSED 回调 =
+                # counter 冲正（§3.6），合法升级——推进 + 状态级二次收口（audit/outbox
+                # 按 REVERSED 键，不与首次 SUCCEEDED 收口互吞）。重复 REVERSED 回调时
+                # status 已是 REVERSED → 落入下方幂等 return。FAILED 无资金动作不可冲正、
+                # PARTIALLY_REVERSED 契约未定（wedap 4.8 阶段3）——均不升级。
+                if (
+                    OrderStatus(locked.status) == OrderStatus.SUCCEEDED
+                    and terminal == OrderStatus.REVERSED
+                ):
+                    assert_transition(OrderStatus(locked.status), terminal)
+                    locked.status = terminal
+                    await finalize_terminal_in_session(
+                        session,
+                        order=locked,
+                        source="CALLBACK",
+                        trace_id=trace_id,
+                        upgrade_from=str(OrderStatus.SUCCEEDED),
+                    )
+                    return
                 # 幂等：已收口。回调结论与已收口终态不一致 → 只告警不倒退（终态防倒退）。
-                # 已知边界：SUCCEEDED→REVERSED 的合法终态升级也会落到本分支被跳过——
-                # reversal ingestion 等 wedap 冲正 4.8 落地一起做（divergence 告警即人工
-                # 介入信号），FU-GW-REVERSAL-INGESTION-20260715-001。
                 if OrderStatus(locked.status) != terminal:
                     logger.error(
                         "callback terminal divergence %s/%s order=%s callback=%s（保持不倒退）",

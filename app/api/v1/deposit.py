@@ -157,6 +157,28 @@ async def deposit_accounts(
     return ok(data, trace_id=hdr["trace_id"])
 
 
+@router.get("/api/v1/deposit/account/detail")
+async def deposit_account_detail(
+    request: Request,
+    hdr: dict[str, str] = Depends(require_headers),
+) -> dict[str, Any]:
+    """账户详情查询（§5.3）：原样透传所有 query params（custAccountNo 等）+ 审计。"""
+    params = dict(request.query_params)
+    wedap = request.app.state.wedap
+    data = await _audited_passthrough(
+        request,
+        endpoint="deposit/account/detail",
+        params=params,
+        hdr=hdr,
+        call=lambda: wedap.get_deposit_account_detail(
+            tenant_id=hdr["tenant_id"],
+            request_id=hdr["request_id"],
+            params=params,
+        ),
+    )
+    return ok(data, trace_id=hdr["trace_id"])
+
+
 @router.get("/api/v1/users/info")
 async def users_info(
     request: Request,

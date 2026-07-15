@@ -306,20 +306,35 @@ async def test_partially_reversed_to_reversed_callback_finalizes(factory) -> Non
 
 
 @pytest.mark.asyncio
-async def test_succeeded_order_reversed_callback_stays_succeeded_no_forward(factory) -> None:
-    """已知边界固化（FU-GW-REVERSAL-INGESTION）：SUCCEEDED 已收口单收到 REVERSED 回调 →
-    保持 SUCCEEDED、零二次转发（divergence 只告警）——终态升级 ingestion 等 wedap 4.8。"""
+async def test_succeeded_order_reversed_callback_upgrades_and_forwards_once(factory) -> None:
+    """reversal ingestion：SUCCEEDED 已收口单收到 REVERSED 回调（counter 冲正）→ 升级
+    REVERSED + audit(upgraded_from) + 按状态键二次转发一次；重复 REVERSED 回调幂等零增量。"""
     await _seed(factory, status="SUCCEEDED", finalized_at=dt.datetime.now(dt.UTC))
+    body = {"bizSeqNo": BIZ, "type": "disbursement", "txnStatus": "REVERSED"}
+    await resolve_callback_terminal(factory, wedap=AsyncMock(), tenant_id=TENANT, body=body)
+    order = await _order(factory)
+    assert order.status == "REVERSED"
+    assert order.finalized_via == "CALLBACK"
+    assert order.finalized_at is not None  # 首次收口时间保留（非空即可）
+    assert await _outbox_count(factory) == 1  # fwd-…-REVERSED 新键，转发一次
+    # 重复冲正回调：status 已是 REVERSED → 幂等 return，零新转发
+    await resolve_callback_terminal(factory, wedap=AsyncMock(), tenant_id=TENANT, body=body)
+    assert await _outbox_count(factory) == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_order_reversed_callback_stays_failed(factory) -> None:
+    """FAILED 无资金动作不可冲正：REVERSED 回调只 divergence 告警，不升级不转发。"""
+    await _seed(factory, status="FAILED", finalized_at=dt.datetime.now(dt.UTC))
     await resolve_callback_terminal(
         factory,
         wedap=AsyncMock(),
         tenant_id=TENANT,
         body={"bizSeqNo": BIZ, "type": "disbursement", "txnStatus": "REVERSED"},
-    )  # 不抛（幂等处理）
+    )
     order = await _order(factory)
-    assert order.status == "SUCCEEDED"  # 不被升级（当前边界）
-    assert order.finalized_via is None  # 本回调未触发收口路径（seed 未设 via）
-    assert await _outbox_count(factory) == 0  # 零二次转发
+    assert order.status == "FAILED"
+    assert await _outbox_count(factory) == 0
 
 
 @pytest.mark.asyncio
