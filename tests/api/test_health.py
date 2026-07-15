@@ -239,7 +239,8 @@ def test_api_version_fallbacks_without_env(app: FastAPI, tmp_path: Any, monkeypa
     data = r.json()["data"]
     assert data["projectId"] == "lending-bank-gateway"
     assert data["serviceName"] == "lending-bank-gateway-api"
-    assert data["appVersion"] == "0.1.0"
+    # 无 env 时回落到已安装包 metadata 版本（随 release auto-bump 变动，不能硬编码）
+    assert data["appVersion"] == health_mod._package_app_version()
     assert data["releaseId"] == "not-reported"
     assert data["releaseRunId"] == "not-reported"
     assert data["releaseEnv"] == "local"
