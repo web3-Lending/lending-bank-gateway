@@ -365,6 +365,23 @@ async def test_no_terminal_callback_on_finalized_succeeded_still_success_noop(
 
 
 @pytest.mark.asyncio
+async def test_reversal_check_exception_does_not_break_idempotent_ack(factory) -> None:
+    """no-throw 边界：核查抛任意异常（如响应解码错）→ 告警吞掉，回调仍幂等成功不抛。"""
+    await _seed(factory, status="SUCCEEDED", finalized_at=dt.datetime.now(dt.UTC))
+    wedap = AsyncMock()
+    wedap.query_transaction_status.side_effect = ValueError("bad json from wedap")
+    await resolve_callback_terminal(
+        factory,
+        wedap=wedap,
+        tenant_id=TENANT,
+        body={"bizSeqNo": BIZ, "type": "collection"},
+    )  # 关键断言：不抛
+    order = await _order(factory)
+    assert order.status == "SUCCEEDED"
+    assert await _outbox_count(factory) == 0
+
+
+@pytest.mark.asyncio
 async def test_no_terminal_callback_on_finalized_failed_skips_query(factory) -> None:
     """无终态回调撞已收口 FAILED 单 → 零外呼直接幂等返回（仅 SUCCEEDED 做 reversal 核查）。"""
     await _seed(factory, status="FAILED", finalized_at=dt.datetime.now(dt.UTC))

@@ -71,15 +71,26 @@ async def resolve_callback_terminal(
             # 已收口 SUCCEEDED 单：无终态回调是 reversal 核查的生产入口（codex P1——
             # reconcile worker 只扫非终态，SUCCEEDED 单否则永无升级触发链）——经
             # status-query 复查一次，wedap 若回 REVERSED 则走锁内升级；其余结果 no-op。
-            # 运营/上游重放一条无终态回调即可触发核查。失败/异常不影响幂等语义（吞掉）。
+            # 运营/上游重放一条无终态回调即可触发核查。本核查是**可选增强**：任何异常
+            # （含 resolver 未吞的响应解码/结构错误）都不得破坏「已收口回调幂等成功」
+            # 语义——no-throw 边界统一兜住并告警，下轮重放/人工再触发即可。
             if OrderStatus(order.status) == OrderStatus.SUCCEEDED:
-                await resolve_terminal_via_status_query(
-                    factory,
-                    wedap=wedap,
-                    tenant_id=tenant_id,
-                    biz_seq_no=biz_seq_no,
-                    source="CALLBACK",
-                )
+                try:
+                    await resolve_terminal_via_status_query(
+                        factory,
+                        wedap=wedap,
+                        tenant_id=tenant_id,
+                        biz_seq_no=biz_seq_no,
+                        source="CALLBACK",
+                    )
+                except Exception:
+                    logger.warning(
+                        "reversal check failed (idempotent ack kept) %s/%s trace=%s",
+                        tenant_id,
+                        biz_seq_no,
+                        trace_id,
+                        exc_info=True,
+                    )
             return
         # 非终态 → order 级 status-query 主动收敛。COLL 无状态查询接口 → 不收敛，
         # 留 RECEIVED 等带终态的回调重放；order 侧超窗由 G6 stuck alert 兜底告警。
