@@ -74,6 +74,12 @@ async def test_wedap_business_failure_sets_failed(factory) -> None:
     assert result["txnStatus"] == "FAILED" and result["errorCode"] == "422"
     assert result["errorMsg"].startswith("可用余额不足")
     assert len(result["errorMsg"]) == 200
+    # 幂等重放返回完整 first_response（含 errorMsg 全字段一致）且零外呼——
+    # 钉住 errorMsg 经 record_response 落库/回放不丢不改（codex MEDIUM）。
+    wedap2 = AsyncMock()
+    replay = await submit_order(factory, wedap_call=wedap2.submit_disbursement, req=_req())
+    assert replay == result
+    assert wedap2.submit_disbursement.await_count == 0
 
 
 @pytest.mark.asyncio

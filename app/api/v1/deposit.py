@@ -22,6 +22,7 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.deps import require_headers
 from app.clients.wedap import WedapError
@@ -260,31 +261,47 @@ async def internal_account_info(
         ),
     )
     account_no = data.get("accountNo")
-    if account_no is None:
+    raw_balance = data.get("accountBalance")
+    if account_no is None or raw_balance is None:
+        # 缺 accountNo 或缺余额都跳过——余额缺失不允许默认 0 落快照，
+        # 0 会被当成真实 Pool 对账锚点造成假对平（codex HIGH）。
         logger.warning(
-            "Skipping snapshot for internal account: missing accountNo in %r",
+            "Skipping snapshot for internal account: missing accountNo/accountBalance in %r",
             data,
         )
         return ok(data, trace_id=hdr["trace_id"])
     try:
-        balance = Decimal(str(data.get("accountBalance", "0")))
+        balance = Decimal(str(raw_balance))
     except InvalidOperation:
+        balance = None
+    # NaN/Infinity 能通过 Decimal 构造但不是合法余额；adjusted()>=17 超出
+    # Numeric(21,4) 的 17 位整数容量，落库会炸——一并跳过（codex HIGH）。
+    if balance is None or not balance.is_finite() or balance.adjusted() >= 17:
         logger.warning(
             "Skipping snapshot for internal account %s: invalid accountBalance %r",
             account_no,
-            data.get("accountBalance"),
+            raw_balance,
         )
         return ok(data, trace_id=hdr["trace_id"])
-    async with request.app.state.session_factory() as session:
-        async with session.begin():
-            session.add(
-                BalanceSnapshot(
-                    tenant_id=hdr["tenant_id"],
-                    account_id=str(account_no),
-                    balance=balance,
-                    currency=str(data.get("currencyCode", "USD")),
-                    source_endpoint="deposit/internal-accounts/info",
-                    captured_at=dt.datetime.now(dt.UTC),
+    try:
+        async with request.app.state.session_factory() as session:
+            async with session.begin():
+                session.add(
+                    BalanceSnapshot(
+                        tenant_id=hdr["tenant_id"],
+                        account_id=str(account_no),
+                        balance=balance,
+                        currency=str(data.get("currencyCode", "USD")),
+                        source_endpoint="deposit/internal-accounts/info",
+                        captured_at=dt.datetime.now(dt.UTC),
+                    )
                 )
-            )
+    except SQLAlchemyError:
+        # 快照是旁路增强：上游查询与审计已成功后，DB 抖动/落库失败不允许
+        # 把 200 变 500（codex HIGH）。只告警，响应照常返回查询数据。
+        logger.warning(
+            "Snapshot write failed for internal account %s; query response unaffected",
+            account_no,
+            exc_info=True,
+        )
     return ok(data, trace_id=hdr["trace_id"])
