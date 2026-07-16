@@ -85,6 +85,30 @@ DETAIL_DATA = {
     "accountStatus": "ACTIVE",
 }
 
+TXN_DATA = {
+    "pageNum": 1,
+    "pageSize": 20,
+    "total": 1,
+    "list": [
+        {
+            "bankTxnId": "BANK20260716001",
+            "transType": "DISBURSEMENT",
+            "txnDirection": "IN",
+            "txnAmount": "10.0000",
+            "currencyCode": "USD",
+        }
+    ],
+}
+
+INTERNAL_DATA = {
+    "accountNo": "INT00101001USD",
+    "accountName": "银行内部户-USD",
+    "accountBalance": "100000.00",
+    "currencyCode": "USD",
+    "accountStatus": "A",
+    "balanceDirection": "C",
+}
+
 
 @pytest.fixture()
 def client() -> TestClient:
@@ -95,6 +119,8 @@ def client() -> TestClient:
     wedap.get_deposit_accounts.return_value = ACCOUNTS_DATA
     wedap.get_user_info.return_value = USER_INFO_DATA
     wedap.get_deposit_account_detail.return_value = DETAIL_DATA
+    wedap.get_deposit_transactions.return_value = TXN_DATA
+    wedap.get_internal_account_info.return_value = INTERNAL_DATA
     app.state.wedap = wedap
     return TestClient(app)
 
@@ -368,3 +394,134 @@ def test_account_detail_upstream_error_maps_502(client: TestClient) -> None:
     )
     assert r.status_code == 502
     assert r.json()["error"]["code"] == "GW_502_UPSTREAM"
+
+
+# ── 5.4 deposit/transactions 透传（对接文档 v0.4.0 §5.4）──────────────────────
+
+
+def test_transactions_passthrough_and_audit(client: TestClient) -> None:
+    params = {
+        "custAccountNo": "12348401030101002088",
+        "startDate": "20260716",
+        "endDate": "20260716",
+        "pageSize": "100",
+    }
+    r = client.get("/api/v1/deposit/transactions", params=params, headers=HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["success"] is True
+    assert body["data"] == TXN_DATA
+
+    # params 原样进 wedap call（契约 C 全透传，分页参数不剪裁）
+    wedap = client.app.state.wedap  # type: ignore[union-attr]
+    called = wedap.get_deposit_transactions.await_args.kwargs
+    assert called["params"] == params
+
+    sf = client.app.state.session_factory  # type: ignore[union-attr]
+    count = asyncio.run(
+        _count_audit_rows(sf, tenant_id="OCBC", endpoint="deposit/transactions")
+    )
+    assert count == 1
+
+    # 流水查询不落余额快照
+    snapshots = asyncio.run(_get_snapshots(sf, tenant_id="OCBC"))
+    assert snapshots == []
+
+
+def test_transactions_upstream_error_maps_502(client: TestClient) -> None:
+    wedap = client.app.state.wedap  # type: ignore[union-attr]
+    wedap.get_deposit_transactions.side_effect = WedapError("404", "RESOURCE_NOT_FOUND")
+    r = client.get(
+        "/api/v1/deposit/transactions",
+        params={"custAccountNo": "NOPE"},
+        headers=HEADERS,
+    )
+    assert r.status_code == 502
+    assert r.json()["error"]["code"] == "GW_502_UPSTREAM"
+
+
+# ── 5.7 internal-accounts/info 透传 + 快照（对接文档 v0.4.0 §5.7 · 闭 D-1）────
+
+
+def test_internal_account_info_passthrough_audit_and_snapshot(client: TestClient) -> None:
+    """内部户查询：透传 + 审计 + 单账户扁平形态落 BalanceSnapshot（Pool 对账锚点）。"""
+    params = {"bizSeqNo": "Q-1", "channelId": "LEN", "accountNo": "INT00101001USD"}
+    r = client.get("/api/v1/deposit/internal-accounts/info", params=params, headers=HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["success"] is True
+    assert body["data"] == INTERNAL_DATA
+
+    wedap = client.app.state.wedap  # type: ignore[union-attr]
+    called = wedap.get_internal_account_info.await_args.kwargs
+    assert called["params"] == params
+
+    sf = client.app.state.session_factory  # type: ignore[union-attr]
+    count = asyncio.run(
+        _count_audit_rows(sf, tenant_id="OCBC", endpoint="deposit/internal-accounts/info")
+    )
+    assert count == 1
+
+    snapshots = asyncio.run(_get_snapshots(sf, tenant_id="OCBC"))
+    assert len(snapshots) == 1
+    assert snapshots[0].account_id == "INT00101001USD"
+    assert snapshots[0].balance == Decimal("100000.00")
+    assert snapshots[0].currency == "USD"
+    assert snapshots[0].source_endpoint == "deposit/internal-accounts/info"
+
+
+def test_internal_account_missing_account_no_skips_snapshot(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """accountNo 缺失 → 200 透传照常，但跳过快照 + warning（不让查询整体失败）。"""
+    wedap = client.app.state.wedap  # type: ignore[union-attr]
+    wedap.get_internal_account_info.return_value = {"accountBalance": "1.00"}
+
+    with caplog.at_level(logging.WARNING, logger="app.api.v1.deposit"):
+        r = client.get(
+            "/api/v1/deposit/internal-accounts/info",
+            params={"accountNo": "INT00101001USD"},
+            headers=HEADERS,
+        )
+
+    assert r.status_code == 200
+    assert any("missing accountNo" in rec.message for rec in caplog.records)
+    sf = client.app.state.session_factory  # type: ignore[union-attr]
+    assert asyncio.run(_get_snapshots(sf, tenant_id="OCBC")) == []
+
+
+def test_internal_account_invalid_balance_skips_snapshot(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """accountBalance 不可解析（脏数据）→ 200 透传照常 + 跳过快照 + warning。"""
+    wedap = client.app.state.wedap  # type: ignore[union-attr]
+    wedap.get_internal_account_info.return_value = {
+        "accountNo": "INT00101001USD",
+        "accountBalance": "abc",
+    }
+
+    with caplog.at_level(logging.WARNING, logger="app.api.v1.deposit"):
+        r = client.get(
+            "/api/v1/deposit/internal-accounts/info",
+            params={"accountNo": "INT00101001USD"},
+            headers=HEADERS,
+        )
+
+    assert r.status_code == 200
+    assert any("invalid accountBalance" in rec.message for rec in caplog.records)
+    sf = client.app.state.session_factory  # type: ignore[union-attr]
+    assert asyncio.run(_get_snapshots(sf, tenant_id="OCBC")) == []
+
+
+def test_internal_account_upstream_error_maps_502(client: TestClient) -> None:
+    """内部户不存在（wedap 404/422 业务码）→ 502 GW_502_UPSTREAM 带 wedap code。"""
+    wedap = client.app.state.wedap  # type: ignore[union-attr]
+    wedap.get_internal_account_info.side_effect = WedapError("404", "RESOURCE_NOT_FOUND")
+    r = client.get(
+        "/api/v1/deposit/internal-accounts/info",
+        params={"accountNo": "INT_NOPE"},
+        headers=HEADERS,
+    )
+    assert r.status_code == 502
+    assert r.json()["error"]["code"] == "GW_502_UPSTREAM"
+    assert "wedap code 404" in r.json()["error"]["message"]

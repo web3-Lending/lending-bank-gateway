@@ -1,11 +1,14 @@
 """app/api/v1/deposit.py
 
 deposit/users 查询透传端点：
-- GET /api/v1/deposit/balances/total  → 余额汇总（审计 + 快照）
-- GET /api/v1/deposit/accounts        → 账户列表（仅审计）
-- GET /api/v1/users/info              → 用户信息（仅审计）
+- GET /api/v1/deposit/balances/total          → 余额汇总（审计 + 快照）
+- GET /api/v1/deposit/accounts                → 账户列表（仅审计）
+- GET /api/v1/deposit/account/detail          → 账户详情（仅审计，§5.3）
+- GET /api/v1/deposit/transactions            → 交易流水（仅审计，§5.4）
+- GET /api/v1/deposit/internal-accounts/info  → 内部户信息（审计 + 快照，§5.7）
+- GET /api/v1/users/info                      → 用户信息（仅审计）
 
-所有端点均写 QueryAudit；balances/total 额外写 BalanceSnapshot。
+所有端点均写 QueryAudit；balances/total 与 internal-accounts/info 额外写 BalanceSnapshot。
 脏余额数据（Decimal 解析失败）→ logger.warning 跳过该账户，不让查询整体失败。
 WedapError / httpx 超时 → 502 GW_502_UPSTREAM。
 """
@@ -201,4 +204,87 @@ async def users_info(
             params=params,
         ),
     )
+    return ok(data, trace_id=hdr["trace_id"])
+
+
+@router.get("/api/v1/deposit/transactions")
+async def deposit_transactions(
+    request: Request,
+    hdr: dict[str, str] = Depends(require_headers),
+) -> dict[str, Any]:
+    """交易流水查询（对接文档 v0.4.0 §5.4）：原样透传所有 query params + 审计。
+
+    分页/时间窗/方向过滤参数（custAccountNo/startDate/endDate/pageNum/pageSize 等）
+    由调用方带，gateway 不剪裁（契约 C）；对账/账单展示的证据面查询统一走本端点，
+    上游不再直调 wedap。
+    """
+    params = dict(request.query_params)
+    wedap = request.app.state.wedap
+    data = await _audited_passthrough(
+        request,
+        endpoint="deposit/transactions",
+        params=params,
+        hdr=hdr,
+        call=lambda: wedap.get_deposit_transactions(
+            tenant_id=hdr["tenant_id"],
+            request_id=hdr["request_id"],
+            params=params,
+        ),
+    )
+    return ok(data, trace_id=hdr["trace_id"])
+
+
+@router.get("/api/v1/deposit/internal-accounts/info")
+async def internal_account_info(
+    request: Request,
+    hdr: dict[str, str] = Depends(require_headers),
+) -> dict[str, Any]:
+    """内部户信息查询（对接文档 v0.4.0 §5.7 · 闭 D-1）：透传 + 审计 + 余额快照。
+
+    内部户（归集/分发/退款中转方，如 INT00101001USD）余额是资金台账 Pool 侧的
+    独立对账锚点——此前只能靠推算守恒。响应为单账户扁平形态（accountNo/
+    accountBalance），与 balances/total 的 accounts[] 不同，故快照单独落一行；
+    accountNo 缺失 / 余额不可解析时跳过快照并 warning，不让查询整体失败。
+    """
+    params = dict(request.query_params)
+    wedap = request.app.state.wedap
+    data = await _audited_passthrough(
+        request,
+        endpoint="deposit/internal-accounts/info",
+        params=params,
+        hdr=hdr,
+        call=lambda: wedap.get_internal_account_info(
+            tenant_id=hdr["tenant_id"],
+            request_id=hdr["request_id"],
+            params=params,
+        ),
+    )
+    account_no = data.get("accountNo")
+    if account_no is None:
+        logger.warning(
+            "Skipping snapshot for internal account: missing accountNo in %r",
+            data,
+        )
+        return ok(data, trace_id=hdr["trace_id"])
+    try:
+        balance = Decimal(str(data.get("accountBalance", "0")))
+    except InvalidOperation:
+        logger.warning(
+            "Skipping snapshot for internal account %s: invalid accountBalance %r",
+            account_no,
+            data.get("accountBalance"),
+        )
+        return ok(data, trace_id=hdr["trace_id"])
+    async with request.app.state.session_factory() as session:
+        async with session.begin():
+            session.add(
+                BalanceSnapshot(
+                    tenant_id=hdr["tenant_id"],
+                    account_id=str(account_no),
+                    balance=balance,
+                    currency=str(data.get("currencyCode", "USD")),
+                    source_endpoint="deposit/internal-accounts/info",
+                    captured_at=dt.datetime.now(dt.UTC),
+                )
+            )
     return ok(data, trace_id=hdr["trace_id"])

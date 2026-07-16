@@ -64,12 +64,16 @@ async def test_timeout_sets_result_unknown(factory) -> None:
 
 @pytest.mark.asyncio
 async def test_wedap_business_failure_sets_failed(factory) -> None:
+    """wedap 业务失败（v0.4.0/#82 起 422 + 业务码经 _unwrap 升格 WedapError）→
+    FAILED + errorCode=业务码 + errorMsg 文案透传（截断 200，供上游展示/排障）。"""
     from app.clients.wedap import WedapError
 
     wedap = AsyncMock()
-    wedap.submit_disbursement.side_effect = WedapError("422", "BUSINESS_RULE_VIOLATION")
+    wedap.submit_disbursement.side_effect = WedapError("422", "可用余额不足" + "x" * 300)
     result = await submit_order(factory, wedap_call=wedap.submit_disbursement, req=_req())
     assert result["txnStatus"] == "FAILED" and result["errorCode"] == "422"
+    assert result["errorMsg"].startswith("可用余额不足")
+    assert len(result["errorMsg"]) == 200
 
 
 @pytest.mark.asyncio

@@ -665,6 +665,54 @@
         }
       }
     },
+    "/api/v1/deposit/transactions": {
+      "get": {
+        "tags": [
+          "deposit"
+        ],
+        "summary": "Deposit Transactions",
+        "description": "交易流水查询（对接文档 v0.4.0 §5.4）：原样透传所有 query params + 审计。\n\n分页/时间窗/方向过滤参数（custAccountNo/startDate/endDate/pageNum/pageSize 等）\n由调用方带，gateway 不剪裁（契约 C）；对账/账单展示的证据面查询统一走本端点，\n上游不再直调 wedap。",
+        "operationId": "deposit_transactions_api_v1_deposit_transactions_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Deposit Transactions Api V1 Deposit Transactions Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/deposit/internal-accounts/info": {
+      "get": {
+        "tags": [
+          "deposit"
+        ],
+        "summary": "Internal Account Info",
+        "description": "内部户信息查询（对接文档 v0.4.0 §5.7 · 闭 D-1）：透传 + 审计 + 余额快照。\n\n内部户（归集/分发/退款中转方，如 INT00101001USD）余额是资金台账 Pool 侧的\n独立对账锚点——此前只能靠推算守恒。响应为单账户扁平形态（accountNo/\naccountBalance），与 balances/total 的 accounts[] 不同，故快照单独落一行；\naccountNo 缺失 / 余额不可解析时跳过快照并 warning，不让查询整体失败。",
+        "operationId": "internal_account_info_api_v1_deposit_internal_accounts_info_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Internal Account Info Api V1 Deposit Internal Accounts Info Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/wedap/import/enqueue": {
       "post": {
         "tags": [
