@@ -108,7 +108,9 @@ async def submit_order(
 
     # 外呼（事务外）：成功→SUBMITTED；超时/传输错误→RESULT_UNKNOWN；
     # HTTPStatusError 5xx→RESULT_UNKNOWN（上游不可用结果未知）；
-    # HTTPStatusError 4xx→FAILED（请求被拒未执行）；WedapError→FAILED
+    # WedapError→FAILED（含 4xx 可解析 envelope——对接文档 v0.4.0/#82 起业务失败返
+    # 422 + 业务码，client._unwrap 升格 WedapError，errorCode 保留 wedap 业务码）；
+    # HTTPStatusError 4xx→FAILED（envelope 解析不出的兜底，errorCode=HTTP_4xx）
     try:
         data = await wedap_call(
             tenant_id=req.tenant_id,
@@ -144,7 +146,14 @@ async def submit_order(
             }
     except WedapError as exc:
         new_status = OrderStatus.FAILED
-        response = {"txnStatus": "FAILED", "bizSeqNo": req.biz_seq_no, "errorCode": exc.code}
+        response = {
+            "txnStatus": "FAILED",
+            "bizSeqNo": req.biz_seq_no,
+            "errorCode": exc.code,
+            # 业务失败文案（如「可用余额不足」「子账户不存在」）截断落幂等记录，
+            # 供上游展示/排障；长度上限防异常上游把 first_response 撑爆。
+            "errorMsg": exc.msg[:200],
+        }
 
     # 事务2：CAS 状态推进（FOR UPDATE 读 order，仅当仍 ACCEPTED 才推进——防回调/兜底已
     # 聚合到更强终态被本次外呼结果盲写倒退，codex HIGH-1）+ 同步终态收口 + record_response。

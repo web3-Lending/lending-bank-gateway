@@ -45,6 +45,7 @@ class WedapError(Exception):
     def __init__(self, code: str, msg: str) -> None:
         super().__init__(f"wedap {code}: {msg}")
         self.code = code
+        self.msg = msg
 
 
 def _error_text(body: dict[str, Any]) -> str:
@@ -163,6 +164,17 @@ class WedapClient:
 
     @staticmethod
     def _unwrap(r: httpx.Response) -> dict[str, Any]:
+        # 4xx 业务失败优先解析 envelope（对接文档 v0.4.0 · wedap#82 起业务失败返
+        # 422 + 业务错误码，不再被吞成 500）：可解析出 code 的升格 WedapError，
+        # 保留 wedap 业务码/文案供上游定性与展示；解析不出（非 JSON 体 / 缺 code）
+        # 回落 raise_for_status → HTTPStatusError（上层按 HTTP_4xx 兜底）。
+        if 400 <= r.status_code < 500:
+            try:
+                raw = r.json()
+            except ValueError:
+                raw = None
+            if isinstance(raw, dict) and raw.get("code") is not None:
+                raise WedapError(str(raw["code"]), _error_text(raw))
         r.raise_for_status()
         body: dict[str, Any] = r.json()
         if str(body.get("code")) != "200":
@@ -219,7 +231,12 @@ class WedapClient:
         request_id: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        """分发资金。南向路径以 wedap-adapter 实测为准（2026-06-12 verify）。"""
+        """分发资金。南向路径以 wedap-adapter 实测为准（2026-06-12 verify）。
+
+        契约（对接文档 v0.4.0 §4.4 · 2026-07-14 决议 B，wedap#79）：bizSeqNo 为本次
+        分发的独立流水号——不复用归集单号、wedap 不做归集↔分发总额稽核。旧「强制
+        复用归集号」耦合（W5）已解除，经 gateway 分发走独立号即可。
+        """
         return await self._post(
             "/api/v1/bank-funds/user-distributions",
             tenant_id=tenant_id,
@@ -234,7 +251,7 @@ class WedapClient:
         request_id: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        """退款（对接文档 v0.3.0 §4.7，wedap 已实现 adapter#73）：内部户 → 客户账户。
+        """退款（对接文档 v0.4.0 §4.7，wedap 已实现 adapter#73）：内部户 → 客户账户。
 
         契约要点（wedap 侧强制，gateway 薄透传不复刻）：oriBizSeqNo 关联被退款的原归集单；
         累计退款 ≤ 原单金额（FAILED 不计入）；currencyCode 须与原交易一致。
@@ -331,6 +348,47 @@ class WedapClient:
         # 契约 C 薄透传：原样转发调用方 query params（userId + wedap 必填 bizSeqNo/channelId 等）。
         return await self._get(
             "/api/v1/deposit/accounts",
+            tenant_id=tenant_id,
+            request_id=request_id,
+            params=params,
+        )
+
+    async def get_deposit_transactions(
+        self,
+        *,
+        tenant_id: str,
+        request_id: str,
+        params: dict[str, str],
+    ) -> dict[str, Any]:
+        """交易流水查询（对接文档 v0.4.0 §5.4，底层银行 304 纯转换）。契约 C 薄透传。
+
+        必填 custAccountNo + startDate/endDate（YYYYMMDD），分页 pageNum/pageSize
+        （默认 20 / 上限 100）由调用方带。txnPurpose 已不再截断（D-4 修复，
+        mock#11 summary_code 10→64），已截断的历史行不回填。
+        """
+        return await self._get(
+            "/api/v1/deposit/transactions",
+            tenant_id=tenant_id,
+            request_id=request_id,
+            params=params,
+        )
+
+    async def get_internal_account_info(
+        self,
+        *,
+        tenant_id: str,
+        request_id: str,
+        params: dict[str, str],
+    ) -> dict[str, Any]:
+        """内部户信息查询（对接文档 v0.4.0 §5.7，底层银行 303，wedap adapter#84）。
+
+        内部户是归集/分发/退款的中转方；本查询给 lending 资金台账 Pool 侧提供独立
+        余额锚点（闭 D-1：351 客户资产查询正确排除内部户，内部户余额走本接口）。
+        必填 accountNo（内部户账号，如 INT00101001USD）。契约 C 薄透传；响应为
+        单账户扁平形态（accountNo/accountBalance/balanceDirection），非 accounts[]。
+        """
+        return await self._get(
+            "/api/v1/deposit/internal-accounts/info",
             tenant_id=tenant_id,
             request_id=request_id,
             params=params,

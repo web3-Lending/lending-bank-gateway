@@ -1133,3 +1133,166 @@ async def test_unwrap_error_text_non_string_payload_stringified() -> None:
     with pytest.raises(WedapError) as exc:
         await _client().submit_disbursement(tenant_id="WBTHK01", request_id="r", payload={})
     assert "checksum mismatch at line 3" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# get_deposit_transactions（GET /api/v1/deposit/transactions，对接文档 v0.4.0 §5.4）
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_get_deposit_transactions_passthrough() -> None:
+    route = respx.get(f"{BASE}/api/v1/deposit/transactions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "code": "200",
+                "msg": "SUCCESS",
+                "data": {
+                    "pageNum": 1,
+                    "total": 1,
+                    "list": [{"bankTxnId": "BANK20260716001", "txnAmount": "10.0000"}],
+                },
+            },
+        )
+    )
+    resp = await _client().get_deposit_transactions(
+        tenant_id="WBTHK01",
+        request_id="txn-001",
+        params={
+            "custAccountNo": "12348401030101002088",
+            "startDate": "20260716",
+            "endDate": "20260716",
+            "pageSize": "100",
+        },
+    )
+    assert resp["list"][0]["bankTxnId"] == "BANK20260716001"
+    req = route.calls.last.request
+    assert req.headers["X-Tenant-Id"] == "WBTHK01"
+    assert req.headers["X-Request-Id"] == "txn-001"
+    params = dict(httpx.QueryParams(req.url.query))
+    assert params["custAccountNo"] == "12348401030101002088"
+    assert params["pageSize"] == "100"
+
+
+@respx.mock
+async def test_get_deposit_transactions_non_200_code_raises() -> None:
+    respx.get(f"{BASE}/api/v1/deposit/transactions").mock(
+        return_value=httpx.Response(200, json={"code": "404", "msg": "RESOURCE_NOT_FOUND"})
+    )
+    with pytest.raises(WedapError):
+        await _client().get_deposit_transactions(
+            tenant_id="WBTHK01", request_id="r", params={"custAccountNo": "NOPE"}
+        )
+
+
+# ---------------------------------------------------------------------------
+# get_internal_account_info（GET /api/v1/deposit/internal-accounts/info，
+# 对接文档 v0.4.0 §5.7 · 银行 303 · 闭 D-1）
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_get_internal_account_info_passthrough() -> None:
+    route = respx.get(f"{BASE}/api/v1/deposit/internal-accounts/info").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "code": "200",
+                "msg": "SUCCESS",
+                "data": {
+                    "accountNo": "INT00101001USD",
+                    "accountBalance": "100000.00",
+                    "currencyCode": "USD",
+                    "accountStatus": "A",
+                    "balanceDirection": "C",
+                },
+            },
+        )
+    )
+    resp = await _client().get_internal_account_info(
+        tenant_id="WBTHK01",
+        request_id="int-001",
+        params={"bizSeqNo": "Q-1", "channelId": "LEN", "accountNo": "INT00101001USD"},
+    )
+    assert resp["accountNo"] == "INT00101001USD"
+    assert resp["balanceDirection"] == "C"
+    req = route.calls.last.request
+    assert req.headers["X-Tenant-Id"] == "WBTHK01"
+    params = dict(httpx.QueryParams(req.url.query))
+    assert params["accountNo"] == "INT00101001USD"
+
+
+@respx.mock
+async def test_get_internal_account_info_not_found_raises_with_code() -> None:
+    # 内部户不存在：wedap 返 404/422 业务码（§5.7 响应状态码表）→ WedapError 保留业务码
+    respx.get(f"{BASE}/api/v1/deposit/internal-accounts/info").mock(
+        return_value=httpx.Response(
+            404, json={"code": "404", "msg": "RESOURCE_NOT_FOUND"}
+        )
+    )
+    with pytest.raises(WedapError) as exc:
+        await _client().get_internal_account_info(
+            tenant_id="WBTHK01", request_id="r", params={"accountNo": "INT_NOPE"}
+        )
+    assert exc.value.code == "404"
+
+
+# ---------------------------------------------------------------------------
+# _unwrap 4xx envelope 升格（对接文档 v0.4.0 · wedap#82：业务失败 500→422 + 业务码）
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_unwrap_4xx_envelope_raises_wedap_error_with_business_code() -> None:
+    """HTTP 422 + 可解析 envelope → WedapError（业务码/文案透传，不再降级 HTTP_422）。"""
+    respx.post(f"{BASE}/api/v1/bank-funds/user-collections").mock(
+        return_value=httpx.Response(
+            422, json={"code": "422", "message": "可用余额不足"}
+        )
+    )
+    with pytest.raises(WedapError) as exc:
+        await _client().collect_from_users(tenant_id="WBTHK01", request_id="r", payload={})
+    assert exc.value.code == "422"
+    assert exc.value.msg == "可用余额不足"
+
+
+@respx.mock
+async def test_unwrap_4xx_non_json_falls_back_to_http_status_error() -> None:
+    """HTTP 4xx 非 JSON 体（网关纯文本拒绝）→ 保持 HTTPStatusError（上层 HTTP_4xx 兜底）。"""
+    respx.post(f"{BASE}/api/v1/bank-funds/user-collections").mock(
+        return_value=httpx.Response(422, text="rejected by gateway")
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        await _client().collect_from_users(tenant_id="WBTHK01", request_id="r", payload={})
+
+
+@respx.mock
+async def test_unwrap_4xx_json_without_code_falls_back_to_http_status_error() -> None:
+    """HTTP 4xx JSON 体但无 code 字段（非 envelope 形态）→ HTTPStatusError 兜底。"""
+    respx.post(f"{BASE}/api/v1/bank-funds/user-collections").mock(
+        return_value=httpx.Response(422, json={"detail": "unprocessable"})
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        await _client().collect_from_users(tenant_id="WBTHK01", request_id="r", payload={})
+
+
+@respx.mock
+async def test_unwrap_4xx_json_non_dict_falls_back_to_http_status_error() -> None:
+    """HTTP 4xx JSON 非 dict 体（list/标量）→ HTTPStatusError 兜底（不误当 envelope）。"""
+    respx.post(f"{BASE}/api/v1/bank-funds/user-collections").mock(
+        return_value=httpx.Response(422, json=["not", "an", "envelope"])
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        await _client().collect_from_users(tenant_id="WBTHK01", request_id="r", payload={})
+
+
+@respx.mock
+async def test_unwrap_5xx_with_envelope_still_http_status_error() -> None:
+    """HTTP 5xx 即使带 envelope 也保持 HTTPStatusError——submit 按 5xx 定性
+    RESULT_UNKNOWN（结果未知可收敛），升格 WedapError 会被误定性 FAILED。"""
+    respx.post(f"{BASE}/api/v1/bank-funds/user-collections").mock(
+        return_value=httpx.Response(500, json={"code": "500", "message": "SYSTEM_ERROR"})
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        await _client().collect_from_users(tenant_id="WBTHK01", request_id="r", payload={})
