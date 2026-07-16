@@ -18,6 +18,7 @@ from app.api.deps import (
 from app.clients.wedap import WedapError
 from app.core.envelope import ok
 from app.models.txn import BankTxnOrder
+from app.services.account_guard import assert_platform_account_allowed
 from app.services.idempotency import IdempotencyConflict
 from app.services.submit import SubmitRequest, submit_order
 
@@ -82,6 +83,19 @@ async def _submit(
     wedap_payload: dict[str, Any],
 ) -> dict[str, Any]:
     """validate biz_seq_no → submit_order → catch IdempotencyConflict → ok envelope。"""
+    # 账户守门人（钱能去哪，与 S2S 的「谁能调」正交）：三个资金端点
+    # （collect/distribute/refund）都经本 helper，一处收口全覆盖；enforce 拒绝
+    # 发生在 submit_order 之前——不写 order、不占幂等、不调 wedap（fail-closed）。
+    await assert_platform_account_allowed(
+        request.app.state.session_factory,
+        wedap_payload.get("bankAccountNo"),
+        tenant_id=ids["tenant_id"],
+        business_scope=business_scope,
+        currency=currency,
+        caller=ids["caller_service"],
+        trace_id=ids["trace_id"],
+        mode=request.app.state.settings.account_guard_mode,
+    )
     try:
         result = await submit_order(
             request.app.state.session_factory,
