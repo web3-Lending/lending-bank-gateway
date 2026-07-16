@@ -49,21 +49,31 @@ def test_create_app_parses_per_service_tokens_a_m_002() -> None:
     from app.core.config import Settings
 
     app = create_app(
-        Settings(env="test", s2s_caller_tokens="svc-a:tok-a , svc-b:tok-b , bad-no-colon, :empty")
+        Settings(
+            env="test",
+            s2s_secret="shared",  # noqa: S106  # 测试固定值
+            s2s_caller_tokens="svc-a:tok-a , svc-b:tok-b , bad-no-colon, :empty",
+        )
     )
     client = TestClient(app)
-    # s2s 中间件在 handler/DB 之前执行：错误 token → 401
+    # s2s 中间件在 handler/DB 之前执行：表内 caller 错误 token → 401
     r = client.get(
         "/api/v1/bank-funds/status?bizSeqNo=X",
         headers={"X-Caller-Service": "svc-a", "X-S2S-Token": "WRONG"},
     )
     assert r.status_code == 401
-    # 未登记 caller（含被忽略的畸形条目）→ 401
+    # 混合语义（2026-07-16 account-guard R3）：表外 caller（含被忽略的畸形条目）
+    # 回退共享 secret——错 secret 401、对 secret 放行到 handler（400=业务校验）。
     r2 = client.get(
         "/api/v1/bank-funds/status?bizSeqNo=X",
-        headers={"X-Caller-Service": "bad-no-colon", "X-S2S-Token": "tok-a"},
+        headers={"X-Caller-Service": "bad-no-colon", "X-S2S-Token": "WRONG"},
     )
     assert r2.status_code == 401
+    r3 = client.get(
+        "/api/v1/bank-funds/status?bizSeqNo=X",
+        headers={"X-Caller-Service": "bad-no-colon", "X-S2S-Token": "shared"},
+    )
+    assert r3.status_code == 400
 
 
 def test_create_app_prod_without_secret_raises(monkeypatch: pytest.MonkeyPatch) -> None:

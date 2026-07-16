@@ -28,6 +28,10 @@ services:
       GW_REFUND_FULL_AMOUNT_GUARD: ${REFUND_FULL_AMOUNT_GUARD:-${GW_REFUND_FULL_AMOUNT_GUARD:-false}}
       GW_RECON_BASE_URL: ${RECON_BASE_URL:-${GW_RECON_BASE_URL:-}}
       GW_RECON_CALLBACK_HMAC_SECRET: ${RECON_CALLBACK_HMAC_SECRET:-${GW_RECON_CALLBACK_HMAC_SECRET:-}}
+      # 账户守门人（FU-GW-ACCOUNT-GUARD）：与 deploy.sh remote 透传清单保持同集
+      GW_ACCOUNT_GUARD_MODE: ${ACCOUNT_GUARD_MODE:-${GW_ACCOUNT_GUARD_MODE:-off}}
+      GW_ADMIN_CALLERS: ${ADMIN_CALLERS:-${GW_ADMIN_CALLERS:-}}
+      GW_S2S_CALLER_TOKENS: ${S2S_CALLER_TOKENS:-${GW_S2S_CALLER_TOKENS:-}}
       # AWS_* 凭证走 env_file 同名直通（boto3 标准名，无需映射）
     # Logs go to stdout (app/main.py _configure_logging); the json-file driver
     # caps on-disk growth (3 files x 100MB) so `docker logs` can't grow unbounded

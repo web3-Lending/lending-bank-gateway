@@ -10,6 +10,25 @@ from app.core.envelope import err
 logger = logging.getLogger(__name__)
 
 
+def parse_caller_tokens(raw: str) -> dict[str, str] | None:
+    """解析 GW_S2S_CALLER_TOKENS（`caller1:token1,caller2:token2`）。
+
+    唯一权威解析：create_app 的中间件装配与 admin-caller fail-fast 校验共用本函数，
+    防止两处解析漂移（codex R2 P0：`fund-ops:` 空 token 曾被 fail-fast 误判为已绑定，
+    而运行时丢弃空 token 回退共享 secret → 绑定形同虚设）。
+    空段/空 token/空名字一律丢弃；结果为空 → None（未启用）。
+    """
+    tokens: dict[str, str] = {}
+    for pair in raw.split(","):
+        if ":" not in pair:
+            continue
+        name, _, tok = pair.partition(":")
+        name, tok = name.strip(), tok.strip()
+        if name and tok:
+            tokens[name] = tok
+    return tokens or None
+
+
 class S2SMiddleware(BaseHTTPMiddleware):
     def __init__(
         self,
@@ -84,21 +103,28 @@ class S2SMiddleware(BaseHTTPMiddleware):
             )
         token = request.headers.get("X-S2S-Token", "")
 
-        # 模式一（优先）：per-service token——按 caller 专属 token 校验，密码学绑定 caller↔token
+        # 模式一（优先）：per-service token——按 caller 专属 token 校验，密码学绑定 caller↔token。
+        # 混合语义（codex R2 P1）：只有「在 token 表里的 caller」强制走专属 token；
+        # 不在表里的 caller 落回模式二共享 secret（存量 caller 增量迁移，不被一刀切 401）。
+        # request.state.s2s_token_bound 标记本请求是否凭专属 token 认证——admin 配置面
+        # （platform_accounts）只信 token_bound 请求，共享 secret 冒充 caller 头到不了 admin。
+        request.state.s2s_token_bound = False
         if self._caller_tokens is not None:
             expected = self._caller_tokens.get(caller)
-            if expected is None or not hmac.compare_digest(token, expected):
-                # 禁止把 token 值写入日志
-                logger.warning(
-                    "s2s auth failed: path=%s reason=%s caller=%s trace_id=%s",
-                    path,
-                    "bad_per_service_token",
-                    caller,
-                    trace_id,
-                )
-                return JSONResponse(err("GW_401_S2S", "bad s2s token", trace_id=trace_id), 401)
-            # token 已绑定 caller，无需再查白名单
-            return await call_next(request)
+            if expected is not None:
+                if not hmac.compare_digest(token, expected):
+                    # 禁止把 token 值写入日志
+                    logger.warning(
+                        "s2s auth failed: path=%s reason=%s caller=%s trace_id=%s",
+                        path,
+                        "bad_per_service_token",
+                        caller,
+                        trace_id,
+                    )
+                    return JSONResponse(err("GW_401_S2S", "bad s2s token", trace_id=trace_id), 401)
+                # token 已绑定 caller，无需再查白名单
+                request.state.s2s_token_bound = True
+                return await call_next(request)
 
         # 模式二（回退）：共享 secret + 可选白名单
         if self._secret is not None:

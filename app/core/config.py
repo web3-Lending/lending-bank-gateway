@@ -20,6 +20,15 @@ class Settings(BaseSettings):
             return None
         return v
 
+    @field_validator("account_guard_mode")
+    @classmethod
+    def _validate_guard_mode(cls, v: str) -> str:
+        """三态收敛，拼错即启动期 fail-fast——资金 enforcement 开关不允许静默降级。"""
+        mode = v.strip().lower()
+        if mode not in {"off", "observe", "enforce"}:
+            raise ValueError(f"GW_ACCOUNT_GUARD_MODE must be off|observe|enforce, got {v!r}")
+        return mode
+
     db_url: str = "sqlite+aiosqlite:///:memory:"
     wedap_base_url: str = "http://localhost:8021"
     wedap_timeout_seconds: float = 10.0
@@ -89,6 +98,23 @@ class Settings(BaseSettings):
 
     注意：v1 基于共享 token，无法密码学绑定 caller；白名单为兜底归因加固。
     v2 规划 per-service token/签名绑定，届时可移除本字段。
+    """
+    account_guard_mode: str = "off"
+    """平台账户守门人三态开关（GW_ACCOUNT_GUARD_MODE = off|observe|enforce）。
+
+    collect/distribute 的平台账户（payload 顶层 bankAccountNo）须命中
+    platform_bank_account 白名单（active + business_scope ∈ allowed_scopes +
+    currency 一致或未限定）。off=不校验（默认，零行为变更）；observe=不拒，
+    只结构化日志记录「会被拒」项（上线前抓全白名单）；enforce=非法 403 拒绝、
+    不写 order 不调 wedap（fail-closed，含空名单租户——空=配置缺失非豁免）。
+    与 GW_S2S_CALLERS（谁能调）正交：本开关管「钱能去哪」。
+    """
+    admin_callers: str = ""
+    """逗号分隔的 admin 运维端点调用方白名单（GW_ADMIN_CALLERS）。
+
+    管 /api/v1/admin/platform-accounts 白名单登记增改（资金 enforcement 配置面）。
+    空串 = fail-closed 拒绝所有写入（与 s2s_callers 的「空=不启用」语义相反——
+    守门人配置面比业务接口更敏感，未显式授权运营 caller 就不该有人能改白名单）。
     """
     env: str = "local"
     log_level: str = "INFO"

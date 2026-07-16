@@ -22,6 +22,7 @@ from app.api.v1.bank_funds import router as bank_funds_router
 from app.api.v1.deposit import router as deposit_router
 from app.api.v1.health import router as health_router
 from app.api.v1.loans import router as loans_router
+from app.api.v1.platform_accounts import router as platform_accounts_router
 from app.api.v1.recon_notify import router as recon_notify_router
 from app.api.v1.wedap_import_enqueue import router as wedap_import_enqueue_router
 from app.clients.s3 import S3FileClient
@@ -30,7 +31,7 @@ from app.core.config import Settings, get_settings
 from app.core.context import IdentifierMiddleware, current_ids
 from app.core.db import build_engine, build_session_factory
 from app.core.envelope import err
-from app.core.s2s import S2SMiddleware
+from app.core.s2s import S2SMiddleware, parse_caller_tokens
 from app.workers.supervisor import supervised
 
 logger = logging.getLogger(__name__)
@@ -116,14 +117,18 @@ async def _http_exception_handler(request: Request, exc: StarletteHTTPException)
     """
     trace_id = _resolve_trace_id(request)
     detail = exc.detail
+    extra: dict[str, object] = {}
     if isinstance(detail, dict):
         code = detail.get("code", f"GW_{exc.status_code}")
         message = detail.get("message", str(detail))
+        # code/message 之外的键（如 account guard 的 reason 细分）透传进
+        # error.details——否则调用方只见笼统 message，无法程序化分支。
+        extra = {k: v for k, v in detail.items() if k not in {"code", "message"}}
     else:
         code = f"GW_{exc.status_code}"
         message = str(detail)
     return JSONResponse(
-        err(code, message, trace_id=trace_id),
+        err(code, message, trace_id=trace_id, details=extra or None),
         status_code=exc.status_code,
     )
 
@@ -339,6 +344,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "GW_WEDAP_CALLBACK_API_KEY 必须在非 local/test 环境配置"
             "（wedap 回调入口 fail-fast，资金网关禁 fail-open）"
         )
+    # admin caller↔凭证绑定（codex P0）：共享 secret 模式下 X-Caller-Service 可被任何
+    # 持 secret 的服务伪造——admin_callers 一旦启用（非空），每个 admin caller 必须在
+    # GW_S2S_CALLER_TOKENS 里有专属 token（密码学绑定身份），否则白名单形同虚设。
+    # local/test 豁免（无 S2S 场景的单测/本地联调）。
+    if settings.env not in ("local", "test"):
+        # 与运行时中间件同一解析（parse_caller_tokens）——防两处解析漂移
+        # （codex R2 P0：`fund-ops:` 空 token 曾被独立解析误判为已绑定）。
+        parsed_tokens = parse_caller_tokens(settings.s2s_caller_tokens) or {}
+        # 凭证碰撞 fail-fast（codex R3 P1）：token==共享 secret → 持 secret 者可冒充该
+        # caller；两 caller 共用 token → 互相冒充。「专属 token = 身份」的前提是值唯一。
+        if settings.s2s_secret and settings.s2s_secret in parsed_tokens.values():
+            raise RuntimeError(
+                "GW_S2S_CALLER_TOKENS 存在与共享 GW_S2S_SECRET 相同的 token——"
+                "身份绑定失效（持共享 secret 即可冒充该 caller），必须使用独立随机 token"
+            )
+        if len(set(parsed_tokens.values())) != len(parsed_tokens):
+            dup_callers = sorted(
+                c for c, t in parsed_tokens.items() if list(parsed_tokens.values()).count(t) > 1
+            )
+            raise RuntimeError(
+                f"GW_S2S_CALLER_TOKENS 存在 token 值重复的 caller {dup_callers}——"
+                "共用 token 可互相冒充，每个 caller 必须独立随机 token"
+            )
+        if settings.admin_callers.strip():
+            unbound = {c.strip() for c in settings.admin_callers.split(",") if c.strip()} - set(
+                parsed_tokens.keys()
+            )
+            if unbound:
+                raise RuntimeError(
+                    f"GW_ADMIN_CALLERS 含未绑定专属 token 的 caller {sorted(unbound)}——"
+                    "共享 secret 下 caller 头可伪造，admin 白名单登记面必须 per-service token"
+                    "（GW_S2S_CALLER_TOKENS）绑定身份"
+                )
 
     app = FastAPI(title="lending-bank-gateway", version="0.1.0", lifespan=_lifespan)
     # 全进程统一从 app.state.settings 取配置（lifespan/worker 不再各自调 get_settings）
@@ -350,17 +388,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if settings.s2s_callers.strip()
         else None
     )
-    # 解析 per-service token（A-m-002）：`caller:token,...`；空串 = 不启用，回退共享 secret
-    caller_tokens: dict[str, str] | None = None
-    if settings.s2s_caller_tokens.strip():
-        caller_tokens = {}
-        for pair in settings.s2s_caller_tokens.split(","):
-            if ":" in pair:
-                name, _, tok = pair.partition(":")
-                name, tok = name.strip(), tok.strip()
-                if name and tok:
-                    caller_tokens[name] = tok
-        caller_tokens = caller_tokens or None
+    # 解析 per-service token（A-m-002）：`caller:token,...`；空串 = 不启用。
+    # 混合语义：在表内的 caller 强制专属 token，不在表内的回退共享 secret（s2s.py）。
+    caller_tokens = parse_caller_tokens(settings.s2s_caller_tokens)
 
     # 同时注册 Starlette 基类（路由 miss 404）和 FastAPI 子类（显式 raise HTTPException）
     app.add_exception_handler(StarletteHTTPException, _http_exception_handler)  # type: ignore[arg-type]
@@ -439,6 +469,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(bank_funds_router)
     app.include_router(callbacks.router)
     app.include_router(admin_ops_router)
+    app.include_router(platform_accounts_router)
     app.include_router(recon_notify_router)
     app.include_router(deposit_router)
     app.include_router(wedap_import_enqueue_router)
