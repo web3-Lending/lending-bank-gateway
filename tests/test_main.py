@@ -447,6 +447,71 @@ def test_create_app_import_base_without_apikey_fails_fast() -> None:
         create_app(bad)
 
 
+@pytest.mark.parametrize("empty_secret", ["", "   "])
+def test_create_app_delivery_without_recon_hmac_secret_fails_fast(empty_secret: str) -> None:
+    """护栏④：投递开启 + 非 local/test + recon 回调 HMAC secret 空/纯空白 → 启动期拦截。
+
+    纯空白也拦：该字段不在 _empty_env_as_none validator 白名单，"   " 是 truthy，
+    但客户端会拿空白密钥签名 → recon 侧验签持续 401（codex R2 P1）。
+    """
+    from app.core.config import Settings
+
+    bad = Settings(
+        env="dev",
+        s2s_secret="s2s-token",  # noqa: S106  # 测试固定值，过既有 dev 守卫
+        wedap_callback_api_key="cb-key",
+        wedap_base_url="http://baffle:8021",
+        wedap_delivery_enabled=True,
+        recon_callback_hmac_secret=empty_secret,
+    )
+    with pytest.raises(RuntimeError, match="GW_RECON_CALLBACK_HMAC_SECRET"):
+        create_app(bad)
+
+
+def test_create_app_delivery_disabled_without_recon_hmac_secret_ok() -> None:
+    """投递关闭时 secret 空放行——secret 仅 delivery 开启时用于构造回调客户端，
+    未启用投递的合法部署不得被拦（codex R1 P1）。"""
+    from app.core.config import Settings
+
+    ok = Settings(
+        env="dev",
+        s2s_secret="s2s-token",  # noqa: S106
+        wedap_callback_api_key="cb-key",
+        wedap_base_url="http://baffle:8021",
+        wedap_delivery_enabled=False,
+        recon_callback_hmac_secret="",
+    )
+    assert isinstance(create_app(ok), FastAPI)
+
+
+def test_create_app_test_env_delivery_without_recon_hmac_secret_ok() -> None:
+    """local/test 豁免：test 环境投递开启 + secret 空 → 放行（单测/本地联调）。"""
+    from app.core.config import Settings
+
+    ok = Settings(
+        env="test",
+        wedap_base_url="http://baffle:8021",
+        wedap_delivery_enabled=True,
+        recon_callback_hmac_secret="",
+    )
+    assert isinstance(create_app(ok), FastAPI)
+
+
+def test_create_app_delivery_with_recon_hmac_secret_ok() -> None:
+    """护栏④反例：dev + 投递开启 + secret 有值 → 正常建 app。"""
+    from app.core.config import Settings
+
+    ok = Settings(
+        env="dev",
+        s2s_secret="s2s-token",  # noqa: S106
+        wedap_callback_api_key="cb-key",
+        wedap_base_url="http://baffle:8021",
+        wedap_delivery_enabled=True,
+        recon_callback_hmac_secret="a" * 64,
+    )
+    assert isinstance(create_app(ok), FastAPI)
+
+
 def test_create_app_wires_wedap_import_base_url() -> None:
     """gw-internal 分体 base：import_base_url 配置透传进 WedapClient；空则回落 base_url。"""
     from app.core.config import Settings

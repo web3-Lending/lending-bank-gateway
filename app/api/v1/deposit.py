@@ -17,7 +17,6 @@ import datetime as dt
 import hashlib
 import logging
 from collections.abc import Awaitable, Callable
-from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import httpx
@@ -26,6 +25,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.deps import require_headers
 from app.clients.wedap import WedapError
+from app.core.amounts import AmountGuardError, parse_guarded_decimal
 from app.core.envelope import ok
 from app.models.query_audit import BalanceSnapshot, QueryAudit
 
@@ -122,16 +122,22 @@ async def deposit_balance_total(
                         )
                         continue
                     try:
-                        balance = Decimal(str(raw_balance))
-                    except InvalidOperation:
-                        balance = None
-                    # NaN/Infinity 能过 Decimal 构造但不是合法余额；adjusted()>=17
-                    # 超 Numeric(21,4) 整数容量，落库会炸——一并跳过。
-                    if balance is None or not balance.is_finite() or balance.adjusted() >= 17:
+                        balance = parse_guarded_decimal(raw_balance)
+                    except AmountGuardError:
+                        # 解析失败/NaN/Infinity/超 Numeric(21,4) 容量都不是合法余额——跳过。
                         logger.warning(
                             "Skipping snapshot for account %s: invalid balance %r",
                             acct.get("custAccountNo"),
                             raw_balance,
+                        )
+                        continue
+                    # 缺/空/纯空白 currencyCode 不允许编造 USD 落快照——错币种锚点比缺快照
+                    # 更糟；strip 归一（" USD"/"   " 这类空白形态不得形成无效币种快照）。
+                    currency = str(acct.get("currencyCode") or "").strip()
+                    if not currency:
+                        logger.warning(
+                            "Skipping snapshot for account %s: missing currencyCode",
+                            acct.get("custAccountNo"),
                         )
                         continue
                     session.add(
@@ -139,7 +145,7 @@ async def deposit_balance_total(
                             tenant_id=hdr["tenant_id"],
                             account_id=str(acct.get("custAccountNo")),
                             balance=balance,
-                            currency=str(acct.get("currencyCode", "USD")),
+                            currency=currency,
                             source_endpoint="deposit/balances/total",
                             captured_at=now,
                         )
@@ -286,16 +292,22 @@ async def internal_account_info(
         )
         return ok(data, trace_id=hdr["trace_id"])
     try:
-        balance = Decimal(str(raw_balance))
-    except InvalidOperation:
-        balance = None
-    # NaN/Infinity 能通过 Decimal 构造但不是合法余额；adjusted()>=17 超出
-    # Numeric(21,4) 的 17 位整数容量，落库会炸——一并跳过（codex HIGH）。
-    if balance is None or not balance.is_finite() or balance.adjusted() >= 17:
+        balance = parse_guarded_decimal(raw_balance)
+    except AmountGuardError:
+        # 解析失败/NaN/Infinity/超 Numeric(21,4) 容量都不是合法余额——跳过（codex HIGH）。
         logger.warning(
             "Skipping snapshot for internal account %s: invalid accountBalance %r",
             account_no,
             raw_balance,
+        )
+        return ok(data, trace_id=hdr["trace_id"])
+    # 缺/空/纯空白 currencyCode 不允许编造 USD 落快照——错币种锚点比缺快照更糟；
+    # strip 归一（" USD"/"   " 这类空白形态不得形成无效币种快照）。
+    currency = str(data.get("currencyCode") or "").strip()
+    if not currency:
+        logger.warning(
+            "Skipping snapshot for internal account %s: missing currencyCode",
+            account_no,
         )
         return ok(data, trace_id=hdr["trace_id"])
     try:
@@ -306,7 +318,7 @@ async def internal_account_info(
                         tenant_id=hdr["tenant_id"],
                         account_id=str(account_no),
                         balance=balance,
-                        currency=str(data.get("currencyCode", "USD")),
+                        currency=currency,
                         source_endpoint="deposit/internal-accounts/info",
                         captured_at=dt.datetime.now(dt.UTC),
                     )

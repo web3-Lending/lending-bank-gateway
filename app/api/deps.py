@@ -1,12 +1,13 @@
 """FastAPI 依赖：header 校验 + 金额解析 + 明细一致性前置校验。"""
 
 import datetime as dt
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, Request
 
+from app.core.amounts import MAX_INTEGER_DIGITS, AmountGuardError, parse_guarded_decimal
 from app.core.context import current_ids
 
 
@@ -95,25 +96,20 @@ _COLUMN_MAX_SCALE = 4  # Numeric(21,4) 列存储兜底（无币种上下文时�
 
 
 def parse_amount(raw: Any, currency: str | None = None) -> Decimal:
+    # 解析/非有限/整数位容量三重守卫收口至共享原语（app/core/amounts.py），
+    # 此处只做 AmountGuardError → HTTP 400 报文翻译；正数性/scale 是本层语义，保留在下方。
+    _guard_msg = {
+        "unparseable": f"bad amount: {raw!r}",
+        "non_finite": f"amount must be finite: {raw!r}",
+        "over_capacity": f"amount exceeds {MAX_INTEGER_DIGITS} integer digits: {raw!r}",
+    }
     try:
-        value = Decimal(str(raw))
-    except (InvalidOperation, ValueError, TypeError) as exc:
+        value = parse_guarded_decimal(raw)
+    except AmountGuardError as exc:
         raise HTTPException(
             400,
-            detail={"code": "GW_400_VALIDATION", "message": f"bad amount: {raw!r}"},
+            detail={"code": "GW_400_VALIDATION", "message": _guard_msg[exc.reason]},
         ) from exc
-    # 非有限值（NaN/sNaN/Infinity）是合法 Decimal 但金额非法：
-    # NaN 会让下面的 `value <= 0` 比较抛 InvalidOperation（→ 未捕获 500）；
-    # Infinity 能通过 `<= 0` 检查被当正数放行，最终在 Numeric(21,4) 落库时炸 500。
-    # 统一在此显式拒为 400，避免脏金额穿透成 500。
-    if not value.is_finite():
-        raise HTTPException(
-            400,
-            detail={
-                "code": "GW_400_VALIDATION",
-                "message": f"amount must be finite: {raw!r}",
-            },
-        )
     if value <= 0:
         raise HTTPException(
             400,

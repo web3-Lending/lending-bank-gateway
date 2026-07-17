@@ -453,6 +453,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "GW_WEDAP_IMPORT_API_KEY is empty — web2-core app-layer auth would "
                     "reject every notify/presign at runtime."
                 )
+        # ④ recon 回调 HMAC secret 空 → 客户端静默发 64 个 0 占位签名，recon 侧验签
+        #   持续 401（fail-open）。strip()：该字段不在 _empty_env_as_none validator
+        #   白名单，纯空白 "   " 是 truthy 但同样签不出合法签名。local/test 豁免。
+        if (
+            settings.env not in ("local", "test")
+            and not settings.recon_callback_hmac_secret.strip()
+        ):
+            raise RuntimeError(
+                "GW_RECON_CALLBACK_HMAC_SECRET 必须在非 local/test 环境且投递开启时配置"
+                "（recon 回调签名 fail-fast，资金网关禁 fail-open：空值时客户端静默发占位签名）"
+            )
     app.state.wedap = WedapClient(
         base_url=settings.wedap_base_url,
         timeout_seconds=settings.wedap_timeout_seconds,

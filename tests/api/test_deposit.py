@@ -658,6 +658,61 @@ def test_balance_total_nonfinite_or_overflow_skips_snapshot(
     assert asyncio.run(_get_snapshots(sf, tenant_id="OCBC")) == []
 
 
+def test_balance_total_missing_currency_skips_snapshot(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """accounts 行缺/空/纯空白 currencyCode → 跳过该行快照（不再编造 USD），好行照常落。
+
+    好行的 currencyCode 带首尾空白 → strip 归一后落库（防 " USD" 形成无效币种快照）。
+    """
+    wedap = client.app.state.wedap  # type: ignore[union-attr]
+    wedap.get_deposit_balance_total.return_value = {
+        "accounts": [
+            {"custAccountNo": "ACC_NO_CCY", "balance": "10.0000"},
+            {"custAccountNo": "ACC_EMPTY_CCY", "balance": "20.0000", "currencyCode": ""},
+            {"custAccountNo": "ACC_BLANK_CCY", "balance": "30.0000", "currencyCode": "   "},
+            {"custAccountNo": "ACC_GOOD", "balance": "77.0000", "currencyCode": " HKD "},
+        ]
+    }
+
+    with caplog.at_level(logging.WARNING, logger="app.api.v1.deposit"):
+        r = client.get("/api/v1/deposit/balances/total", params={"userId": "U1"}, headers=HEADERS)
+
+    assert r.status_code == 200
+    assert (
+        sum("missing currencyCode" in rec.message for rec in caplog.records) == 3
+    )  # 缺键 + 空串 + 纯空白各一
+    sf = client.app.state.session_factory  # type: ignore[union-attr]
+    snapshots = asyncio.run(_get_snapshots(sf, tenant_id="OCBC"))
+    assert [s.account_id for s in snapshots] == ["ACC_GOOD"]
+    assert snapshots[0].currency == "HKD"
+
+
+@pytest.mark.parametrize("payload_extra", [{}, {"currencyCode": ""}, {"currencyCode": "   "}])
+def test_internal_account_missing_currency_skips_snapshot(
+    client: TestClient, caplog: pytest.LogCaptureFixture, payload_extra: dict[str, str]
+) -> None:
+    """currencyCode 缺失/空/纯空白 → 跳过快照（不再编造 USD），响应 200 原样透传。"""
+    wedap = client.app.state.wedap  # type: ignore[union-attr]
+    wedap.get_internal_account_info.return_value = {
+        "accountNo": "INT00101001USD",
+        "accountBalance": "123.4500",
+        **payload_extra,
+    }
+
+    with caplog.at_level(logging.WARNING, logger="app.api.v1.deposit"):
+        r = client.get(
+            "/api/v1/deposit/internal-accounts/info",
+            params={"accountNo": "INT00101001USD"},
+            headers=HEADERS,
+        )
+
+    assert r.status_code == 200
+    assert any("missing currencyCode" in rec.message for rec in caplog.records)
+    sf = client.app.state.session_factory  # type: ignore[union-attr]
+    assert asyncio.run(_get_snapshots(sf, tenant_id="OCBC")) == []
+
+
 def test_balance_total_snapshot_write_failure_does_not_pollute_response(
     client: TestClient, caplog: pytest.LogCaptureFixture
 ) -> None:
