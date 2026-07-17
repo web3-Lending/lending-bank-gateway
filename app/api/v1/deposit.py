@@ -108,34 +108,49 @@ async def deposit_balance_total(
         ),
     )
     now = dt.datetime.now(dt.UTC)
-    async with request.app.state.session_factory() as session:
-        async with session.begin():
-            for acct in data.get("accounts", []):
-                if acct.get("custAccountNo") is None:
-                    logger.warning(
-                        "Skipping snapshot for account: missing custAccountNo in %r",
-                        acct,
+    try:
+        async with request.app.state.session_factory() as session:
+            async with session.begin():
+                for acct in data.get("accounts", []):
+                    raw_balance = acct.get("balance")
+                    if acct.get("custAccountNo") is None or raw_balance is None:
+                        # 缺 balance 不允许默认 0 落快照——0 会被当成真实余额锚点
+                        # 造成假对平（与 internal-accounts/info 同口径）。
+                        logger.warning(
+                            "Skipping snapshot for account: missing custAccountNo/balance in %r",
+                            acct,
+                        )
+                        continue
+                    try:
+                        balance = Decimal(str(raw_balance))
+                    except InvalidOperation:
+                        balance = None
+                    # NaN/Infinity 能过 Decimal 构造但不是合法余额；adjusted()>=17
+                    # 超 Numeric(21,4) 整数容量，落库会炸——一并跳过。
+                    if balance is None or not balance.is_finite() or balance.adjusted() >= 17:
+                        logger.warning(
+                            "Skipping snapshot for account %s: invalid balance %r",
+                            acct.get("custAccountNo"),
+                            raw_balance,
+                        )
+                        continue
+                    session.add(
+                        BalanceSnapshot(
+                            tenant_id=hdr["tenant_id"],
+                            account_id=str(acct.get("custAccountNo")),
+                            balance=balance,
+                            currency=str(acct.get("currencyCode", "USD")),
+                            source_endpoint="deposit/balances/total",
+                            captured_at=now,
+                        )
                     )
-                    continue
-                try:
-                    balance = Decimal(str(acct.get("balance", "0")))
-                except InvalidOperation:
-                    logger.warning(
-                        "Skipping snapshot for account %s: invalid balance %r",
-                        acct.get("custAccountNo"),
-                        acct.get("balance"),
-                    )
-                    continue
-                session.add(
-                    BalanceSnapshot(
-                        tenant_id=hdr["tenant_id"],
-                        account_id=str(acct.get("custAccountNo")),
-                        balance=balance,
-                        currency=str(acct.get("currencyCode", "USD")),
-                        source_endpoint="deposit/balances/total",
-                        captured_at=now,
-                    )
-                )
+    except SQLAlchemyError:
+        # 快照是旁路增强：审计与上游查询已成功后，DB 抖动/落库失败不允许把
+        # 200 变 500（与 internal-accounts/info 同口径）。只告警，响应照常。
+        logger.warning(
+            "Snapshot write failed for balances/total; query response unaffected",
+            exc_info=True,
+        )
     return ok(data, trace_id=hdr["trace_id"])
 
 
