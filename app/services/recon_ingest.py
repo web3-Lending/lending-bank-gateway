@@ -15,13 +15,14 @@ Sheet 布局：
 from __future__ import annotations
 
 import logging
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any
 
 from openpyxl import load_workbook  # type: ignore[import-untyped]
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.amounts import AmountGuardError, parse_guarded_decimal
 from app.models.recon import (
     ReconResultDiff,
     ReconResultSourceBank,
@@ -84,21 +85,22 @@ class ColumnDrift(Exception):
     """Sheet 列头与期望不符，或必要 Sheet 缺失。"""
 
 
-def _dec(v: Any, column: str | None = None) -> Decimal | None:
-    """将单元格值转为 Decimal；空值返回 None；非空非法值抛 DataQualityError。
+def _dec(v: Any, column: str) -> Decimal | None:
+    """将单元格值转为 Decimal；空值返回 None；非空非法/非有限/超容量值抛 DataQualityError。
+
+    对账金额禁静默落库：NaN/Infinity 落库后判等恒 false = 静默漏报（比 500 更糟）。
+    column 必传（原可选 column→None 静默路径是 fail-open，生产调用点全部显式传列名）。
 
     Args:
         v: 单元格原值。
-        column: 列名，仅在非空解析失败时填入 DataQualityError。
+        column: 列名，非空解析/守卫失败时填入 DataQualityError。
     """
     if v is None or v == "":
         return None
     try:
-        return Decimal(str(v))
-    except InvalidOperation as exc:
-        if column is not None:
-            raise DataQualityError(column, v) from exc
-        return None
+        return parse_guarded_decimal(v)
+    except AmountGuardError as exc:
+        raise DataQualityError(column, v) from exc
 
 
 def _str(v: Any) -> str | None:

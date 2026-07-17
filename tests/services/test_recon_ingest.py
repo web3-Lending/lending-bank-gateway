@@ -582,13 +582,22 @@ async def test_ingest_pending_once(factory, tmp_path, monkeypatch) -> None:
 
 
 def test_dec_none_and_empty() -> None:
-    """_dec(None) 和 _dec('') 均返回 None；无效字符串也返回 None。"""
+    """_dec(None) 和 _dec('') 均返回 None；合法值正常解析（column 必传化后）。"""
     from app.services.recon_ingest import _dec
 
-    assert _dec(None) is None
-    assert _dec("") is None
-    assert _dec("not-a-number") is None
-    assert _dec("123.45") == Decimal("123.45")
+    assert _dec(None, column="amount") is None
+    assert _dec("", column="amount") is None
+    assert _dec("123.45", column="amount") == Decimal("123.45")
+
+
+@pytest.mark.parametrize("dirty", ["NaN", "sNaN", "Infinity", "-Infinity", "1E+17"])
+def test_dec_rejects_non_finite_and_over_capacity(dirty: str) -> None:
+    """NaN/Infinity/超容量对账金额禁静默落库 → DataQualityError（原静默落 NaN 判等恒 false）。"""
+    from app.services.recon_ingest import DataQualityError, _dec
+
+    with pytest.raises(DataQualityError) as exc_info:
+        _dec(dirty, column="amount")
+    assert exc_info.value.column == "amount"
 
 
 def test_int_none_empty_and_invalid() -> None:
@@ -854,13 +863,6 @@ def test_data_quality_error_attributes() -> None:
     assert err.value == "abc"
     assert "column='amount'" in str(err)
     assert "value='abc'" in str(err)
-
-
-def test_dec_invalid_without_column_returns_none() -> None:
-    """_dec 无效值 + column=None → 返回 None（不抛异常）。"""
-    from app.services.recon_ingest import _dec
-
-    assert _dec("not-a-number", column=None) is None
 
 
 def test_dec_invalid_with_column_raises() -> None:
