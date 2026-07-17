@@ -251,8 +251,11 @@ def test_collect_empty_txnamount_falls_back_or_400(client: TestClient) -> None:
     assert "missing txnAmount" in r.json()["error"]["message"]
 
 
-def test_distribute_without_recipients_passes_validation(client: TestClient) -> None:
-    """distribute-to-users 缺 recipients → 跳过明细校验（金额 Σ=0），200 受理（契约 C 薄透传）。"""
+def test_distribute_without_recipients_400(client: TestClient) -> None:
+    """distribute-to-users 缺 recipients → 400（2026-07-17 决策①方案乙）。
+
+    原「跳过校验 200 受理」会让金额 Σ=0 落 bank_txn_order 台账锚点并污染
+    refund 全额护栏基准（R3-DST-07171057 实锤）；wedap 契约无「自动分配」语义。"""
     body = {
         "bizSeqNo": "DST-20260611-0002000000004",
         "transType": "BANK_FUND_DISTRIBUTE",
@@ -260,7 +263,8 @@ def test_distribute_without_recipients_passes_validation(client: TestClient) -> 
     }
     h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-dst-no-rcp"}
     r = client.post("/api/v1/bank-funds/distribute-to-users", json=body, headers=h)
-    assert r.status_code == 200, r.json()
+    assert r.status_code == 400, r.json()
+    assert "recipients" in r.json()["error"]["message"]
 
 
 def test_distribute_amount_summed_and_recipients_passthrough(client: TestClient) -> None:
@@ -317,11 +321,11 @@ def test_distribute_empty_recipients_400(client: TestClient) -> None:
     h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-empty-rcp"}
     r = client.post("/api/v1/bank-funds/distribute-to-users", json=body, headers=h)
     assert r.status_code == 400
-    assert "empty recipients" in r.json()["error"]["message"]
+    assert "recipients" in r.json()["error"]["message"]
 
 
-def test_distribute_recipient_without_amount_skips_sum(client: TestClient) -> None:
-    """recipient 缺 distributeAmount（wedap 自动分配场景）→ sum 校验跳过，金额 Σ=0，200 受理。"""
+def test_distribute_recipient_without_amount_400(client: TestClient) -> None:
+    """recipient 缺 distributeAmount → 400（决策①方案乙：金额必填，缺省≠自动分配）。"""
     body = {
         "bizSeqNo": "DST-20260611-0002000000013",
         "transType": "BANK_FUND_DISTRIBUTE",
@@ -330,12 +334,15 @@ def test_distribute_recipient_without_amount_skips_sum(client: TestClient) -> No
     }
     h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-no-amt"}
     r = client.post("/api/v1/bank-funds/distribute-to-users", json=body, headers=h)
-    assert r.status_code == 200, r.json()
+    assert r.status_code == 400, r.json()
+    assert "recipients[0].distributeAmount" in r.json()["error"]["message"]
 
 
-def test_distribute_recipient_null_amount_skipped(client: TestClient) -> None:
-    """recipient distributeAmount=null 与缺省键一致：跳过求和（wedap 自动分配），200 受理。
-    回归 review Finding 2：原 str(None) 会误炸 400 "bad amount: None"。"""
+def test_distribute_recipient_null_amount_400(client: TestClient) -> None:
+    """recipient distributeAmount=null 与缺省键一致 → 400（决策①方案乙）。
+
+    历史演化：e480f55 曾把 null 归一为「自动分配跳过求和」防 str(None) 误炸；
+    2026-07-17 审计定论该语义在 wedap 契约中不存在，缺省/null 一律显式拒收。"""
     body = {
         "bizSeqNo": "DST-20260611-0002000000014",
         "transType": "BANK_FUND_DISTRIBUTE",
@@ -344,4 +351,5 @@ def test_distribute_recipient_null_amount_skipped(client: TestClient) -> None:
     }
     h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-null-amt"}
     r = client.post("/api/v1/bank-funds/distribute-to-users", json=body, headers=h)
-    assert r.status_code == 200, r.json()
+    assert r.status_code == 400, r.json()
+    assert "recipients[0].distributeAmount" in r.json()["error"]["message"]

@@ -30,6 +30,9 @@ class Settings(BaseSettings):
         return mode
 
     db_url: str = "sqlite+aiosqlite:///:memory:"
+    # 显式 opt-in 才允许非 local/test 环境用 sqlite（仅限「模拟 dev 行为分支的单测」，
+    # 语义同 recon 的 RECON_ALLOW_INSECURE_S2S 模式）；生产部署禁开。
+    allow_sqlite_db: bool = False
     wedap_base_url: str = "http://localhost:8021"
     wedap_timeout_seconds: float = 10.0
     bank_timezone: str = "Asia/Hong_Kong"

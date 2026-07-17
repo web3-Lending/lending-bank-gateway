@@ -310,14 +310,18 @@ def test_patch_explicit_null_clears_currency_note() -> None:
         assert patched["data"]["note"] is None
         # 字段缺省 = 不动
         untouched = await patch_platform_account(
-            row_id, PlatformAccountPatch(status="disabled"), req  # type: ignore[arg-type]
+            row_id,
+            PlatformAccountPatch(status="disabled"),
+            req,  # type: ignore[arg-type]
         )
         assert untouched["data"]["currency"] is None
         # 必填列显式 null → 400
         for f in ("purpose", "allowedScopes", "status"):
             with pytest.raises(HTTPException) as exc:
                 await patch_platform_account(
-                    row_id, PlatformAccountPatch.model_validate({f: None}), req  # type: ignore[arg-type]
+                    row_id,
+                    PlatformAccountPatch.model_validate({f: None}),
+                    req,  # type: ignore[arg-type]
                 )
             assert exc.value.status_code == 400
 
@@ -331,6 +335,7 @@ def test_admin_caller_token_binding_fail_fast() -> None:
         "s2s_secret": "shared-secret",
         "wedap_callback_api_key": "cb-key",
         "admin_callers": "fund-ops",
+        "allow_sqlite_db": True,
     }
     with pytest.raises(RuntimeError, match="GW_ADMIN_CALLERS"):
         create_app(settings=Settings(**base))
@@ -347,6 +352,7 @@ def test_admin_caller_empty_token_not_bound_fail_fast() -> None:
         "s2s_secret": "shared-secret",
         "wedap_callback_api_key": "cb-key",
         "admin_callers": "fund-ops",
+        "allow_sqlite_db": True,
     }
     for bad in ("fund-ops:", "fund-ops:   ", ":tok", "fund-ops"):
         with pytest.raises(RuntimeError, match="GW_ADMIN_CALLERS"):
@@ -373,6 +379,7 @@ def test_hybrid_s2s_existing_callers_unaffected_and_admin_needs_token() -> None:
             wedap_callback_api_key="cb-key",
             admin_callers="fund-ops",
             s2s_caller_tokens="fund-ops:tok-1",
+            allow_sqlite_db=True,  # 模拟 dev 分支 + 内存库（过 db_url fail-fast 守卫）
         )
     )
 
@@ -425,6 +432,7 @@ def test_admin_token_bound_defense_in_depth_direct() -> None:
             wedap_callback_api_key="cb-key",
             admin_callers="fund-ops",
             s2s_caller_tokens="fund-ops:tok-1",
+            allow_sqlite_db=True,  # 模拟 dev 分支 + 内存库（过 db_url fail-fast 守卫）
         )
     )
 
@@ -445,7 +453,7 @@ def test_admin_token_bound_defense_in_depth_direct() -> None:
 
 def test_credential_collision_fail_fast() -> None:
     """codex R3 P1：token==共享 secret 或 caller 间 token 重复 → 启动期拦截。"""
-    base = {"env": "dev", "wedap_callback_api_key": "cb-key"}
+    base = {"env": "dev", "wedap_callback_api_key": "cb-key", "allow_sqlite_db": True}
     # token 与共享 secret 相同
     with pytest.raises(RuntimeError, match="GW_S2S_SECRET 相同"):
         create_app(

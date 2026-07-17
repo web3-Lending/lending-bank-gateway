@@ -344,6 +344,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "GW_WEDAP_CALLBACK_API_KEY 必须在非 local/test 环境配置"
             "（wedap 回调入口 fail-fast，资金网关禁 fail-open）"
         )
+    if (
+        settings.env not in ("local", "test")
+        and settings.db_url.startswith("sqlite")
+        and not settings.allow_sqlite_db
+    ):
+        raise RuntimeError(
+            "GW_DB_URL 必须在非 local/test 环境配置真实数据库"
+            "（fail-fast，内存 sqlite 会让 readyz 假绿而业务全 500；"
+            "仅模拟 dev 分支的单测可显式 GW_ALLOW_SQLITE_DB=true 豁免）"
+        )
     # admin caller↔凭证绑定（codex P0）：共享 secret 模式下 X-Caller-Service 可被任何
     # 持 secret 的服务伪造——admin_callers 一旦启用（非空），每个 admin caller 必须在
     # GW_S2S_CALLER_TOKENS 里有专属 token（密码学绑定身份），否则白名单形同虚设。
