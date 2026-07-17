@@ -611,3 +611,72 @@ def test_internal_account_snapshot_write_failure_does_not_pollute_response(
     )
     assert count == 1
     assert asyncio.run(_get_snapshots(real_factory, tenant_id="OCBC")) == []
+
+
+# ── balances/total 快照口径统一（与 internal-accounts/info 同款守卫）────────────
+
+
+def test_balance_total_missing_balance_skips_snapshot(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """accounts 行缺 balance 键 → 跳过该行（不再默认 0 落快照造假锚点），好行照常落。"""
+    wedap = client.app.state.wedap  # type: ignore[union-attr]
+    wedap.get_deposit_balance_total.return_value = {
+        "accounts": [
+            {"custAccountNo": "ACC_NO_BAL", "currencyCode": "USD"},
+            {"custAccountNo": "ACC_GOOD", "balance": "77.0000", "currencyCode": "USD"},
+        ]
+    }
+
+    with caplog.at_level(logging.WARNING, logger="app.api.v1.deposit"):
+        r = client.get("/api/v1/deposit/balances/total", params={"userId": "U1"}, headers=HEADERS)
+
+    assert r.status_code == 200
+    assert any("missing custAccountNo/balance" in rec.message for rec in caplog.records)
+    sf = client.app.state.session_factory  # type: ignore[union-attr]
+    snapshots = asyncio.run(_get_snapshots(sf, tenant_id="OCBC"))
+    assert [s.account_id for s in snapshots] == ["ACC_GOOD"]
+    assert snapshots[0].balance == Decimal("77.0000")
+
+
+@pytest.mark.parametrize("bad_balance", ["NaN", "Infinity", "-Infinity", "1E+17"])
+def test_balance_total_nonfinite_or_overflow_skips_snapshot(
+    client: TestClient, caplog: pytest.LogCaptureFixture, bad_balance: str
+) -> None:
+    """NaN/Infinity/超 Numeric(21,4) 容量的行跳过快照（与 internal-accounts 同守卫）。"""
+    wedap = client.app.state.wedap  # type: ignore[union-attr]
+    wedap.get_deposit_balance_total.return_value = {
+        "accounts": [{"custAccountNo": "ACC_BAD", "balance": bad_balance, "currencyCode": "USD"}]
+    }
+
+    with caplog.at_level(logging.WARNING, logger="app.api.v1.deposit"):
+        r = client.get("/api/v1/deposit/balances/total", params={"userId": "U1"}, headers=HEADERS)
+
+    assert r.status_code == 200
+    assert any("invalid balance" in rec.message for rec in caplog.records)
+    sf = client.app.state.session_factory  # type: ignore[union-attr]
+    assert asyncio.run(_get_snapshots(sf, tenant_id="OCBC")) == []
+
+
+def test_balance_total_snapshot_write_failure_does_not_pollute_response(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """快照写库失败（SQLAlchemyError）→ 仍 200 + 审计已落 + 无快照（同口径隔离）。"""
+    real_factory = client.app.state.session_factory  # type: ignore[union-attr]
+    client.app.state.session_factory = _SnapshotFailingFactory(real_factory)  # type: ignore[union-attr]
+    try:
+        with caplog.at_level(logging.WARNING, logger="app.api.v1.deposit"):
+            r = client.get(
+                "/api/v1/deposit/balances/total", params={"userId": "U1"}, headers=HEADERS
+            )
+    finally:
+        client.app.state.session_factory = real_factory  # type: ignore[union-attr]
+
+    assert r.status_code == 200
+    assert r.json()["data"] == BALANCE_DATA
+    assert any("Snapshot write failed" in rec.message for rec in caplog.records)
+    count = asyncio.run(
+        _count_audit_rows(real_factory, tenant_id="OCBC", endpoint="deposit/balances/total")
+    )
+    assert count == 1
+    assert asyncio.run(_get_snapshots(real_factory, tenant_id="OCBC")) == []
