@@ -195,6 +195,29 @@ def test_bad_body_400(client: TestClient, bad_body: dict[str, Any]) -> None:
     assert r.json()["error"]["code"] == "GW_400_VALIDATION"
 
 
+def _body_with_total_count(value: Any) -> dict[str, Any]:
+    return {**BODY, "files": [{**BODY["files"][0], "totalCount": value}]}
+
+
+@pytest.mark.parametrize(
+    "total_count",
+    ["abc", None, 5.5, True, -1],
+    ids=["str", "null", "float_truncation", "bool", "negative"],
+)
+def test_total_count_type_guard_400(client: TestClient, total_count: Any) -> None:
+    """totalCount 非「非负 int」→ 400（防裸 int() 的 500 穿透 / float 静默截断 / bool 变 1）。
+
+    diff_count 是 recon_result_task 对账结果锚点字段，参与 count_mismatch 判定，
+    静默截断比报错严重——错误计数会制造假的「数量一致/不一致」判定。
+    """
+    r = client.post(
+        "/api/v1/recon/notify", json=_body_with_total_count(total_count), headers=HEADERS
+    )
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "GW_400_VALIDATION"
+    assert "totalCount" in r.json()["error"]["message"]
+
+
 # ---------------------------------------------------------------------------
 # 5. 缺 X-Tenant-Id → 400；无 caller → 401
 # ---------------------------------------------------------------------------
