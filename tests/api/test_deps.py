@@ -43,6 +43,16 @@ def test_parse_amount_rejects_unparseable_400() -> None:
     assert exc_info.value.status_code == 400
 
 
+@pytest.mark.parametrize("raw", ["100000000000000000", "1E+17"])
+def test_parse_amount_rejects_over_capacity_400(raw: str) -> None:
+    """整数位 ≥17 超出 Numeric(21,4) 整数容量 → 400，而非落库炸 500。"""
+    with pytest.raises(HTTPException) as exc_info:
+        parse_amount(raw)
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail["code"] == "GW_400_VALIDATION"  # type: ignore[index]
+    assert "integer digits" in exc_info.value.detail["message"]  # type: ignore[index]
+
+
 def test_no_detail_key_passes() -> None:
     """明细键不在 body 中 → 跳过，不报错。"""
     validate_detail_consistency(
