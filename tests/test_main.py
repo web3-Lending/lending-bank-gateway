@@ -87,13 +87,30 @@ def test_create_app_prod_without_secret_raises(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_create_app_prod_with_secret_ok(monkeypatch: pytest.MonkeyPatch) -> None:
-    """GW_ENV=prod + 两个 secret（S2S + wedap 回调 apikey）已设置 → create_app 正常建 app。"""
+    """GW_ENV=prod + 两个 secret + 真实 db_url 已设置 → create_app 正常建 app。"""
     get_settings.cache_clear()
     monkeypatch.setenv("GW_ENV", "prod")
     monkeypatch.setenv("GW_S2S_SECRET", "super-secret-token")
     monkeypatch.setenv("GW_WEDAP_CALLBACK_API_KEY", "super-secret-callback-key")
+    monkeypatch.setenv("GW_DB_URL", "mysql+asyncmy://u:p@db:3306/lending_bank_gateway")
     result = create_app()
     assert isinstance(result, FastAPI)
+    get_settings.cache_clear()
+
+
+def test_create_app_prod_with_sqlite_db_url_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GW_ENV=prod 且 db_url 仍是 sqlite（缺省或误配）→ RuntimeError（fail-fast）。
+
+    内存 sqlite 会让 readyz 的 SELECT 1 假绿、业务请求因无表全 500——
+    env 透传丢失是真实故障模式，必须启动期拦截而非静默降级。
+    """
+    get_settings.cache_clear()
+    monkeypatch.setenv("GW_ENV", "prod")
+    monkeypatch.setenv("GW_S2S_SECRET", "super-secret-token")
+    monkeypatch.setenv("GW_WEDAP_CALLBACK_API_KEY", "super-secret-callback-key")
+    monkeypatch.delenv("GW_DB_URL", raising=False)
+    with pytest.raises(RuntimeError, match="GW_DB_URL"):
+        create_app()
     get_settings.cache_clear()
 
 
@@ -460,6 +477,7 @@ def test_create_app_delivery_without_recon_hmac_secret_fails_fast(empty_secret: 
         env="dev",
         s2s_secret="s2s-token",  # noqa: S106  # 测试固定值，过既有 dev 守卫
         wedap_callback_api_key="cb-key",
+        db_url="mysql+asyncmy://u:p@db:3306/gw",  # 过 db_url fail-fast 守卫
         wedap_base_url="http://baffle:8021",
         wedap_delivery_enabled=True,
         recon_callback_hmac_secret=empty_secret,
@@ -477,6 +495,7 @@ def test_create_app_delivery_disabled_without_recon_hmac_secret_ok() -> None:
         env="dev",
         s2s_secret="s2s-token",  # noqa: S106
         wedap_callback_api_key="cb-key",
+        db_url="mysql+asyncmy://u:p@db:3306/gw",
         wedap_base_url="http://baffle:8021",
         wedap_delivery_enabled=False,
         recon_callback_hmac_secret="",
@@ -505,6 +524,7 @@ def test_create_app_delivery_with_recon_hmac_secret_ok() -> None:
         env="dev",
         s2s_secret="s2s-token",  # noqa: S106
         wedap_callback_api_key="cb-key",
+        db_url="mysql+asyncmy://u:p@db:3306/gw",
         wedap_base_url="http://baffle:8021",
         wedap_delivery_enabled=True,
         recon_callback_hmac_secret="a" * 64,
