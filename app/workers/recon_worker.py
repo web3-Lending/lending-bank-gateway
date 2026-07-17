@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.clients.s3 import S3FileClient
 from app.models.recon import ReconResultTask
-from app.services.recon_ingest import ColumnDrift, parse_and_land
+from app.services.recon_ingest import ColumnDrift, DataQualityError, parse_and_land
 
 logger = logging.getLogger(__name__)
 
@@ -134,9 +134,12 @@ async def ingest_pending_once(
         # ── 解析落库 ─────────────────────────────────────────────────────
         try:
             await parse_and_land(factory, task_id=tid, xlsx_path=dest)
-        except ColumnDrift:
-            # ColumnDrift 已由 parse_and_land 自置 FAILED，不重复处理
-            logger.exception("recon ingest parse failed (ColumnDrift) %s v%s", task_no, version)
+        except (ColumnDrift, DataQualityError) as exc:
+            # 二者已由 parse_and_land 自置 FAILED + 明细留痕（drift 信息 / data_error
+            # 的 column+value）——worker 层不得再置位，覆盖会把明细冲掉只剩异常名。
+            logger.exception(
+                "recon ingest parse failed (%s) %s v%s", type(exc).__name__, task_no, version
+            )
         except Exception as exc:
             # 其它异常（DataQualityError / RuntimeError / ...）→ 置 FAILED + 留痕
             logger.exception(

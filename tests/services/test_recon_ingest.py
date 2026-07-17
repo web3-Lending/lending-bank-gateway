@@ -1170,6 +1170,59 @@ async def test_worker_parse_runtime_error_fails_task_continues(
     assert t_ok_row.status == "PARSED"
 
 
+@pytest.mark.asyncio
+async def test_worker_data_quality_error_keeps_detail(factory, tmp_path, monkeypatch) -> None:
+    """完整 worker 链路：脏金额（NaN）→ task FAILED 且保留 parse_and_land 写入的
+    data_error 明细（column/value），worker 层不得用 parse_error 覆盖冲掉明细。"""
+    from app.clients.s3 import S3FileClient
+    from app.workers.recon_worker import ingest_pending_once
+
+    xlsx_dirty = tmp_path / "dirty_worker.xlsx"
+    wb = __import__("openpyxl", fromlist=["Workbook"]).Workbook()
+    ws = wb.active
+    ws.title = "Differences"
+    ws.append(DIFF_HEADER)
+    # wedap_amount = "NaN"（守卫拒收的脏金额）
+    ws.append(["AMOUNT", "DSB-DQ1", "BANK-DQ1", "NaN", "99.9900", "0.0100", "SUCCESS", "SETTLED"])
+    w2 = wb.create_sheet("WeDAP Source")
+    w2.append(WEDAP_HEADER)
+    w3 = wb.create_sheet("Bank Source")
+    w3.append(BANK_HEADER)
+    wb.save(xlsx_dirty)
+
+    async with factory() as session:
+        async with session.begin():
+            session.add(
+                _task(status="NOTIFIED", task_no="RECON-DQ-001", version=1, request_id="REQ-DQ-001")
+            )
+
+    from sqlalchemy import select
+
+    async with factory() as session:
+        tid = (await session.execute(select(ReconResultTask))).scalar_one().id
+
+    def fake_download(self, *, bucket, key, expected_md5, dest):
+        import shutil
+
+        shutil.copy(str(xlsx_dirty), dest)
+
+    monkeypatch.setattr(S3FileClient, "download_verified", fake_download)
+
+    s3 = S3FileClient(endpoint_url=None)
+    handled = await ingest_pending_once(factory, s3=s3, archive_dir=str(tmp_path / "arch_dq"))
+    assert handled == 1
+
+    async with factory() as session:
+        t_row = await session.get(ReconResultTask, tid)
+
+    assert t_row is not None
+    assert t_row.status == "FAILED"
+    assert t_row.column_check is not None
+    data_error = t_row.column_check.get("data_error")
+    assert data_error is not None and "wedap_amount" in data_error and "NaN" in data_error
+    assert "parse_error" not in t_row.column_check  # 明细不得被 worker 层覆盖
+
+
 # ───────────────────────── Test: 跨租户 supersede 隔离 ──────────────────────
 
 

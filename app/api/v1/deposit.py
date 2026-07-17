@@ -131,9 +131,10 @@ async def deposit_balance_total(
                             raw_balance,
                         )
                         continue
-                    currency_raw = acct.get("currencyCode")
-                    if not currency_raw:
-                        # 缺/空 currencyCode 不允许编造 USD 落快照——错币种锚点比缺快照更糟。
+                    # 缺/空/纯空白 currencyCode 不允许编造 USD 落快照——错币种锚点比缺快照
+                    # 更糟；strip 归一（" USD"/"   " 这类空白形态不得形成无效币种快照）。
+                    currency = str(acct.get("currencyCode") or "").strip()
+                    if not currency:
                         logger.warning(
                             "Skipping snapshot for account %s: missing currencyCode",
                             acct.get("custAccountNo"),
@@ -144,7 +145,7 @@ async def deposit_balance_total(
                             tenant_id=hdr["tenant_id"],
                             account_id=str(acct.get("custAccountNo")),
                             balance=balance,
-                            currency=str(currency_raw),
+                            currency=currency,
                             source_endpoint="deposit/balances/total",
                             captured_at=now,
                         )
@@ -300,9 +301,10 @@ async def internal_account_info(
             raw_balance,
         )
         return ok(data, trace_id=hdr["trace_id"])
-    currency_raw = data.get("currencyCode")
-    if not currency_raw:
-        # 缺/空 currencyCode 不允许编造 USD 落快照——错币种锚点比缺快照更糟。
+    # 缺/空/纯空白 currencyCode 不允许编造 USD 落快照——错币种锚点比缺快照更糟；
+    # strip 归一（" USD"/"   " 这类空白形态不得形成无效币种快照）。
+    currency = str(data.get("currencyCode") or "").strip()
+    if not currency:
         logger.warning(
             "Skipping snapshot for internal account %s: missing currencyCode",
             account_no,
@@ -316,7 +318,7 @@ async def internal_account_info(
                         tenant_id=hdr["tenant_id"],
                         account_id=str(account_no),
                         balance=balance,
-                        currency=str(currency_raw),
+                        currency=currency,
                         source_endpoint="deposit/internal-accounts/info",
                         captured_at=dt.datetime.now(dt.UTC),
                     )
