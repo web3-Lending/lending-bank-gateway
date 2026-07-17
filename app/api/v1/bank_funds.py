@@ -173,14 +173,29 @@ async def distribute_to_users(
     assert_idempotency_key_matches(request, body.bizSeqNo)
     payload = body.model_dump(mode="json", exclude_none=True)
     # 分发 wedap 契约无顶层总额：本地账本/幂等金额 = Σ recipients[].distributeAmount。
-    # distributeAmount 缺省/null 一致视为「wedap 自动分配」跳过求和（避免 str(None) 误炸 400）。
+    # distributeAmount 必填（2026-07-17 决策①方案乙）：「缺省=自动分配」在 wedap 契约中
+    # 不存在（旧注释是 e480f55 自产防御话术），真实调用方 lifecycel 恒带金额；缺省会让
+    # sum=0 落 bank_txn_order 台账锚点并污染 refund 全额护栏基准（R3-DST-07171057 实锤）。
     recipients = body.recipients or []
+    if not recipients:
+        raise HTTPException(
+            400,
+            detail={
+                "code": "GW_400_VALIDATION",
+                "message": "recipients is required for distribute",
+            },
+        )
+    for idx, r in enumerate(recipients):
+        if not isinstance(r, dict) or r.get("distributeAmount") is None:
+            raise HTTPException(
+                400,
+                detail={
+                    "code": "GW_400_VALIDATION",
+                    "message": f"recipients[{idx}].distributeAmount is required",
+                },
+            )
     amount = sum(
-        (
-            parse_amount(str(r["distributeAmount"]), body.currencyCode)
-            for r in recipients
-            if r.get("distributeAmount") is not None
-        ),
+        (parse_amount(str(r["distributeAmount"]), body.currencyCode) for r in recipients),
         Decimal("0"),
     )
     # total=None：分发无独立顶层总额，validate 仅做「非空 + 币种一致」，不做同义重复的 sum 校验

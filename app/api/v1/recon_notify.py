@@ -107,7 +107,7 @@ async def recon_notify(request: Request, body: dict[str, Any]) -> dict[str, Any]
             },
         )
 
-    # totalCount 类型守卫：落 recon_result_task.diff_count（对账结果锚点，参与 count_mismatch 判定）。
+    # totalCount 类型守卫：落 recon_result_task.diff_count（对账锚点，进 count_mismatch 判定）。
     # 裸 int() 会让 "abc"/null 穿透成 500、float 5.5 静默截断、bool True 变 1——全部拒 400。
     total_count = f["totalCount"]
     if isinstance(total_count, bool) or not isinstance(total_count, int) or total_count < 0:
