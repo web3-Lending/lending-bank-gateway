@@ -16,7 +16,7 @@
 容量上限默认 17、列 scale 默认 4（本仓金额列统一 Numeric(21,4)）；其它列由调用点传参。
 """
 
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Context, Decimal, InvalidOperation
 
 # 本仓金额列统一 Numeric(21,4)：整数位容量 = 21 - 4 = 17，小数位 4
 MAX_INTEGER_DIGITS = 17
@@ -45,8 +45,17 @@ def parse_guarded_decimal(
         raise AmountGuardError("unparseable", raw) from exc
     if not value.is_finite():
         raise AmountGuardError("non_finite", raw)
-    # 按目标列 scale 半进位量化后查容量（与 MySQL DECIMAL 舍入一致），防进位边界漏判
-    quantized = value.quantize(Decimal(1).scaleb(-column_scale), rounding=ROUND_HALF_UP)
+    if value.is_zero():
+        return value
+    # 明显溢出先拒、不量化——超大值（如 1E+24）quantize 需要的精度超默认 context
+    # prec=28 会抛 InvalidOperation 穿透（codex R2 P1）。
+    if value.adjusted() >= max_integer_digits:
+        raise AmountGuardError("over_capacity", raw)
+    # 容量内的边界值再按目标列 scale 半进位量化复查（与 MySQL DECIMAL 舍入一致，
+    # 防 99999999999999999.99995 这类进位顶破容量）；局部 context 给足精度，
+    # 不受进程 Decimal context 影响。
+    ctx = Context(prec=max_integer_digits + column_scale + 1, rounding=ROUND_HALF_UP)
+    quantized = value.quantize(Decimal(1).scaleb(-column_scale), context=ctx)
     if not quantized.is_zero() and quantized.adjusted() >= max_integer_digits:
         raise AmountGuardError("over_capacity", raw)
     return value

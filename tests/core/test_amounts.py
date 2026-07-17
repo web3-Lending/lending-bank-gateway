@@ -24,6 +24,11 @@ from app.core.amounts import MAX_INTEGER_DIGITS, AmountGuardError, parse_guarded
         # 量化进位边界（codex R1 P1）：原值 adjusted()=16 但 4dp 半进位后成 1E+17 溢出
         ("99999999999999999.99995", "over_capacity"),
         ("-99999999999999999.99995", "over_capacity"),
+        # 超大值（codex R2 P1）：默认 context prec=28 下 quantize 会抛 InvalidOperation，
+        # 必须走快速拒绝路径报 over_capacity 而非穿透
+        ("1E+24", "over_capacity"),
+        ("-1E+24", "over_capacity"),
+        ("1E+100", "over_capacity"),
     ],
 )
 def test_parse_guarded_decimal_rejects(raw: object, reason: str) -> None:
