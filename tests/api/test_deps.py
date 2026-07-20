@@ -489,13 +489,13 @@ def test_fee_non_dict_item_400() -> None:
     assert "each item requires feeAmount" in exc_info.value.detail["message"]
 
 
-def test_fee_first_item_missing_second_nan_400() -> None:
-    """费用明细首项缺字段 + 次项 NaN → 400（不因首项缺失而整体放行 · codex P1）。"""
+def test_fee_first_item_missing_field_400() -> None:
+    """费用明细首项缺 feeAmount → 400（不因后续项存在而整体放行 · codex P1）。"""
     with pytest.raises(HTTPException) as exc_info:
         validate_detail_consistency(
             {
                 "lenders": [{"txnAmount": "2.8000"}],
-                "feeDeductions": [{}, {"feeAmount": "NaN"}],
+                "feeDeductions": [{}, {"feeAmount": "0.2000"}],
             },
             total=Decimal("3.0000"),
             currency="USD",
@@ -505,6 +505,30 @@ def test_fee_first_item_missing_second_nan_400() -> None:
             fee_amount_field="feeAmount",
         )
     assert exc_info.value.status_code == 400
+    assert "each item requires feeAmount" in exc_info.value.detail["message"]
+
+
+def test_fee_second_item_nan_400() -> None:
+    """费用明细含合法项 + NaN 项 → 400（NaN 被 parse_amount 拦，真覆盖 NaN 解析路径）。
+
+    首项合法（append 成功）→ 走到次项 NaN → parse_amount raise → invalid feeAmount 400；
+    与「首项缺字段先 400」区分，确保 NaN 分支被独立覆盖（复核 agent 指出的测试诚实性）。
+    """
+    with pytest.raises(HTTPException) as exc_info:
+        validate_detail_consistency(
+            {
+                "lenders": [{"txnAmount": "2.8000"}],
+                "feeDeductions": [{"feeAmount": "0.1000"}, {"feeAmount": "NaN"}],
+            },
+            total=Decimal("3.0000"),
+            currency="USD",
+            detail_key="lenders",
+            amount_field="txnAmount",
+            fee_detail_key="feeDeductions",
+            fee_amount_field="feeAmount",
+        )
+    assert exc_info.value.status_code == 400
+    assert "invalid feeAmount in feeDeductions item" in exc_info.value.detail["message"]
 
 
 def test_fee_container_not_list_400() -> None:
