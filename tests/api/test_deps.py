@@ -537,6 +537,45 @@ def test_main_container_not_list_400() -> None:
     assert "lenders must be a list" in exc_info.value.detail["message"]
 
 
+def test_fee_strict_checked_even_when_main_escape_hatch() -> None:
+    """主明细走缺字段逃生口时，费用明细非法仍 400（费用校验不依赖主明细完整性·codex R2）。
+
+    lenders 缺 txnAmount 本会触发 strict=False 早退跳过 sum；但费用明细缺 feeAmount
+    应先被严格校验拦下，而非连带放行。
+    """
+    with pytest.raises(HTTPException) as exc_info:
+        validate_detail_consistency(
+            {
+                "lenders": [{"userId": "L1"}],  # 缺 txnAmount → 主明细逃生口
+                "feeDeductions": [{"feeType": "PENALTY"}],  # 缺 feeAmount → 应 400
+            },
+            total=Decimal("3.0000"),
+            currency="USD",
+            detail_key="lenders",
+            amount_field="txnAmount",
+            fee_detail_key="feeDeductions",
+            fee_amount_field="feeAmount",
+        )
+    assert exc_info.value.status_code == 400
+    assert "each item requires feeAmount" in exc_info.value.detail["message"]
+
+
+def test_fee_valid_but_main_escape_hatch_skips_sum() -> None:
+    """费用明细合法 + 主明细缺字段 → 费用校验过、主明细逃生口跳过 sum 比较（放行交 wedap）。"""
+    validate_detail_consistency(
+        {
+            "lenders": [{"userId": "L1"}],  # 缺 txnAmount → 逃生口
+            "feeDeductions": [{"feeType": "PENALTY", "feeAmount": "0.2000"}],  # 合法
+        },
+        total=Decimal("3.0000"),
+        currency="USD",
+        detail_key="lenders",
+        amount_field="txnAmount",
+        fee_detail_key="feeDeductions",
+        fee_amount_field="feeAmount",
+    )
+
+
 def test_fee_item_invalid_amount_400() -> None:
     """费用明细金额非法（超精度）→ 400 invalid feeAmount in feeDeductions item。"""
     with pytest.raises(HTTPException) as exc_info:

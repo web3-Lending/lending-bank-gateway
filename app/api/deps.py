@@ -268,20 +268,11 @@ def validate_detail_consistency(
     if total is None:
         return
 
-    # 主明细 sum：strict=False 保留「部分缺字段=wedap 自动分配」逃生口（缺则跳过 sum）
-    main_amounts = _collect_detail_amounts(
-        items,
-        amount_field=amount_field,
-        detail_key=detail_key,
-        currency=currency,
-        strict=False,
-    )
-    if main_amounts is None:
-        return
-
+    # 费用明细 strict=True 校验**先于**主明细逃生口：非法费用项（非 dict / 缺 feeAmount）
+    # 总是 400，不依赖主明细完整性——否则 lenders 缺字段走 strict=False 逃生口早退时，
+    # 会连带跳过费用严格校验（codex R2 early-exit）。fee_items 非空 ⇒ 上方守卫已确保
+    # fee_detail_key / fee_amount_field 均非 None。
     fee_amounts: list[Decimal] = []
-    # 费用明细 strict=True：非空则每项必须 dict + 含合法金额字段，缺则 400（不放绕过）
-    # fee_items 非空 ⇒ 上方守卫已确保 fee_detail_key / fee_amount_field 均非 None
     if fee_items and fee_amount_field and fee_detail_key:
         collected = _collect_detail_amounts(
             fee_items,
@@ -292,6 +283,18 @@ def validate_detail_consistency(
         )
         # strict=True 下缺字段/非 dict 已 raise，非空 fee_items 必得非空 list（不会是 None）
         fee_amounts = collected or []
+
+    # 主明细 sum：strict=False 保留「部分缺字段=wedap 自动分配」逃生口（缺则跳过 sum 比较，
+    # 由 wedap 兜底拦，R4.5b 既有设计）
+    main_amounts = _collect_detail_amounts(
+        items,
+        amount_field=amount_field,
+        detail_key=detail_key,
+        currency=currency,
+        strict=False,
+    )
+    if main_amounts is None:
+        return
 
     if sum(main_amounts) + sum(fee_amounts, Decimal("0")) != total:
         raise HTTPException(
