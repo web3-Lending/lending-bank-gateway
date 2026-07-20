@@ -149,16 +149,31 @@ def _collect_detail_amounts(
     amount_field: str,
     detail_key: str,
     currency: str,
+    strict: bool,
 ) -> list[Decimal] | None:
     """从明细列表求各项金额，做 per-currency 护栏（scale/positive/finite）。
 
-    - 任一项非 dict 或缺 amount_field → 返回 None（表示「部分缺 = wedap 自动分配」，
-      调用方据此跳过 sum 校验）。
+    - 任一项非 dict 或缺 amount_field：
+      - strict=False → 返回 None（「部分缺 = wedap 自动分配」逃生口，调用方跳过 sum）；
+        用于主明细（如 lenders.txnAmount）——wedap 可自动分配、缺字段由 wedap 兜底拦。
+      - strict=True → 400「invalid {detail_key} item: each item requires {amount_field}」；
+        用于费用明细（feeDeductions.feeAmount 契约必填、无自动分配语义），
+        禁止靠缺字段绕过 sum 三等式（codex P1）。
     - 金额解析失败 → 400「invalid {amount_field} in {detail_key} item」。
     """
     amounts: list[Decimal] = []
     for item in items:
         if not isinstance(item, dict) or amount_field not in item:
+            if strict:
+                raise HTTPException(
+                    400,
+                    detail={
+                        "code": "GW_400_VALIDATION",
+                        "message": (
+                            f"invalid {detail_key} item: each item requires {amount_field}"
+                        ),
+                    },
+                )
             return None
         try:
             amounts.append(parse_amount(str(item[amount_field]), currency))
@@ -196,13 +211,21 @@ def validate_detail_consistency(
     权威 wedap 契约 :169『从借款方扣除本金、利息、罚息、费用』+ 上游 admin-backend
     ``_align_amounts_for_baffle`` 硬绑 ``Σlender.txnAmount + Σfee.feeAmount == total``。
     故 fee_detail_key 提供时，sum 校验为 **Σ(主明细 amount_field) + Σ(费用明细 fee_amount_field)
-    == total**；费用明细缺失/空则退化为纯主明细校验（纯本息还款口径不变）。费用明细任一项
-    缺 fee_amount_field 同样跳过 sum（与主明细逃生口对称）。
+    == total**；费用明细缺失/空则退化为纯主明细校验（纯本息还款口径不变）。**费用明细走严格
+    模式**：非空时每项必须是 dict 且含合法 fee_amount_field（契约必填、无自动分配语义），
+    缺字段/非 dict → 400，禁止靠缺字段绕过三等式（codex P1）；这与主明细的「缺字段跳过」
+    逃生口刻意不对称——主明细（lenders）保留 wedap 自动分配语义 + wedap 兜底拦。
+    容器类型：detail_key / fee_detail_key 的值若非 list（extra=allow 可透传标量）→ 400。
     """
     if detail_key not in body or body[detail_key] is None:
         return
 
-    items: list[Any] = body[detail_key]
+    items = body[detail_key]
+    if not isinstance(items, list):
+        raise HTTPException(
+            400,
+            detail={"code": "GW_400_VALIDATION", "message": f"{detail_key} must be a list"},
+        )
     if not items:
         raise HTTPException(
             400,
@@ -212,10 +235,20 @@ def validate_detail_consistency(
             },
         )
 
-    # 费用明细（可选第二来源，如 feeDeductions）——key + 金额字段名齐备且非空才纳入
+    # 费用明细（可选第二来源，如 feeDeductions）——key + 金额字段名齐备且非 None 才纳入；
+    # 值必须是 list（extra=allow 可透传标量 → 显式 400，避免 [*fee_items] 展开抛 500，codex P1）
     fee_items: list[Any] = []
-    if fee_detail_key and fee_amount_field and body.get(fee_detail_key):
-        fee_items = body[fee_detail_key]
+    if fee_detail_key and fee_amount_field and body.get(fee_detail_key) is not None:
+        raw_fee = body[fee_detail_key]
+        if not isinstance(raw_fee, list):
+            raise HTTPException(
+                400,
+                detail={
+                    "code": "GW_400_VALIDATION",
+                    "message": f"{fee_detail_key} must be a list",
+                },
+            )
+        fee_items = raw_fee
 
     # currency mismatch 校验（主明细 + 费用明细，先于 sum，尽早拦截）
     for item in [*items, *fee_items]:
@@ -235,14 +268,19 @@ def validate_detail_consistency(
     if total is None:
         return
 
-    # sum 校验：只有所有项都含金额字段时才校验（部分缺失=wedap 自动分配，跳过）
+    # 主明细 sum：strict=False 保留「部分缺字段=wedap 自动分配」逃生口（缺则跳过 sum）
     main_amounts = _collect_detail_amounts(
-        items, amount_field=amount_field, detail_key=detail_key, currency=currency
+        items,
+        amount_field=amount_field,
+        detail_key=detail_key,
+        currency=currency,
+        strict=False,
     )
     if main_amounts is None:
         return
 
     fee_amounts: list[Decimal] = []
+    # 费用明细 strict=True：非空则每项必须 dict + 含合法金额字段，缺则 400（不放绕过）
     # fee_items 非空 ⇒ 上方守卫已确保 fee_detail_key / fee_amount_field 均非 None
     if fee_items and fee_amount_field and fee_detail_key:
         collected = _collect_detail_amounts(
@@ -250,10 +288,10 @@ def validate_detail_consistency(
             amount_field=fee_amount_field,
             detail_key=fee_detail_key,
             currency=currency,
+            strict=True,
         )
-        if collected is None:
-            return
-        fee_amounts = collected
+        # strict=True 下缺字段/非 dict 已 raise，非空 fee_items 必得非空 list（不会是 None）
+        fee_amounts = collected or []
 
     if sum(main_amounts) + sum(fee_amounts, Decimal("0")) != total:
         raise HTTPException(

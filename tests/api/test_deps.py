@@ -343,6 +343,7 @@ def test_detail_amount_jpy_decimal_rejected_400() -> None:
         )
     assert exc_info.value.status_code == 400
 
+
 # ── 含费还款三等式（fee_detail_key）：Σlender.txnAmount + Σfee.feeAmount == total ──
 # 口径来源：权威 wedap 契约 :169 + 上游 admin-backend _align_amounts_for_baffle
 # (FU-GW-REPAY-FEE-SUMGUARD-20260720-001)。
@@ -447,20 +448,93 @@ def test_fee_empty_list_degrades_to_lender_only() -> None:
     )
 
 
-def test_fee_item_missing_amount_field_skips_sum() -> None:
-    """费用明细项缺 feeAmount（wedap 自动分配）→ 跳过 sum 校验，放行。"""
-    validate_detail_consistency(
-        {
-            "lenders": [{"txnAmount": "2.8000"}],
-            "feeDeductions": [{"feeType": "PENALTY"}],
-        },
-        total=Decimal("3.0000"),
-        currency="USD",
-        detail_key="lenders",
-        amount_field="txnAmount",
-        fee_detail_key="feeDeductions",
-        fee_amount_field="feeAmount",
-    )
+def test_fee_item_missing_amount_field_400() -> None:
+    """费用明细项缺 feeAmount → 400（费用契约必填、无自动分配语义，不放绕过 · codex P1）。
+
+    此前对称套用主明细逃生口会跳过 sum，可构造 lenders=2.8 + fee 缺字段绕过 3.00≠2.8。
+    """
+    with pytest.raises(HTTPException) as exc_info:
+        validate_detail_consistency(
+            {
+                "lenders": [{"txnAmount": "2.8000"}],
+                "feeDeductions": [{"feeType": "PENALTY"}],
+            },
+            total=Decimal("3.0000"),
+            currency="USD",
+            detail_key="lenders",
+            amount_field="txnAmount",
+            fee_detail_key="feeDeductions",
+            fee_amount_field="feeAmount",
+        )
+    assert exc_info.value.status_code == 400
+    assert "each item requires feeAmount" in exc_info.value.detail["message"]
+
+
+def test_fee_non_dict_item_400() -> None:
+    """费用明细含非 dict 项 → 400（严格模式不跳过 · codex P1）。"""
+    with pytest.raises(HTTPException) as exc_info:
+        validate_detail_consistency(
+            {
+                "lenders": [{"txnAmount": "2.8000"}],
+                "feeDeductions": ["not-a-dict"],
+            },
+            total=Decimal("3.0000"),
+            currency="USD",
+            detail_key="lenders",
+            amount_field="txnAmount",
+            fee_detail_key="feeDeductions",
+            fee_amount_field="feeAmount",
+        )
+    assert exc_info.value.status_code == 400
+    assert "each item requires feeAmount" in exc_info.value.detail["message"]
+
+
+def test_fee_first_item_missing_second_nan_400() -> None:
+    """费用明细首项缺字段 + 次项 NaN → 400（不因首项缺失而整体放行 · codex P1）。"""
+    with pytest.raises(HTTPException) as exc_info:
+        validate_detail_consistency(
+            {
+                "lenders": [{"txnAmount": "2.8000"}],
+                "feeDeductions": [{}, {"feeAmount": "NaN"}],
+            },
+            total=Decimal("3.0000"),
+            currency="USD",
+            detail_key="lenders",
+            amount_field="txnAmount",
+            fee_detail_key="feeDeductions",
+            fee_amount_field="feeAmount",
+        )
+    assert exc_info.value.status_code == 400
+
+
+def test_fee_container_not_list_400() -> None:
+    """feeDeductions 为标量（extra=allow 透传）→ 400，不抛 TypeError/500（codex P1）。"""
+    with pytest.raises(HTTPException) as exc_info:
+        validate_detail_consistency(
+            {"lenders": [{"txnAmount": "100.0000"}], "feeDeductions": 1},
+            total=Decimal("100.0000"),
+            currency="USD",
+            detail_key="lenders",
+            amount_field="txnAmount",
+            fee_detail_key="feeDeductions",
+            fee_amount_field="feeAmount",
+        )
+    assert exc_info.value.status_code == 400
+    assert "feeDeductions must be a list" in exc_info.value.detail["message"]
+
+
+def test_main_container_not_list_400() -> None:
+    """主明细为标量（extra=allow 透传）→ 400，不抛 TypeError/500（codex P1）。"""
+    with pytest.raises(HTTPException) as exc_info:
+        validate_detail_consistency(
+            {"lenders": 1},
+            total=Decimal("100.0000"),
+            currency="USD",
+            detail_key="lenders",
+            amount_field="lendAmount",
+        )
+    assert exc_info.value.status_code == 400
+    assert "lenders must be a list" in exc_info.value.detail["message"]
 
 
 def test_fee_item_invalid_amount_400() -> None:
