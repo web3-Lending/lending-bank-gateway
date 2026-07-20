@@ -342,3 +342,141 @@ def test_detail_amount_jpy_decimal_rejected_400() -> None:
             amount_field="lendAmount",
         )
     assert exc_info.value.status_code == 400
+
+# ── 含费还款三等式（fee_detail_key）：Σlender.txnAmount + Σfee.feeAmount == total ──
+# 口径来源：权威 wedap 契约 :169 + 上游 admin-backend _align_amounts_for_baffle
+# (FU-GW-REPAY-FEE-SUMGUARD-20260720-001)。
+
+
+def test_fee_three_way_sum_ok() -> None:
+    """含费还款：Σlender(2.80) + Σfee(0.20) == total(3.00) → 放行。"""
+    validate_detail_consistency(
+        {
+            "lenders": [{"txnAmount": "2.8000"}],
+            "feeDeductions": [{"feeType": "PENALTY", "feeAmount": "0.2000"}],
+        },
+        total=Decimal("3.0000"),
+        currency="USD",
+        detail_key="lenders",
+        amount_field="txnAmount",
+        fee_detail_key="feeDeductions",
+        fee_amount_field="feeAmount",
+    )
+
+
+def test_fee_three_way_multi_fee_ok() -> None:
+    """多费种：Σlender(90) + SERVICE(7) + OTHER(3) == total(100) → 放行。"""
+    validate_detail_consistency(
+        {
+            "lenders": [{"txnAmount": "60.0000"}, {"txnAmount": "30.0000"}],
+            "feeDeductions": [
+                {"feeType": "SERVICE", "feeAmount": "7.0000"},
+                {"feeType": "OTHER", "feeAmount": "3.0000"},
+            ],
+        },
+        total=Decimal("100.0000"),
+        currency="USD",
+        detail_key="lenders",
+        amount_field="txnAmount",
+        fee_detail_key="feeDeductions",
+        fee_amount_field="feeAmount",
+    )
+
+
+def test_fee_three_way_sum_mismatch_400() -> None:
+    """含费不平：Σlender(2.80) + Σfee(0.20) = 3.00 != total(3.50) → 400。"""
+    with pytest.raises(HTTPException) as exc_info:
+        validate_detail_consistency(
+            {
+                "lenders": [{"txnAmount": "2.8000"}],
+                "feeDeductions": [{"feeType": "PENALTY", "feeAmount": "0.2000"}],
+            },
+            total=Decimal("3.5000"),
+            currency="USD",
+            detail_key="lenders",
+            amount_field="txnAmount",
+            fee_detail_key="feeDeductions",
+            fee_amount_field="feeAmount",
+        )
+    assert exc_info.value.status_code == 400
+    assert "sum mismatch" in exc_info.value.detail["message"]
+
+
+def test_fee_ignoring_fee_would_wrongly_400_regression() -> None:
+    """回归：老口径(只核 Σlender==total) 会把含费还款误判 400；新口径纳入 fee 后放行。
+
+    Σlender(2.80) != total(3.00) 在老逻辑必 400；带 feeDeductions(0.20) 后三等式成立。
+    """
+    validate_detail_consistency(
+        {
+            "lenders": [{"txnAmount": "2.8000"}],
+            "feeDeductions": [{"feeType": "PENALTY", "feeAmount": "0.2000"}],
+        },
+        total=Decimal("3.0000"),
+        currency="USD",
+        detail_key="lenders",
+        amount_field="txnAmount",
+        fee_detail_key="feeDeductions",
+        fee_amount_field="feeAmount",
+    )
+
+
+def test_fee_absent_degrades_to_lender_only() -> None:
+    """无 feeDeductions：退化为纯本息 Σlender==total（纯本息还款口径不变）。"""
+    validate_detail_consistency(
+        {"lenders": [{"txnAmount": "100.0000"}]},
+        total=Decimal("100.0000"),
+        currency="USD",
+        detail_key="lenders",
+        amount_field="txnAmount",
+        fee_detail_key="feeDeductions",
+        fee_amount_field="feeAmount",
+    )
+
+
+def test_fee_empty_list_degrades_to_lender_only() -> None:
+    """feeDeductions 为空列表：Σfee=0，退化为 Σlender==total。"""
+    validate_detail_consistency(
+        {"lenders": [{"txnAmount": "100.0000"}], "feeDeductions": []},
+        total=Decimal("100.0000"),
+        currency="USD",
+        detail_key="lenders",
+        amount_field="txnAmount",
+        fee_detail_key="feeDeductions",
+        fee_amount_field="feeAmount",
+    )
+
+
+def test_fee_item_missing_amount_field_skips_sum() -> None:
+    """费用明细项缺 feeAmount（wedap 自动分配）→ 跳过 sum 校验，放行。"""
+    validate_detail_consistency(
+        {
+            "lenders": [{"txnAmount": "2.8000"}],
+            "feeDeductions": [{"feeType": "PENALTY"}],
+        },
+        total=Decimal("3.0000"),
+        currency="USD",
+        detail_key="lenders",
+        amount_field="txnAmount",
+        fee_detail_key="feeDeductions",
+        fee_amount_field="feeAmount",
+    )
+
+
+def test_fee_item_invalid_amount_400() -> None:
+    """费用明细金额非法（超精度）→ 400 invalid feeAmount in feeDeductions item。"""
+    with pytest.raises(HTTPException) as exc_info:
+        validate_detail_consistency(
+            {
+                "lenders": [{"txnAmount": "2.8000"}],
+                "feeDeductions": [{"feeType": "PENALTY", "feeAmount": "0.20001"}],
+            },
+            total=Decimal("3.0000"),
+            currency="USD",
+            detail_key="lenders",
+            amount_field="txnAmount",
+            fee_detail_key="feeDeductions",
+            fee_amount_field="feeAmount",
+        )
+    assert exc_info.value.status_code == 400
+    assert "invalid feeAmount in feeDeductions item" in exc_info.value.detail["message"]

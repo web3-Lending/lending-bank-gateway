@@ -249,6 +249,43 @@ def test_repayment_lenders_txnamount_mismatch_400(client: TestClient) -> None:
     assert r.json()["error"]["code"] == "GW_400_VALIDATION"
 
 
+def test_repayment_with_fee_three_way_sum_ok(client: TestClient) -> None:
+    """含费还款：txnAmount = Σlender.txnAmount + ΣfeeDeductions.feeAmount → 200。
+
+    口径=含费总额（权威 wedap 契约 :169 + 上游 _align_amounts_for_baffle）。此前 gateway
+    护栏只核 Σlender==total、feeDeductions 不入等式，含费还款被误判 400（20260720 联调 R4.6
+    FINDING，FU-GW-REPAY-FEE-SUMGUARD-20260720-001）；本例锁定修复后放行。
+    """
+    body = {
+        "bizSeqNo": "RPY-20260720-0002000000010",
+        "transType": "REPAYMENT",
+        "repaymentInfo": {"txnAmount": "3.0000", "currencyCode": "USD"},
+        "lenders": [{"userId": "L1", "txnAmount": "2.8000"}],
+        "feeDeductions": [{"feeType": "PENALTY", "feeAmount": "0.2000"}],
+    }
+    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-rpy-fee-ok"}
+    r = client.post("/api/v1/loans/p2p-repayments", json=body, headers=h)
+    assert r.status_code == 200, r.json()
+    # feeDeductions 仍透传给 wedap（extra=allow），未被护栏剪裁
+    call_str = str(client.app.state.wedap.submit_repayment.call_args)  # type: ignore[union-attr]
+    assert "feeDeductions" in call_str
+
+
+def test_repayment_with_fee_sum_mismatch_400(client: TestClient) -> None:
+    """含费还款 Σlender + Σfee != txnAmount → 400（三等式不平仍拦）。"""
+    body = {
+        "bizSeqNo": "RPY-20260720-0002000000011",
+        "transType": "REPAYMENT",
+        "repaymentInfo": {"txnAmount": "3.5000", "currencyCode": "USD"},
+        "lenders": [{"userId": "L1", "txnAmount": "2.8000"}],
+        "feeDeductions": [{"feeType": "PENALTY", "feeAmount": "0.2000"}],
+    }
+    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-rpy-fee-mis"}
+    r = client.post("/api/v1/loans/p2p-repayments", json=body, headers=h)
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "GW_400_VALIDATION"
+
+
 def test_repayment_extra_fields_passthrough(client: TestClient) -> None:
     """extra=allow：repaymentInfo 嵌套必填字段 + 顶层 lenders[] 全透传（修复前被静默丢致拒单）。"""
     body = {
