@@ -149,14 +149,18 @@ async def p2p_repayment(
     assert_idempotency_key_matches(request, body.bizSeqNo)
     amount = parse_amount(body.repaymentInfo.txnAmount, body.repaymentInfo.currencyCode)
     payload = body.model_dump(mode="json", exclude_none=True)
-    # lenders 明细金额字段用 wedap 真实的 txnAmount（lending 按占比拆分，sum==总额成立）；
-    # 原 shareAmount 是 lending/wedap 都没有的字段，会让 sum 校验永远跳过（形同虚设）。
+    # 含费还款口径（权威 wedap 契约 :169 + 上游 admin-backend _align_amounts_for_baffle）：
+    # repaymentInfo.txnAmount = 含费总额 = Σlenders.txnAmount + ΣfeeDeductions.feeAmount。
+    # lenders.txnAmount = 出借人应收本息（wedap 真实字段，按占比拆分）；feeDeductions.feeAmount
+    # = 转银行的费用/罚息（字段名 feeAmount，非 amount）。费用明细缺失时退化为纯本息 sum 校验。
     validate_detail_consistency(
         payload,
         total=amount,
         currency=body.repaymentInfo.currencyCode,
         detail_key="lenders",
         amount_field="txnAmount",
+        fee_detail_key="feeDeductions",
+        fee_amount_field="feeAmount",
     )
     return await _submit(
         request,

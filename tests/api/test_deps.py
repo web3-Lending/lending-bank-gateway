@@ -342,3 +342,278 @@ def test_detail_amount_jpy_decimal_rejected_400() -> None:
             amount_field="lendAmount",
         )
     assert exc_info.value.status_code == 400
+
+
+# ── 含费还款三等式（fee_detail_key）：Σlender.txnAmount + Σfee.feeAmount == total ──
+# 口径来源：权威 wedap 契约 :169 + 上游 admin-backend _align_amounts_for_baffle
+# (FU-GW-REPAY-FEE-SUMGUARD-20260720-001)。
+
+
+def test_fee_three_way_sum_ok() -> None:
+    """含费还款：Σlender(2.80) + Σfee(0.20) == total(3.00) → 放行。"""
+    validate_detail_consistency(
+        {
+            "lenders": [{"txnAmount": "2.8000"}],
+            "feeDeductions": [{"feeType": "PENALTY", "feeAmount": "0.2000"}],
+        },
+        total=Decimal("3.0000"),
+        currency="USD",
+        detail_key="lenders",
+        amount_field="txnAmount",
+        fee_detail_key="feeDeductions",
+        fee_amount_field="feeAmount",
+    )
+
+
+def test_fee_three_way_multi_fee_ok() -> None:
+    """多费种：Σlender(90) + SERVICE(7) + OTHER(3) == total(100) → 放行。"""
+    validate_detail_consistency(
+        {
+            "lenders": [{"txnAmount": "60.0000"}, {"txnAmount": "30.0000"}],
+            "feeDeductions": [
+                {"feeType": "SERVICE", "feeAmount": "7.0000"},
+                {"feeType": "OTHER", "feeAmount": "3.0000"},
+            ],
+        },
+        total=Decimal("100.0000"),
+        currency="USD",
+        detail_key="lenders",
+        amount_field="txnAmount",
+        fee_detail_key="feeDeductions",
+        fee_amount_field="feeAmount",
+    )
+
+
+def test_fee_three_way_sum_mismatch_400() -> None:
+    """含费不平：Σlender(2.80) + Σfee(0.20) = 3.00 != total(3.50) → 400。"""
+    with pytest.raises(HTTPException) as exc_info:
+        validate_detail_consistency(
+            {
+                "lenders": [{"txnAmount": "2.8000"}],
+                "feeDeductions": [{"feeType": "PENALTY", "feeAmount": "0.2000"}],
+            },
+            total=Decimal("3.5000"),
+            currency="USD",
+            detail_key="lenders",
+            amount_field="txnAmount",
+            fee_detail_key="feeDeductions",
+            fee_amount_field="feeAmount",
+        )
+    assert exc_info.value.status_code == 400
+    assert "sum mismatch" in exc_info.value.detail["message"]
+
+
+def test_fee_ignoring_fee_would_wrongly_400_regression() -> None:
+    """回归：老口径(只核 Σlender==total) 会把含费还款误判 400；新口径纳入 fee 后放行。
+
+    Σlender(2.80) != total(3.00) 在老逻辑必 400；带 feeDeductions(0.20) 后三等式成立。
+    """
+    validate_detail_consistency(
+        {
+            "lenders": [{"txnAmount": "2.8000"}],
+            "feeDeductions": [{"feeType": "PENALTY", "feeAmount": "0.2000"}],
+        },
+        total=Decimal("3.0000"),
+        currency="USD",
+        detail_key="lenders",
+        amount_field="txnAmount",
+        fee_detail_key="feeDeductions",
+        fee_amount_field="feeAmount",
+    )
+
+
+def test_fee_absent_degrades_to_lender_only() -> None:
+    """无 feeDeductions：退化为纯本息 Σlender==total（纯本息还款口径不变）。"""
+    validate_detail_consistency(
+        {"lenders": [{"txnAmount": "100.0000"}]},
+        total=Decimal("100.0000"),
+        currency="USD",
+        detail_key="lenders",
+        amount_field="txnAmount",
+        fee_detail_key="feeDeductions",
+        fee_amount_field="feeAmount",
+    )
+
+
+def test_fee_empty_list_degrades_to_lender_only() -> None:
+    """feeDeductions 为空列表：Σfee=0，退化为 Σlender==total。"""
+    validate_detail_consistency(
+        {"lenders": [{"txnAmount": "100.0000"}], "feeDeductions": []},
+        total=Decimal("100.0000"),
+        currency="USD",
+        detail_key="lenders",
+        amount_field="txnAmount",
+        fee_detail_key="feeDeductions",
+        fee_amount_field="feeAmount",
+    )
+
+
+def test_fee_item_missing_amount_field_400() -> None:
+    """费用明细项缺 feeAmount → 400（费用契约必填、无自动分配语义，不放绕过 · codex P1）。
+
+    此前对称套用主明细逃生口会跳过 sum，可构造 lenders=2.8 + fee 缺字段绕过 3.00≠2.8。
+    """
+    with pytest.raises(HTTPException) as exc_info:
+        validate_detail_consistency(
+            {
+                "lenders": [{"txnAmount": "2.8000"}],
+                "feeDeductions": [{"feeType": "PENALTY"}],
+            },
+            total=Decimal("3.0000"),
+            currency="USD",
+            detail_key="lenders",
+            amount_field="txnAmount",
+            fee_detail_key="feeDeductions",
+            fee_amount_field="feeAmount",
+        )
+    assert exc_info.value.status_code == 400
+    assert "each item requires feeAmount" in exc_info.value.detail["message"]
+
+
+def test_fee_non_dict_item_400() -> None:
+    """费用明细含非 dict 项 → 400（严格模式不跳过 · codex P1）。"""
+    with pytest.raises(HTTPException) as exc_info:
+        validate_detail_consistency(
+            {
+                "lenders": [{"txnAmount": "2.8000"}],
+                "feeDeductions": ["not-a-dict"],
+            },
+            total=Decimal("3.0000"),
+            currency="USD",
+            detail_key="lenders",
+            amount_field="txnAmount",
+            fee_detail_key="feeDeductions",
+            fee_amount_field="feeAmount",
+        )
+    assert exc_info.value.status_code == 400
+    assert "each item requires feeAmount" in exc_info.value.detail["message"]
+
+
+def test_fee_first_item_missing_field_400() -> None:
+    """费用明细首项缺 feeAmount → 400（不因后续项存在而整体放行 · codex P1）。"""
+    with pytest.raises(HTTPException) as exc_info:
+        validate_detail_consistency(
+            {
+                "lenders": [{"txnAmount": "2.8000"}],
+                "feeDeductions": [{}, {"feeAmount": "0.2000"}],
+            },
+            total=Decimal("3.0000"),
+            currency="USD",
+            detail_key="lenders",
+            amount_field="txnAmount",
+            fee_detail_key="feeDeductions",
+            fee_amount_field="feeAmount",
+        )
+    assert exc_info.value.status_code == 400
+    assert "each item requires feeAmount" in exc_info.value.detail["message"]
+
+
+def test_fee_second_item_nan_400() -> None:
+    """费用明细含合法项 + NaN 项 → 400（NaN 被 parse_amount 拦，真覆盖 NaN 解析路径）。
+
+    首项合法（append 成功）→ 走到次项 NaN → parse_amount raise → invalid feeAmount 400；
+    与「首项缺字段先 400」区分，确保 NaN 分支被独立覆盖（复核 agent 指出的测试诚实性）。
+    """
+    with pytest.raises(HTTPException) as exc_info:
+        validate_detail_consistency(
+            {
+                "lenders": [{"txnAmount": "2.8000"}],
+                "feeDeductions": [{"feeAmount": "0.1000"}, {"feeAmount": "NaN"}],
+            },
+            total=Decimal("3.0000"),
+            currency="USD",
+            detail_key="lenders",
+            amount_field="txnAmount",
+            fee_detail_key="feeDeductions",
+            fee_amount_field="feeAmount",
+        )
+    assert exc_info.value.status_code == 400
+    assert "invalid feeAmount in feeDeductions item" in exc_info.value.detail["message"]
+
+
+def test_fee_container_not_list_400() -> None:
+    """feeDeductions 为标量（extra=allow 透传）→ 400，不抛 TypeError/500（codex P1）。"""
+    with pytest.raises(HTTPException) as exc_info:
+        validate_detail_consistency(
+            {"lenders": [{"txnAmount": "100.0000"}], "feeDeductions": 1},
+            total=Decimal("100.0000"),
+            currency="USD",
+            detail_key="lenders",
+            amount_field="txnAmount",
+            fee_detail_key="feeDeductions",
+            fee_amount_field="feeAmount",
+        )
+    assert exc_info.value.status_code == 400
+    assert "feeDeductions must be a list" in exc_info.value.detail["message"]
+
+
+def test_main_container_not_list_400() -> None:
+    """主明细为标量（extra=allow 透传）→ 400，不抛 TypeError/500（codex P1）。"""
+    with pytest.raises(HTTPException) as exc_info:
+        validate_detail_consistency(
+            {"lenders": 1},
+            total=Decimal("100.0000"),
+            currency="USD",
+            detail_key="lenders",
+            amount_field="lendAmount",
+        )
+    assert exc_info.value.status_code == 400
+    assert "lenders must be a list" in exc_info.value.detail["message"]
+
+
+def test_fee_strict_checked_even_when_main_escape_hatch() -> None:
+    """主明细走缺字段逃生口时，费用明细非法仍 400（费用校验不依赖主明细完整性·codex R2）。
+
+    lenders 缺 txnAmount 本会触发 strict=False 早退跳过 sum；但费用明细缺 feeAmount
+    应先被严格校验拦下，而非连带放行。
+    """
+    with pytest.raises(HTTPException) as exc_info:
+        validate_detail_consistency(
+            {
+                "lenders": [{"userId": "L1"}],  # 缺 txnAmount → 主明细逃生口
+                "feeDeductions": [{"feeType": "PENALTY"}],  # 缺 feeAmount → 应 400
+            },
+            total=Decimal("3.0000"),
+            currency="USD",
+            detail_key="lenders",
+            amount_field="txnAmount",
+            fee_detail_key="feeDeductions",
+            fee_amount_field="feeAmount",
+        )
+    assert exc_info.value.status_code == 400
+    assert "each item requires feeAmount" in exc_info.value.detail["message"]
+
+
+def test_fee_valid_but_main_escape_hatch_skips_sum() -> None:
+    """费用明细合法 + 主明细缺字段 → 费用校验过、主明细逃生口跳过 sum 比较（放行交 wedap）。"""
+    validate_detail_consistency(
+        {
+            "lenders": [{"userId": "L1"}],  # 缺 txnAmount → 逃生口
+            "feeDeductions": [{"feeType": "PENALTY", "feeAmount": "0.2000"}],  # 合法
+        },
+        total=Decimal("3.0000"),
+        currency="USD",
+        detail_key="lenders",
+        amount_field="txnAmount",
+        fee_detail_key="feeDeductions",
+        fee_amount_field="feeAmount",
+    )
+
+
+def test_fee_item_invalid_amount_400() -> None:
+    """费用明细金额非法（超精度）→ 400 invalid feeAmount in feeDeductions item。"""
+    with pytest.raises(HTTPException) as exc_info:
+        validate_detail_consistency(
+            {
+                "lenders": [{"txnAmount": "2.8000"}],
+                "feeDeductions": [{"feeType": "PENALTY", "feeAmount": "0.20001"}],
+            },
+            total=Decimal("3.0000"),
+            currency="USD",
+            detail_key="lenders",
+            amount_field="txnAmount",
+            fee_detail_key="feeDeductions",
+            fee_amount_field="feeAmount",
+        )
+    assert exc_info.value.status_code == 400
+    assert "invalid feeAmount in feeDeductions item" in exc_info.value.detail["message"]
