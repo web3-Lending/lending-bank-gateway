@@ -28,7 +28,7 @@ lending-bank-gateway 的 wedap flow-import 投递路径从「直连 baffle mock�
 
 1. **单环境先行**：只在 dev 配 `GW_WEDAP_IMPORT_BASE_URL`（gw-internal 地址），其它环境保持直连。上游（recon 导出）
    只放一种 data_type 的批次（recon 侧按导出配置控制），观察 ≥1 个完整 result 周期
-   （wedap BatchScanScheduler 每日 02:00 UTC + 30min 宽限）。
+   （wedap 看门狗：受理后 24h 必出终态 _result.json；gateway RESULT_OVERDUE 截止 = 受理 + 24h + 15min 缓冲）。
 2. **观察面**（护栏⑤ 报告，按 `import_date` 逐日核对）：
    ```bash
    curl -sS -H 'X-Caller-Service: <svc>' -H 'X-Tenant-Id: <t>' -H 'X-Request-Id: <r>' \
@@ -36,7 +36,7 @@ lending-bank-gateway 的 wedap flow-import 投递路径从「直连 baffle mock�
    ```
    放量判定（全部满足才扩面）：
    - `acceptance.by_status` 无 FAILED 增量、`accepted == total`（排队中除外）；
-   - `result_closure.overdue == 0` 且 `outstanding` 随 scanner 周期归零；
+   - `result_closure.overdue == 0` 且 `outstanding` 随 result 回收周期归零；
    - `alerts` 无新增 `PENDING_STUCK` / `RESULT_OVERDUE` / `IMPORT_FAILED`
      （`IMPORT_FAILED`＝已拉取并解析到 `_result.json` 且 `importStatus=FAILED`；仅 post 成功后
      计入 collected，post 失败期间仍 outstanding、逾期可与 `RESULT_OVERDUE` 并存，需人工介入）。
@@ -44,7 +44,7 @@ lending-bank-gateway 的 wedap flow-import 投递路径从「直连 baffle mock�
 
 ## 回滚（RESULT_OVERDUE 告警触发时评估）
 
-`wedap_delivery_alert` 出现 `RESULT_OVERDUE`（受理后超过 scanner 窗口+30min 无 _result.json）：
+`wedap_delivery_alert` 出现 `RESULT_OVERDUE`（受理后超过 24h + 15min 缓冲仍无 _result.json）：
 
 1. **唯一有效回滚 = 关 `GW_WEDAP_DELIVERY_ENABLED`**（安全阀）。不存在"回指 baffle"
    选项——baffle 没有实现 `/bank/api/v1/import/*` 任何端点（实查 baffle app/api/v1 无
@@ -62,7 +62,7 @@ lending-bank-gateway 的 wedap flow-import 投递路径从「直连 baffle mock�
   `alert_stuck_deliveries`）+ `wedap_import_delivery_task.accepted_at/result_file_path/
   result_deadline_at` + `wedap_delivery_alert` 表（迁移 0018）。
 - 护栏⑤：`GET /api/v1/admin/wedap-import/delivery-report`。
-- 阈值配置：`GW_WEDAP_RESULT_SCAN_ANCHOR_HOUR`（默认 2，UTC）、`GW_WEDAP_RESULT_GRACE_MINUTES`
-  （默认 30）、`GW_WEDAP_DELIVERY_PENDING_MAX_AGE_SECONDS`（默认 1800）。
+- 阈值配置：`GW_WEDAP_RESULT_WATCHDOG_HOURS`（默认 24，对齐 wedap 看门狗窗口）、
+  `GW_WEDAP_RESULT_BUFFER_MINUTES`（默认 15）、`GW_WEDAP_DELIVERY_PENDING_MAX_AGE_SECONDS`（默认 1800）。
 - 背景：FU-FLOWIMPORT-APISIX-20260701-004（§6.1 定口径）/ -009（P1b HMAC 签名，已随
   2026-07-13 gw-internal 切换废弃——gw-internal Phase 1 无网关鉴权，Phase 2 为 app-JWT）。

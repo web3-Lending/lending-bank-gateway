@@ -319,25 +319,26 @@ async def test_dispatch_non_str_resultfilepath_ignored(factory):
     assert task.result_file_path is None
 
 
-def test_compute_result_deadline_before_anchor():
-    """当日 anchor 未到 → 当日 anchor + grace。"""
-    now = dt.datetime(2026, 6, 24, 1, 0, tzinfo=dt.UTC)
-    got = compute_result_deadline(now, anchor_hour=2, grace_minutes=30)
-    assert got == dt.datetime(2026, 6, 24, 2, 30, tzinfo=dt.UTC)
+def test_compute_result_deadline_is_accepted_plus_watchdog_and_buffer():
+    # 新口径（wedap v2 §3.1）：受理 + 看门狗窗口(24h) + 缓冲(15min)。wedap deadline_at=受理+24h
+    # 硬编码、判死提前 5min→结果不晚于 deadline_at；gateway 截止再加缓冲容 cron/时钟/S3 延迟。
+    accepted = dt.datetime(2026, 6, 24, 9, 5, tzinfo=dt.UTC)
+    got = compute_result_deadline(accepted, watchdog_hours=24, buffer_minutes=15)
+    assert got == dt.datetime(2026, 6, 25, 9, 20, tzinfo=dt.UTC)
 
 
-def test_compute_result_deadline_after_anchor():
-    """当日 anchor 已过 → 次日 anchor + grace。"""
-    now = dt.datetime(2026, 6, 24, 3, 0, tzinfo=dt.UTC)
-    got = compute_result_deadline(now, anchor_hour=2, grace_minutes=30)
-    assert got == dt.datetime(2026, 6, 25, 2, 30, tzinfo=dt.UTC)
+def test_compute_result_deadline_crosses_day_boundary():
+    # 受理临近午夜 → +24h+缓冲 跨日正确（timedelta 语义，不再受旧 scan-cron 锚点影响）。
+    accepted = dt.datetime(2026, 6, 24, 23, 50, tzinfo=dt.UTC)
+    got = compute_result_deadline(accepted, watchdog_hours=24, buffer_minutes=15)
+    assert got == dt.datetime(2026, 6, 26, 0, 5, tzinfo=dt.UTC)
 
 
-def test_compute_result_deadline_at_anchor_takes_next_day():
-    """正好落在 anchor 时刻 → 保守取次日窗口。"""
-    now = dt.datetime(2026, 6, 24, 2, 0, tzinfo=dt.UTC)
-    got = compute_result_deadline(now, anchor_hour=2, grace_minutes=30)
-    assert got == dt.datetime(2026, 6, 25, 2, 30, tzinfo=dt.UTC)
+def test_compute_result_deadline_buffer_zero():
+    # 缓冲可配；buffer=0 → 恰受理 + 看门狗窗口。
+    accepted = dt.datetime(2026, 6, 24, 0, 0, tzinfo=dt.UTC)
+    got = compute_result_deadline(accepted, watchdog_hours=24, buffer_minutes=0)
+    assert got == dt.datetime(2026, 6, 25, 0, 0, tzinfo=dt.UTC)
 
 
 async def _get_alerts(factory):
@@ -497,12 +498,12 @@ async def test_alert_result_overdue_dedup(factory):
 async def test_dispatch_deadline_uses_post_deliver_clock(factory):
     """codex HIGH：deadline 按 deliver 完成后的真实受理时刻算，非本轮扫描起始。
 
-    场景：扫描起始 01:59（anchor=02:00 前），notify 完成已 02:01（跨过 anchor）——
-    deadline 必须基于 02:01 取次日 02:30，而非基于 01:59 取当日 02:30（scanner 已错过）。
+    场景：扫描起始 01:59，notify 完成已 02:01——deadline 必须基于受理时刻 02:01 算
+    （+24h+15min=次日 02:16），而非基于扫描起始 01:59（偏差=投递外呼耗时）。
     """
     await _seed(factory)
     scan_start = dt.datetime(2026, 6, 24, 1, 59, tzinfo=dt.UTC)
-    after_anchor = dt.datetime(2026, 6, 24, 2, 1, tzinfo=dt.UTC)
+    accepted_time = dt.datetime(2026, 6, 24, 2, 1, tzinfo=dt.UTC)
     deadline_inputs = []
 
     async def deliver(task):
@@ -510,19 +511,19 @@ async def test_dispatch_deadline_uses_post_deliver_clock(factory):
 
     def deadline(accepted_at):
         deadline_inputs.append(accepted_at)
-        return compute_result_deadline(accepted_at, anchor_hour=2, grace_minutes=30)
+        return compute_result_deadline(accepted_at, watchdog_hours=24, buffer_minutes=15)
 
     await dispatch_delivery_once(
         factory,
         deliver=deliver,
         now=scan_start,
         result_deadline=deadline,
-        clock=lambda: after_anchor,
+        clock=lambda: accepted_time,
     )
-    assert deadline_inputs == [after_anchor]
+    assert deadline_inputs == [accepted_time]
     task = await _get_task(factory)
-    assert task.accepted_at.replace(tzinfo=dt.UTC) == after_anchor
-    assert task.notified_at.replace(tzinfo=dt.UTC) == after_anchor
+    assert task.accepted_at.replace(tzinfo=dt.UTC) == accepted_time
+    assert task.notified_at.replace(tzinfo=dt.UTC) == accepted_time
     assert task.result_deadline_at.replace(tzinfo=dt.UTC) == dt.datetime(
-        2026, 6, 25, 2, 30, tzinfo=dt.UTC
-    )
+        2026, 6, 25, 2, 16, tzinfo=dt.UTC
+    )  # 受理 02:01 + 24h + 15min buffer

@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -59,14 +59,18 @@ class Settings(BaseSettings):
     wedap_delivery_max_attempts: int = 5
     wedap_delivery_enabled: bool = False  # wedap 投递 worker 开关（默认关，e2e/部署显式开）
     # §6.1 五护栏（切流 silent-failure 防护）配置。
-    wedap_result_scan_anchor_hour: int = 2
-    """wedap BatchScanScheduler 每日运行点的 UTC 小时（GW_WEDAP_RESULT_SCAN_ANCHOR_HOUR）。
+    wedap_result_watchdog_hours: int = Field(default=24, ge=24)
+    """wedap 看门狗窗口小时数（GW_WEDAP_RESULT_WATCHDOG_HOURS）。
 
-    护栏②：受理时 result_deadline_at = 受理后下一个 anchor 时刻 + grace。默认 2 对齐
-    web2-core 默认 cron ``0 0 2 * * ?``；wedap 侧改 cron 时同步调整本值。
+    护栏②：result_deadline_at = 受理时刻 + 本值 + buffer。默认 24 对齐 wedap 侧硬编码
+    ``deadline_at = 受理 + 24h``（对接文档 20260721 §3.1 v2，不可配）；wedap 改窗口时同步本值。
+    ``ge=24`` 守不变量：gateway 截止不得早于 wedap deadline（否则 wedap 未判死就误报）。
     """
-    wedap_result_grace_minutes: float = 30.0
-    """scanner 窗口后的 result 宽限分钟数（GW_WEDAP_RESULT_GRACE_MINUTES，§6.1 定 30min）。"""
+    wedap_result_buffer_minutes: float = Field(default=15.0, ge=0, allow_inf_nan=False)
+    """看门狗窗口后的 result 缓冲分钟数（GW_WEDAP_RESULT_BUFFER_MINUTES，默认 15）。
+
+    容 watchdog/publisher cron 周期 + 时钟偏移 + S3 写入延迟；wedap 判死提前 5min 发结果，
+    故此缓冲只需覆盖发布链路时延，不含 wedap 侧提前量。``ge=0`` 禁负值（负缓冲会把截止提前）。"""
     wedap_delivery_pending_max_age_seconds: float = 1800.0
     """任务停留 PENDING/SENDING 超此秒数 → PENDING_STUCK 告警（护栏③，默认 30min）。
     GW_WEDAP_DELIVERY_PENDING_MAX_AGE_SECONDS"""
