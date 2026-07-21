@@ -6,13 +6,14 @@
 
 import datetime as dt
 import json
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from app.core.db import build_engine, build_session_factory
 from app.models.base import Base
 from app.models.wedap_delivery import WedapImportDeliveryTask
+from app.models.wedap_delivery_alert import WedapDeliveryAlert
 from app.services.wedap_delivery import collect_results_once
 from app.services.wedap_import_result import ImportResult
 
@@ -198,6 +199,140 @@ async def test_release_result_lock_ownership_guard(factory):
     row2 = await _get(factory)
     assert row2.result_locked_at is not None  # 别人的锁没被清掉
     assert row2.result_lock_token == "tok-b"  # noqa: S105
+
+
+# wedap watchdog 超时批：整批 FAILED、lineResults 空、带文件级 fileErrorCode
+_FAILED_RESULT_JSON = json.dumps(
+    {
+        "importStatus": "FAILED",
+        "ingestedCount": 0,
+        "duplicateCount": 0,
+        "lineErrorCount": 0,
+        "contractInvalidCount": 0,
+        "fileErrorCode": "PROCESSING_TIMEOUT",
+        "fileErrorMsg": "Batch did not complete before deadline",
+        "lineResults": [],
+    }
+).encode()
+
+_SUCCESS_RESULT_JSON = json.dumps(
+    {
+        "importStatus": "SUCCESS",
+        "ingestedCount": 3,
+        "duplicateCount": 0,
+        "lineErrorCount": 0,
+        "lineResults": [{"lineNo": 1, "lineStatus": "INGESTED"}],
+    }
+).encode()
+
+# 行聚合 FAILED：全行被拒（无 INGESTED），有坏行明细 → 真 _post 会投 recon（可因 recon 故障抛错）
+_FAILED_ROWAGG_RESULT_JSON = json.dumps(
+    {
+        "importStatus": "FAILED",
+        "ingestedCount": 0,
+        "duplicateCount": 0,
+        "lineErrorCount": 2,
+        "lineResults": [
+            {"lineNo": 1, "lineStatus": "LINE_PARSE_ERROR", "errorCode": "INVALID_JSON"},
+            {"lineNo": 2, "lineStatus": "CONTRACT_INVALID", "errorCode": "CONTRACT_SHAPE_MISMATCH"},
+        ],
+    }
+).encode()
+
+
+async def _get_alerts(factory, kind=None):
+    async with factory() as s:
+        rows = (await s.execute(WedapDeliveryAlert.__table__.select())).all()
+    return [r for r in rows if kind is None or r.kind == kind]
+
+
+@pytest.mark.asyncio
+async def test_collect_failed_result_records_import_failed_alert(factory):
+    # 护栏⑥：整批 FAILED（watchdog 超时，bad_lines 空 → 转投 recon 无逐行信号）→ 发 IMPORT_FAILED
+    # 告警，否则批级失败静默无人知。仍标已回收（结果到了，不误触 RESULT_OVERDUE）。
+    await _insert(factory)
+    fetch = AsyncMock(return_value=_FAILED_RESULT_JSON)
+    post = AsyncMock()
+
+    n = await collect_results_once(factory, fetch=fetch, post=post, now=_NOW)
+
+    assert n == 1
+    row = await _get(factory)
+    assert row.result_collected_at is not None  # FAILED 仍标已回收，不误触 RESULT_OVERDUE
+    alerts = await _get_alerts(factory, kind="IMPORT_FAILED")
+    assert len(alerts) == 1
+    assert alerts[0].import_batch_no == "BATCH-LEN-20260630-001"
+    assert alerts[0].tenant_id == "WBTHK01"
+    assert "PROCESSING_TIMEOUT" in alerts[0].detail  # 失败原因带进 detail 供人工判
+
+
+@pytest.mark.asyncio
+async def test_collect_success_result_no_import_failed_alert(factory):
+    await _insert(factory)
+    fetch = AsyncMock(return_value=_SUCCESS_RESULT_JSON)
+    post = AsyncMock()
+
+    await collect_results_once(factory, fetch=fetch, post=post, now=_NOW)
+
+    assert await _get_alerts(factory, kind="IMPORT_FAILED") == []
+
+
+@pytest.mark.asyncio
+async def test_collect_partial_result_no_import_failed_alert(factory):
+    # PARTIAL（部分入库）不是批级失败，坏行已转投 recon，不发 IMPORT_FAILED。
+    await _insert(factory)
+    fetch = AsyncMock(return_value=_RESULT_JSON)  # _RESULT_JSON 是 PARTIAL
+    post = AsyncMock()
+
+    await collect_results_once(factory, fetch=fetch, post=post, now=_NOW)
+
+    assert await _get_alerts(factory, kind="IMPORT_FAILED") == []
+
+
+@pytest.mark.asyncio
+async def test_collect_failed_alert_deduped_on_reprocess(factory):
+    # 同批 FAILED 再次回收（锁过期重抢/重放）→ UNIQUE 去重：DB 仍 1 条 + ERROR 只发一次（不刷屏）。
+    await _insert(factory)
+    fetch = AsyncMock(return_value=_FAILED_RESULT_JSON)
+    post = AsyncMock()
+
+    with patch("app.services.wedap_delivery.logger") as mock_logger:
+        await collect_results_once(factory, fetch=fetch, post=post, now=_NOW)
+        async with factory() as s:  # 复位回收态模拟重处理（锁过期/重放要幂等）
+            await s.execute(
+                WedapImportDeliveryTask.__table__.update()
+                .where(WedapImportDeliveryTask.import_batch_no == "BATCH-LEN-20260630-001")
+                .values(result_collected_at=None, result_locked_at=None, result_lock_token=None)
+            )
+            await s.commit()
+        await collect_results_once(factory, fetch=fetch, post=post, now=_NOW)
+
+    assert fetch.await_count == 2  # 第二次确实重新进入处理路径（非跳过=假绿）
+    assert post.await_count == 2
+    assert len(await _get_alerts(factory, kind="IMPORT_FAILED")) == 1  # DB 去重仍 1 条
+    failed_errors = [c for c in mock_logger.error.call_args_list if "import FAILED" in str(c)]
+    assert len(failed_errors) == 1  # ERROR 只发一次，去重时不重复刷屏
+
+
+@pytest.mark.asyncio
+async def test_collect_failed_alert_recorded_even_if_post_fails(factory):
+    # P1 回归：行聚合 FAILED（有坏行 → 真 _post 会投 recon）时 post 抛异常，告警须已先于 post 落库、
+    # 不被 except 吞掉（盲区）；且锁释放待下轮重试。
+    await _insert(factory)
+    fetch = AsyncMock(return_value=_FAILED_ROWAGG_RESULT_JSON)
+    post = AsyncMock(side_effect=RuntimeError("recon down"))
+
+    n = await collect_results_once(factory, fetch=fetch, post=post, now=_NOW)
+
+    assert n == 0  # post 失败 → 未标已回收，下轮重试
+    post.assert_awaited_once()  # 告警在 post 之前，post 确被调用后才抛
+    row = await _get(factory)
+    assert row.result_collected_at is None  # 未标已回收
+    assert row.result_locked_at is None  # 锁已释放待重试
+    assert row.result_lock_token is None
+    assert (
+        len(await _get_alerts(factory, kind="IMPORT_FAILED")) == 1
+    )  # 告警已独立落库（post 失败也在）
 
 
 @pytest.mark.asyncio

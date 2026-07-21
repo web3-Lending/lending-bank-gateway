@@ -26,7 +26,7 @@ from app.clients.wedap import ACCEPTED_BATCH_STATUS, WedapClient, _error_text
 from app.models.wedap_delivery import WedapImportDeliveryTask
 from app.models.wedap_delivery_alert import WedapDeliveryAlert
 from app.services.wedap_import import WedapBatchRejected, deliver_batch
-from app.services.wedap_import_result import ImportResult, parse_result
+from app.services.wedap_import_result import STATUS_FAILED, ImportResult, parse_result
 
 logger = logging.getLogger(__name__)
 
@@ -539,7 +539,32 @@ async def collect_results_once(
             if raw is None:  # _result.json 未就绪 → 释放锁，下轮重试
                 await _release_result_lock(factory, task.id, token)
                 continue
-            await post(task, parse_result(raw))
+            result = parse_result(raw)
+            # 护栏⑥：整批 FAILED（watchdog 超时 lineResults 空 / 整批被拒）→ bad_lines 可能空、
+            # 转投 recon 无逐行信号、批级失败静默。告警须在 post 之前——FAILED 判定来自 parse、与
+            # recon 健康无关；置于 post 之后则 recon 故障抛异常会走 except 吞掉告警（盲区）。
+            # 记库成功（首次）才发一次 ERROR，去重天然限频（同批再回收返 False → 不重复刷屏）。
+            if result.import_status == STATUS_FAILED and await _record_delivery_alert(
+                factory,
+                tenant_id=task.tenant_id,
+                import_batch_no=task.import_batch_no,
+                kind="IMPORT_FAILED",
+                detail=(
+                    f"importStatus=FAILED fileErrorCode={result.file_error_code} "
+                    f"ingested={result.ingested_count} lineError={result.line_error_count}"
+                ),
+                now=now,
+            ):
+                logger.error(
+                    "wedap import FAILED %s/%s fileErrorCode=%s ingested=%s lineError=%s"
+                    "（已记 wedap_delivery_alert · §6.1 护栏⑥，人工介入）",
+                    task.tenant_id,
+                    task.import_batch_no,
+                    result.file_error_code,
+                    result.ingested_count,
+                    result.line_error_count,
+                )
+            await post(task, result)
         except Exception as exc:  # noqa: BLE001 - 单条失败不崩循环；释放锁待下轮重试（post 幂等）
             logger.warning(
                 "wedap_delivery: 回收 _result.json 失败 batch=%s err=%s（释放锁待重试）",

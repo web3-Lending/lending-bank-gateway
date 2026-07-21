@@ -1,7 +1,7 @@
 # flow-import 切流 canary SOP（§6.1 护栏①·运维手册）
 
 > 口径（2026-07-03 用户拍板）：canary 小流量**不写代码**，靠部署配置人工控制；机器强制的是
-> 护栏②③④⑤（batch 受理证据+截止、PENDING age 监控、result 超时告警、报告分离）。
+> 护栏②③④⑤⑥（batch 受理证据+截止、PENDING age 监控、result 超时告警、报告分离、整批 FAILED 告警）。
 > **护栏②③（受理落证 + PENDING 监控）未部署的环境不得放量**（§6.1 原约束）。
 
 > **2026-07-13 修订**：对接路线从 APISIX（HMAC 签名 + LENDING consumer）改为 wedap
@@ -37,7 +37,9 @@ lending-bank-gateway 的 wedap flow-import 投递路径从「直连 baffle mock�
    放量判定（全部满足才扩面）：
    - `acceptance.by_status` 无 FAILED 增量、`accepted == total`（排队中除外）；
    - `result_closure.overdue == 0` 且 `outstanding` 随 scanner 周期归零；
-   - `alerts` 无新增 `PENDING_STUCK` / `RESULT_OVERDUE`。
+   - `alerts` 无新增 `PENDING_STUCK` / `RESULT_OVERDUE` / `IMPORT_FAILED`
+     （`IMPORT_FAILED`＝已拉取并解析到 `_result.json` 且 `importStatus=FAILED`；仅 post 成功后
+     计入 collected，post 失败期间仍 outstanding、逾期可与 `RESULT_OVERDUE` 并存，需人工介入）。
 3. **扩面**：dev 全 data_type → dev-hw → 生产（每级重复第 2 步观察一个 result 周期）。
 
 ## 回滚（RESULT_OVERDUE 告警触发时评估）
