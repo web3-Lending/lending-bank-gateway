@@ -1,4 +1,5 @@
 import asyncio
+import datetime as dt
 import logging
 import sys
 from unittest.mock import patch
@@ -370,10 +371,13 @@ def test_lifespan_wedap_delivery_worker_started(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("GW_WEDAP_DELIVERY_ENABLED", "true")
 
     started = {"outbox": False, "recon": False, "order": False, "wedap": False}
+    captured: dict[str, object] = {}
 
     def _stub(key: str):
         async def _fake(*_a: object, **_k: object) -> None:
             started[key] = True
+            if key == "wedap":
+                captured.update(_k)
             await asyncio.sleep(9999)
 
         return _fake
@@ -388,6 +392,11 @@ def test_lifespan_wedap_delivery_worker_started(monkeypatch: pytest.MonkeyPatch)
             pass
 
     assert started["wedap"]  # wedap 投递 worker 已起
+    # M3 wiring：注入 run_forever 的 result_deadline 真用 config watchdog_hours/buffer(默认 24/15)
+    rd = captured["result_deadline"]
+    assert callable(rd)
+    accepted = dt.datetime(2026, 6, 24, 0, 0, tzinfo=dt.UTC)
+    assert rd(accepted) == accepted + dt.timedelta(hours=24, minutes=15)
     get_settings.cache_clear()
 
 

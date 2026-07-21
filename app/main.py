@@ -281,11 +281,11 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 wedap_client=app.state.wedap,
                 presigned_enabled=settings.wedap_presigned_enabled,
             )
-            # §6.1 护栏②：受理时落 result 回收截止（下一个 wedap scanner 窗口 + grace）
+            # §6.1 护栏②：受理时落 result 回收截止（受理 + wedap 看门狗窗口 24h + 缓冲）
             wedap_result_deadline = partial(
                 compute_result_deadline,
-                anchor_hour=settings.wedap_result_scan_anchor_hour,
-                grace_minutes=settings.wedap_result_grace_minutes,
+                watchdog_hours=settings.wedap_result_watchdog_hours,
+                buffer_minutes=settings.wedap_result_buffer_minutes,
             )
             tasks.append(
                 asyncio.create_task(

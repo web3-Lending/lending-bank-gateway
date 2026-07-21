@@ -69,7 +69,7 @@ class WedapImportDeliveryTask(Base, TenantMixin, TimestampMixin):
     # wedap notify 响应回带的 resultFilePath（§6.1 护栏②）：受理时落库留证，
     # 供人工核对 result 落点；回收路径仍按约定 build_result_key 现算（两者应一致）。
     result_file_path: Mapped[str | None] = mapped_column(String(512))
-    # result 回收截止（§6.1 护栏②）：受理时 = 下一个 wedap scanner 窗口(anchor hour, UTC) + grace。
+    # result 回收截止（§6.1 护栏②）：受理时 = 受理时刻 + wedap 看门狗窗口(24h) + 缓冲(15min)。
     # DELIVERED + result_collected_at 空 + 超过此刻 → RESULT_OVERDUE 告警（护栏④），
     # 提示切流负责人评估回滚。
     result_deadline_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))

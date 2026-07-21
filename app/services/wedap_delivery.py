@@ -165,17 +165,19 @@ async def _claim(factory: async_sessionmaker[AsyncSession], task_id: int, now: d
 
 
 def compute_result_deadline(
-    now: dt.datetime, *, anchor_hour: int, grace_minutes: float
+    accepted_at: dt.datetime, *, watchdog_hours: int, buffer_minutes: float
 ) -> dt.datetime:
-    """§6.1 护栏②：result 回收截止 = ``now`` 之后下一个 wedap scanner 运行点 + grace。
+    """§6.1 护栏②：result 回收截止 = 受理时刻 + wedap 看门狗窗口 + 缓冲。
 
-    anchor_hour 是 wedap BatchScanScheduler 每日 cron 的 UTC 小时（默认 2 = ``0 0 2 * * ?``）。
-    受理正好落在 anchor 时刻上时取次日窗口（scanner 与受理的先后不可知，保守多等一天）。
+    对齐 wedap「受理必出终态」看门狗真实口径（对接文档 20260721 §3.1 v2）：wedap 侧
+    ``deadline_at = 受理时刻 + 固定 24h``（硬编码 ``TIMESTAMPADD(HOUR,24,NOW())``，dev/uat/prod
+    一律 24h、不可配），且看门狗在 deadline 前 5min 就判死并发布 FAILED result（提前量、非宽限）
+    → result **不晚于** deadline_at。故 gateway 截止 = 受理 + watchdog_hours（默认 24）+
+    buffer_minutes（默认 15，容 watchdog/publisher cron 周期 + 时钟偏移 + S3 写入延迟）。
+
+    注：旧实现锚在 wedap BatchScanScheduler 每日 cron（已被逐批 watchdog 取代），已弃用重写。
     """
-    anchor = now.replace(hour=anchor_hour, minute=0, second=0, microsecond=0)
-    if anchor <= now:
-        anchor += dt.timedelta(days=1)
-    return anchor + dt.timedelta(minutes=grace_minutes)
+    return accepted_at + dt.timedelta(hours=watchdog_hours, minutes=buffer_minutes)
 
 
 async def dispatch_delivery_once(
@@ -201,9 +203,9 @@ async def dispatch_delivery_once(
     §6.1 护栏②：deliver 成功（= wedap 受理，非受理已在 deliver_task 抛出）时额外落
     accepted_at、响应回带的 result_file_path、result_deadline_at=result_deadline(accepted_at)
     （未注入 result_deadline 则留空，不影响既有路径）。受理时刻取 ``clock()``（默认真实
-    UTC now，测试可注入固定时钟）而非本轮扫描起始 ``now``——投递外呼耗时可能跨过 scanner
-    anchor，用扫描起始时刻算 deadline 会把截止算早一个窗口，制造假 RESULT_OVERDUE
-    （codex HIGH）。notified_at 同步用受理时刻。
+    UTC now，测试可注入固定时钟）而非本轮扫描起始 ``now``——deadline=受理+看门狗窗口+缓冲，
+    用扫描起始时刻算会把截止算早（偏差=投递外呼耗时），制造假 RESULT_OVERDUE（codex HIGH）。
+    notified_at 同步用受理时刻。
     """
     real_clock = clock if clock is not None else lambda: dt.datetime.now(dt.UTC)
     await _reclaim_stale_sending(factory, now=now, claim_timeout_seconds=claim_timeout_seconds)
@@ -243,7 +245,7 @@ async def dispatch_delivery_once(
                 task.attempts + 1,
                 error,
             )
-        # 受理时刻在 deliver 返回后取（外呼耗时可能跨 scanner anchor，codex HIGH）。
+        # 受理时刻在 deliver 返回后取（真实受理时刻；deadline=受理+看门狗窗口+缓冲，codex HIGH）。
         accepted_now = real_clock()
 
         terminal: str | None = None
