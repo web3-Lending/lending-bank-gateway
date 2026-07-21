@@ -2,8 +2,17 @@
 
 结果文件路径：``{bucket}/lending/result/{dataType}/{channelId}/{importDate}/{importBatchNo}_result.json``
 内容关注：importStatus(SUCCESS/PARTIAL/FAILED) + ingested/duplicate/lineError 计数 +
-lineResults[]（逐行 lineStatus + errorMessage）。PARTIAL/FAILED 时据 lineResults 定位
-坏行，修正后走修复重传（新 importBatchNo + replacesBatchNo）。
+lineResults[]（逐行 lineStatus + errorMessage）+ 文件级 fileErrorCode/fileErrorMsg。
+PARTIAL/FAILED 时据 lineResults 定位坏行，修正后走修复重传（新 importBatchNo + replacesBatchNo）。
+
+importStatus 封闭集恰 3 值（wedap ResultFileWriter.determineImportStatus / buildFailedResultFile）：
+  - SUCCESS：全行 INGESTED（或空文件无业务行）
+  - PARTIAL：部分 INGESTED + 部分 DUPLICATE/LINE_PARSE_ERROR/CONTRACT_INVALID
+  - FAILED：全行被拒（有 lineResults），或 watchdog 超时（lineResults=[] +
+    fileErrorCode=PROCESSING_TIMEOUT）
+注：wedap 的 COMPLETED 是 DB 批次生命周期状态（BatchStatus），**不是** _result.json 的
+importStatus；FILE_INVALID/DUPLICATE_BATCH/DUPLICATE_BATCH_CONFLICT 是同步 notify 响应的
+status，均不落 _result.json。
 
 本模块只做「key 构建」与「字节 → 结构化」的纯逻辑；S3 拉取由调用方负责。
 """
@@ -60,6 +69,11 @@ class ImportResult:
     duplicate_count: int
     line_error_count: int
     bad_lines: list[BadLine] = field(default_factory=list)
+    # 文件级失败码/描述：仅 watchdog 超时 FAILED 批填充（fileErrorCode=PROCESSING_TIMEOUT、
+    # fileErrorMsg="Batch did not complete before deadline"，lineResults 为空）；正常/行聚合批
+    # @JsonInclude(NON_NULL) 省略该 key → None。非 str 毒值归一化为 None（防上游脏类型污染）。
+    file_error_code: str | None = None
+    file_error_msg: str | None = None
 
     @property
     def is_terminal_ok(self) -> bool:
@@ -91,10 +105,14 @@ def parse_result(raw: bytes) -> ImportResult:
         for item in (body.get("lineResults") or [])
         if str(item.get("lineStatus")) != "INGESTED"
     ]
+    file_error_code = body.get("fileErrorCode")
+    file_error_msg = body.get("fileErrorMsg")
     return ImportResult(
         import_status=str(body.get("importStatus")),
         ingested_count=int(body.get("ingestedCount") or 0),
         duplicate_count=int(body.get("duplicateCount") or 0),
         line_error_count=int(body.get("lineErrorCount") or 0),
         bad_lines=bad_lines,
+        file_error_code=file_error_code if isinstance(file_error_code, str) else None,
+        file_error_msg=file_error_msg if isinstance(file_error_msg, str) else None,
     )

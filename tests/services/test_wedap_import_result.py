@@ -26,6 +26,7 @@ def test_known_line_error_code_is_the_nine_web2core_values():
 
 def test_parse_result_faithfully_passes_all_nine_error_codes():
     # errorCode 原样透传(含全部 9 值 + CONTRACT_INVALID 行)，不因枚举校验丢弃。
+    # 行聚合 FAILED(全行被拒)带 lineResults(对接：ingested==0 且 actualRows>0)。
     lines = [
         {"lineNo": i, "lineStatus": "LINE_PARSE_ERROR", "errorCode": code}
         for i, code in enumerate(sorted(KNOWN_LINE_ERROR_CODE), start=1)
@@ -61,6 +62,7 @@ def test_build_result_key():
 
 
 def test_parse_success_no_bad_lines():
+    # importStatus 成功态是 SUCCESS(wedap determineImportStatus 真源,非 COMPLETED)。
     raw = json.dumps(
         {
             "importStatus": "SUCCESS",
@@ -80,6 +82,8 @@ def test_parse_success_no_bad_lines():
     assert result.bad_lines == []
     assert result.is_terminal_ok is True
     assert result.needs_repair is False
+    assert result.file_error_code is None
+    assert result.file_error_msg is None
 
 
 def test_parse_partial_collects_only_non_ingested():
@@ -107,7 +111,7 @@ def test_parse_partial_collects_only_non_ingested():
 
 
 def test_parse_reads_error_code_and_dedup_key():
-    """errorCode(8 值枚举)+ 结构化 dedupKey 须解析进 BadLine（DLQ 分类/回映用）。"""
+    """errorCode(9 值枚举)+ 结构化 dedupKey 须解析进 BadLine（DLQ 分类/回映用）。"""
     raw = json.dumps(
         {
             "importStatus": "PARTIAL",
@@ -147,8 +151,49 @@ def test_parse_failed_status():
     assert result.duplicate_count == 0  # 缺省补 0
 
 
+def test_parse_failed_watchdog_reads_file_error_code():
+    # golden 样本：watchdog 超时批(wedap buildFailedResultFile 真源)——importStatus=FAILED,
+    # fileErrorCode=PROCESSING_TIMEOUT(运行时唯一非空文件级码),lineResults 空数组。
+    raw = json.dumps(
+        {
+            "importBatchNo": "BATCH-LEN-20260714-JT96019",
+            "importStatus": "FAILED",
+            "ingestedCount": 0,
+            "duplicateCount": 0,
+            "lineErrorCount": 0,
+            "contractInvalidCount": 0,
+            "fileErrorCode": "PROCESSING_TIMEOUT",
+            "fileErrorMsg": "Batch did not complete before deadline",
+            "lineResults": [],
+        }
+    ).encode()
+    result = parse_result(raw)
+    assert result.import_status == "FAILED"
+    assert result.needs_repair is True
+    assert result.is_terminal_ok is False
+    assert result.file_error_code == "PROCESSING_TIMEOUT"
+    assert result.file_error_msg == "Batch did not complete before deadline"
+    assert result.bad_lines == []
+
+
+def test_parse_non_str_file_error_fields_normalized_to_none():
+    # 上游脏类型(数字/bool/list/dict)不得原样进 str|None 字段 → 归一化 None(不靠类型注解)。
+    raw = json.dumps(
+        {
+            "importStatus": "FAILED",
+            "fileErrorCode": 500,
+            "fileErrorMsg": ["boom"],
+            "lineResults": [],
+        }
+    ).encode()
+    result = parse_result(raw)
+    assert result.file_error_code is None
+    assert result.file_error_msg is None
+
+
 def test_parse_missing_line_results_yields_empty_bad_lines():
     raw = json.dumps({"importStatus": "SUCCESS", "ingestedCount": 3}).encode()
     result = parse_result(raw)
     assert result.bad_lines == []
     assert result.line_error_count == 0
+    assert result.file_error_code is None
