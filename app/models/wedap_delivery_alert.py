@@ -1,9 +1,13 @@
-"""§6.1 护栏③④：wedap 投递 silent-failure 去重告警标记表。
+"""§6.1 护栏③④⑥：wedap 投递 silent-failure 去重告警标记表。
 
-复刻 OrderStuckAlert（G6）模式：UNIQUE 去重 + 限频 ERROR + admin 查询。两类告警：
+复刻 OrderStuckAlert（G6）模式：UNIQUE 去重 + 限频 ERROR + admin 查询。三类告警：
   - PENDING_STUCK（护栏③）：任务停留 PENDING/SENDING 超过 pending_max_age 仍未投出。
   - RESULT_OVERDUE（护栏④）：已受理（DELIVERED）但超过 result_deadline_at 仍未回收 _result.json，
     切流负责人须按 §6.1 评估回滚（关 GW_WEDAP_DELIVERY_ENABLED / 摘 secret）。
+  - IMPORT_FAILED（护栏⑥）：回收到的 _result.json 解析出 importStatus=FAILED（watchdog 超时
+    bad_lines 空 / 整批被拒）——批级失败经 recon 逐行通道可能无信号，发此告警防静默。告警先于
+    result_collected_at 标记落库（post 故障也不漏，代价是 post 未成功前该批仍 outstanding，
+    直到重试回收）；detail 带 fileErrorCode。
 """
 
 import datetime as dt
@@ -15,7 +19,7 @@ from app.models.base import Base, TenantMixin, TimestampMixin
 
 _BIG_PK = BigInteger().with_variant(Integer, "sqlite")
 
-WEDAP_DELIVERY_ALERT_KINDS = ("PENDING_STUCK", "RESULT_OVERDUE")
+WEDAP_DELIVERY_ALERT_KINDS = ("PENDING_STUCK", "RESULT_OVERDUE", "IMPORT_FAILED")
 
 
 class WedapDeliveryAlert(Base, TenantMixin, TimestampMixin):

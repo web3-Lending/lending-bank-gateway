@@ -91,7 +91,7 @@ async def wedap_delivery_report(
 
     acceptance（受理面）：按 status 计数 + 已受理数（accepted_at 非空）。
     result_closure（结果闭环面）：DELIVERED 中已回收 / 未回收 / 超截止未回收（overdue）。
-    alerts：wedap_delivery_alert 按 kind 计数（PENDING_STUCK / RESULT_OVERDUE）。
+    alerts：wedap_delivery_alert 按 kind 计数（PENDING_STUCK / RESULT_OVERDUE / IMPORT_FAILED）。
     两面分开呈现，"notify 受理成功"不再被误读为"批次已闭环"。可选 import_date（YYYYMMDD）过滤。
     """
     trace_id = current_ids().trace_id
