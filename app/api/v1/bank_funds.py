@@ -298,10 +298,11 @@ async def reverse_transaction(
     """
     assert_idempotency_key_matches(request, body.bizSeqNo)
     amount = parse_amount(body.oriTxnAmount, body.currencyCode)
+    payload = body.model_dump(mode="json", exclude_none=True)
     # 账户守门：冲正把资金退回原付款方，与 refund 同向，须过 platform_account 守门。
     await assert_platform_account_allowed(
         request.app.state.session_factory,
-        body.model_dump(mode="json", exclude_none=True).get("bankAccountNo"),
+        payload.get("bankAccountNo"),
         tenant_id=ids["tenant_id"],
         business_scope="bank_reversal",
         currency=body.currencyCode,
@@ -323,7 +324,7 @@ async def reverse_transaction(
                 caller_service=ids["caller_service"],
                 request_id=ids["request_id"],
                 business_scope="bank_reversal",
-                wedap_payload=body.model_dump(mode="json", exclude_none=True),
+                wedap_payload=payload,
                 ori_req_date=bank_req_date(request),
             ),
             ori_biz_seq_no=body.oriBizSeqNo,

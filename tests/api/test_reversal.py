@@ -24,7 +24,7 @@ HEADERS = {
 REVERSAL_BODY = {
     "bizSeqNo": RVSL,
     "channelId": "W3C",
-    "transType": "BANK_FUND_COLLECT",
+    "transType": "LOAN_COLLECT",
     "oriBizSeqNo": COLL,
     "oriReqDate": "20260722",
     "oriTxnAmount": "5000.0000",
@@ -52,7 +52,7 @@ async def _seed_collect(factory) -> None:  # type: ignore[no-untyped-def]
                     caller_service="liquidation",
                     status=OrderStatus.SUCCEEDED,
                     request_id="req-coll",
-                    trans_type="BANK_FUND_COLLECT_LOAN",
+                    trans_type="LOAN_COLLECT",
                 )
             )
 
@@ -95,7 +95,7 @@ def test_reversal_succeeds_and_flips_original(client: TestClient) -> None:
 def test_reversal_passes_original_transtype_to_wedap(client: TestClient) -> None:
     client.post("/api/v1/bank-funds/reversals", json=REVERSAL_BODY, headers=HEADERS)
     _, kwargs = client.app.state.wedap.reverse.call_args  # type: ignore[union-attr]
-    assert kwargs["payload"]["transType"] == "BANK_FUND_COLLECT"
+    assert kwargs["payload"]["transType"] == "LOAN_COLLECT"
     assert kwargs["payload"]["oriBizSeqNo"] == COLL
 
 
