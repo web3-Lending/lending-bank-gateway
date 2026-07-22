@@ -25,7 +25,7 @@ BODY = {
         "userId": "U1",
         "userName": "u",
     },
-    "lenders": [{"userId": "L1"}],
+    "lenders": [{"userId": "L1", "lendAmount": "100.0000", "currencyCode": "USD"}],
 }
 
 
@@ -100,9 +100,12 @@ def test_invalid_amount_zero_400(client: TestClient) -> None:
 
 def test_same_key_different_payload_409(client: TestClient) -> None:
     client.post("/api/v1/loans/p2p-disbursements", json=BODY, headers=HEADERS)
+    # The variant must itself be valid (else it hits the sum guard 400 before reaching the
+    # idempotency 409): bump both total and lenders to 999.
     mutated = {
         **BODY,
         "disbursementInfo": {**BODY["disbursementInfo"], "txnAmount": "999.0000"},
+        "lenders": [{"userId": "L1", "lendAmount": "999.0000", "currencyCode": "USD"}],
     }
     r = client.post("/api/v1/loans/p2p-disbursements", json=mutated, headers=HEADERS)
     assert r.status_code == 409 and r.json()["error"]["code"] == "GW_409_IDEMPOTENCY"
@@ -123,6 +126,7 @@ def test_repayment_endpoint_works(client: TestClient) -> None:
         "bizSeqNo": "RPY-20260611-0001234567890",
         "transType": "REPAYMENT",
         "repaymentInfo": {"txnAmount": "50.0000", "currencyCode": "USD"},
+        "lenders": [{"userId": "L1", "txnAmount": "50.0000", "currencyCode": "USD"}],
     }
     r = client.post(
         "/api/v1/loans/p2p-repayments",
@@ -150,9 +154,10 @@ def test_disbursement_no_idempotency_key_header_passes(client: TestClient) -> No
 # ── 缺省 lenders（wedap 真形态 body）修复验证 ─────────────────────────────────────
 
 
-def test_disbursement_without_lenders_passes_validation(client: TestClient) -> None:
-    """wedap 真契约：p2p-disbursements 不含 lenders 字段 → 校验跳过，200 受理。
-    修复前：default_factory=list 物化 [] → validate_detail_consistency 误判 empty → 400。
+def test_disbursement_without_lenders_rejected_400(client: TestClient) -> None:
+    """wedap DisbursementAdapterRequest.lenders is @NotEmpty: p2p-disbursements missing lenders
+    must be rejected 400 by the gateway itself (require_detail=True), no longer relying on the
+    wedap backstop (codex R1 finding fix).
     """
     body = {
         "bizSeqNo": "DSB-20260611-0002000000001",
@@ -168,11 +173,35 @@ def test_disbursement_without_lenders_passes_validation(client: TestClient) -> N
     }
     h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-no-lend"}
     r = client.post("/api/v1/loans/p2p-disbursements", json=body, headers=h)
-    assert r.status_code == 200, r.json()
+    assert r.status_code == 400 and r.json()["error"]["code"] == "GW_400_VALIDATION"
+    assert "missing lenders" in r.json()["error"]["message"]
 
 
-def test_disbursement_without_lenders_payload_excludes_key(client: TestClient) -> None:
-    """缺 lenders 时，透传给 wedap 的 payload 不含 lenders 键（契约 C：不注入伪字段）。"""
+def test_repayment_without_lenders_rejected_400(client: TestClient) -> None:
+    """wedap RepaymentAdapterRequest.lenders is @NotEmpty: p2p-repayments missing lenders
+    must be rejected 400 by the gateway itself (require_detail=True) -- guards the repayment
+    call-site wiring against accidental deletion (codex R2 finding).
+    """
+    body = {
+        "bizSeqNo": "RPY-20260611-0002000000002",
+        "transType": "REPAYMENT",
+        "repaymentInfo": {"txnAmount": "50.0000", "currencyCode": "USD"},
+        # no lenders
+    }
+    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-no-lend-rpy"}
+    r = client.post("/api/v1/loans/p2p-repayments", json=body, headers=h)
+    assert r.status_code == 400 and r.json()["error"]["code"] == "GW_400_VALIDATION"
+    assert "missing lenders" in r.json()["error"]["message"]
+
+
+def test_disbursement_without_lenders_shortcircuits_before_wedap(client: TestClient) -> None:
+    """Missing lenders -> guard 400 and the downstream wedap call is not made (short-circuit,
+    no leaked mid-flight outbound call).
+
+    With require_detail=True, missing lenders returns 400 at the guard and submit_disbursement
+    must not be reached; asserting "not called" adds the downstream-isolation guarantee beyond
+    rejected_400 (which only checks the error envelope).
+    """
     body = {
         "bizSeqNo": "DSB-20260611-0002000000002",
         "channelId": "LEN",
@@ -185,11 +214,10 @@ def test_disbursement_without_lenders_payload_excludes_key(client: TestClient) -
         },
     }
     h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-lend-excl"}
-    client.post("/api/v1/loans/p2p-disbursements", json=body, headers=h)
+    r = client.post("/api/v1/loans/p2p-disbursements", json=body, headers=h)
+    assert r.status_code == 400 and r.json()["error"]["code"] == "GW_400_VALIDATION"
     wedap_mock = client.app.state.wedap  # type: ignore[union-attr]
-    submit_req = wedap_mock.submit_disbursement.call_args
-    all_args = str(submit_req)
-    assert "lenders" not in all_args, f"wedap payload 不应含 lenders，实际参数：{all_args}"
+    wedap_mock.submit_disbursement.assert_not_called()
 
 
 def test_disbursement_explicit_empty_lenders_400(client: TestClient) -> None:
@@ -323,6 +351,7 @@ def test_disbursement_extra_fields_passthrough(client: TestClient) -> None:
             "userName": "u",
             "postscript": "loan-disb-memo",
         },
+        "lenders": [{"userId": "L1", "lendAmount": "100.0000", "currencyCode": "USD"}],
         "feeDeductions": [{"feeType": "PLATFORM", "amount": "1.0000"}],
     }
     h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-disb-pt"}

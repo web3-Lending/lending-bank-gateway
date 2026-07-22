@@ -137,14 +137,99 @@ def test_currency_match_passes() -> None:
     )
 
 
-def test_no_amount_field_in_items_skips_sum_check() -> None:
-    """明细项无 amount_field（wedap 自动分配场景）→ 跳过 sum 校验，放行。"""
+def test_require_detail_missing_key_raises_400() -> None:
+    """require_detail=True and detail_key absent/None -> 400.
+
+    Background: wedap DisbursementAdapterRequest/RepaymentAdapterRequest mark lenders as
+    @NotEmpty; an entirely missing lenders list is also invalid, so the gateway must
+    self-validate and reject (codex R1 finding: a missing list bypassed the guard).
+    """
+    with pytest.raises(HTTPException) as exc_info:
+        validate_detail_consistency(
+            {"disbursementInfo": {"txnAmount": "100.0000"}},  # no lenders
+            total=Decimal("100.0000"),
+            currency="USD",
+            detail_key="lenders",
+            amount_field="lendAmount",
+            require_detail=True,
+        )
+    assert exc_info.value.status_code == 400
+    assert "missing lenders" in exc_info.value.detail["message"]
+
+
+def test_require_detail_none_value_raises_400() -> None:
+    """require_detail=True and detail_key value is None -> 400 (same semantics as absent)."""
+    with pytest.raises(HTTPException) as exc_info:
+        validate_detail_consistency(
+            {"lenders": None},
+            total=Decimal("100.0000"),
+            currency="USD",
+            detail_key="lenders",
+            amount_field="lendAmount",
+            require_detail=True,
+        )
+    assert exc_info.value.status_code == 400
+    assert "missing lenders" in exc_info.value.detail["message"]
+
+
+def test_require_detail_false_missing_key_skips() -> None:
+    """Default require_detail=False: detail_key absent -> early-return skip (non-mandatory
+    detail endpoint, behavior unchanged)."""
+    validate_detail_consistency(
+        {"other": 1},
+        total=Decimal("100.0000"),
+        currency="USD",
+        detail_key="lenders",
+        amount_field="lendAmount",
+    )
+
+
+def test_missing_main_amount_field_raises_400_by_default() -> None:
+    """With a top-level total, a main-detail item missing amount_field -> 400 (strict by
+    default; fixes the R4.5b guard bypass).
+
+    R4.5b evidence: when a repayment lender omitted txnAmount, the old logic silently skipped
+    the sum check and let it through, relying only on the wedap backstop; the guard now
+    self-validates at the gateway -- a missing field is a 400, no longer downstream-dependent.
+    """
+    with pytest.raises(HTTPException) as exc_info:
+        validate_detail_consistency(
+            {"lenders": [{"userId": "u1"}, {"userId": "u2"}]},
+            total=Decimal("100.0000"),
+            currency="USD",
+            detail_key="lenders",
+            amount_field="lendAmount",
+        )
+    assert exc_info.value.status_code == 400
+    assert "each item requires lendAmount" in exc_info.value.detail["message"]
+
+
+def test_partial_missing_main_amount_field_raises_400() -> None:
+    """Mixed detail (some items have amount_field, some lack it) -> 400: this cannot be
+    "all auto-allocated"; it must be the "hide one item's amount to bypass sum" path, so
+    block it."""
+    with pytest.raises(HTTPException) as exc_info:
+        validate_detail_consistency(
+            {"lenders": [{"lendAmount": "60.0000"}, {"userId": "u2"}]},
+            total=Decimal("100.0000"),
+            currency="USD",
+            detail_key="lenders",
+            amount_field="lendAmount",
+        )
+    assert exc_info.value.status_code == 400
+    assert "each item requires lendAmount" in exc_info.value.detail["message"]
+
+
+def test_missing_main_amount_field_skips_when_main_strict_false() -> None:
+    """Explicit opt-out: main_strict=False keeps the "skip sum on missing field" opt-out
+    (for a future endpoint with a genuine wedap auto-allocation contract; off by default)."""
     validate_detail_consistency(
         {"lenders": [{"userId": "u1"}, {"userId": "u2"}]},
         total=Decimal("100.0000"),
         currency="USD",
         detail_key="lenders",
         amount_field="lendAmount",
+        main_strict=False,
     )
 
 
@@ -177,15 +262,20 @@ def test_userlist_empty_raises_400() -> None:
 
 
 def test_non_dict_item_skipped_in_currency_check() -> None:
-    """明细列表含非 dict 项（如字符串）→ currency 循环跳过，不报错，继续处理后续项。"""
-    # 非 dict 项在 currency 循环中被 continue 跳过；后续 dict 项无 amount_field → 跳过 sum 校验
-    validate_detail_consistency(
-        {"lenders": ["not-a-dict", {"userId": "u1"}]},
-        total=Decimal("100.0000"),
-        currency="USD",
-        detail_key="lenders",
-        amount_field="lendAmount",
-    )
+    """Non-dict main-detail item: skipped by continue in the currency loop (no crash), then
+    the strict main-detail collection -> 400."""
+    # A non-dict item is skipped by continue in the currency loop; at the strict main-detail
+    # collection it lacks amount_field -> 400
+    with pytest.raises(HTTPException) as exc_info:
+        validate_detail_consistency(
+            {"lenders": ["not-a-dict", {"userId": "u1"}]},
+            total=Decimal("100.0000"),
+            currency="USD",
+            detail_key="lenders",
+            amount_field="lendAmount",
+        )
+    assert exc_info.value.status_code == 400
+    assert "each item requires lendAmount" in exc_info.value.detail["message"]
 
 
 def test_invalid_amount_field_value_raises_400() -> None:
@@ -562,16 +652,18 @@ def test_main_container_not_list_400() -> None:
 
 
 def test_fee_strict_checked_even_when_main_escape_hatch() -> None:
-    """主明细走缺字段逃生口时，费用明细非法仍 400（费用校验不依赖主明细完整性·codex R2）。
+    """With the main-detail opt-out active (main_strict=False), an invalid fee detail still
+    yields 400 (the fee check does not depend on main-detail completeness; codex R2).
 
-    lenders 缺 txnAmount 本会触发 strict=False 早退跳过 sum；但费用明细缺 feeAmount
-    应先被严格校验拦下，而非连带放行。
+    Under main_strict=False, lenders missing txnAmount would take the strict=False early-return
+    and skip the sum; but a fee detail missing feeAmount must be caught by the strict fee check
+    first, rather than being let through alongside it.
     """
     with pytest.raises(HTTPException) as exc_info:
         validate_detail_consistency(
             {
-                "lenders": [{"userId": "L1"}],  # 缺 txnAmount → 主明细逃生口
-                "feeDeductions": [{"feeType": "PENALTY"}],  # 缺 feeAmount → 应 400
+                "lenders": [{"userId": "L1"}],  # missing txnAmount -> main-detail opt-out
+                "feeDeductions": [{"feeType": "PENALTY"}],  # missing feeAmount -> should 400
             },
             total=Decimal("3.0000"),
             currency="USD",
@@ -579,13 +671,16 @@ def test_fee_strict_checked_even_when_main_escape_hatch() -> None:
             amount_field="txnAmount",
             fee_detail_key="feeDeductions",
             fee_amount_field="feeAmount",
+            main_strict=False,
         )
     assert exc_info.value.status_code == 400
     assert "each item requires feeAmount" in exc_info.value.detail["message"]
 
 
 def test_fee_valid_but_main_escape_hatch_skips_sum() -> None:
-    """费用明细合法 + 主明细缺字段 → 费用校验过、主明细逃生口跳过 sum 比较（放行交 wedap）。"""
+    """Explicit opt-out (main_strict=False): valid fee detail + main detail missing a field ->
+    fee check passes, the main-detail opt-out skips the sum comparison (passed through to wedap;
+    this path is not enabled under the strict default)."""
     validate_detail_consistency(
         {
             "lenders": [{"userId": "L1"}],  # 缺 txnAmount → 逃生口
@@ -597,6 +692,7 @@ def test_fee_valid_but_main_escape_hatch_skips_sum() -> None:
         amount_field="txnAmount",
         fee_detail_key="feeDeductions",
         fee_amount_field="feeAmount",
+        main_strict=False,
     )
 
 

@@ -153,13 +153,15 @@ def _collect_detail_amounts(
 ) -> list[Decimal] | None:
     """从明细列表求各项金额，做 per-currency 护栏（scale/positive/finite）。
 
-    - 任一项非 dict 或缺 amount_field：
-      - strict=False → 返回 None（「部分缺 = wedap 自动分配」逃生口，调用方跳过 sum）；
-        用于主明细（如 lenders.txnAmount）——wedap 可自动分配、缺字段由 wedap 兜底拦。
-      - strict=True → 400「invalid {detail_key} item: each item requires {amount_field}」；
-        用于费用明细（feeDeductions.feeAmount 契约必填、无自动分配语义），
-        禁止靠缺字段绕过 sum 三等式（codex P1）。
-    - 金额解析失败 → 400「invalid {amount_field} in {detail_key} item」。
+    - Any item is not a dict or lacks amount_field:
+      - strict=False -> return None (opt-out: caller skips the sum check). Reserved for a
+        future endpoint that genuinely has a wedap auto-allocation contract; no production
+        caller uses it (disbursement/repayment lenders are strict by default).
+      - strict=True -> 400 "invalid {detail_key} item: each item requires {amount_field}".
+        Used for both the main detail (lenders, main_strict=True default) and the fee detail
+        (feeDeductions.feeAmount, contract-mandatory), so a missing field cannot bypass the
+        sum equation (codex P1).
+    - Amount parse failure -> 400 "invalid {amount_field} in {detail_key} item".
     """
     amounts: list[Decimal] = []
     for item in items:
@@ -197,13 +199,24 @@ def validate_detail_consistency(
     amount_field: str,
     fee_detail_key: str | None = None,
     fee_amount_field: str | None = None,
+    main_strict: bool = True,
+    require_detail: bool = False,
 ) -> None:
     """明细列表一致性前置校验（契约 C 透传原则：gateway 只校验不剪裁）。
 
-    - detail_key 不在 body 中，或值为 None → 跳过（非强制明细场景；None 视同字段缺省）
-    - 空列表 → 400 GW_400_VALIDATION "empty {detail_key}"
-    - 各项含 currencyCode 且 != 顶层 currency → 400 "detail currency mismatch"
-    - 明细项无 amount_field 字段 → 跳过 sum 校验（wedap 自动分配场景合法）
+    - detail_key absent from body, or its value is None: default require_detail=False -> skip
+      (non-mandatory detail case); require_detail=True -> 400 "missing {detail_key}". Used by
+      endpoints whose detail list is @NotEmpty in wedap (e.g. disbursement/repayment lenders):
+      an entirely missing list is also invalid, so the gateway self-validates instead of
+      relying on the wedap backstop (codex R1 finding fix).
+    - Empty list -> 400 GW_400_VALIDATION "empty {detail_key}"
+    - Any item has currencyCode != the top-level currency -> 400 "detail currency mismatch"
+    - An item lacks amount_field (when a top-level total is present): default
+      **main_strict=True -> 400** "invalid {detail_key} item: each item requires {amount_field}".
+      The gateway self-validates the sum rather than relying on the downstream backstop
+      (R4.5b guard-bypass fix: a lender missing txnAmount used to silently skip the sum check).
+      Only when an endpoint genuinely has a wedap auto-allocation contract does the caller pass
+      main_strict=False to keep the skip opt-out.
     - total=None → 无独立顶层总额（如 distribute 金额即取自明细 Σ），整段 sum 校验跳过，
       只保留「非空 + 币种一致」两项；避免对「明细自身求和再与自身比」的同义重复护栏
 
@@ -213,11 +226,19 @@ def validate_detail_consistency(
     故 fee_detail_key 提供时，sum 校验为 **Σ(主明细 amount_field) + Σ(费用明细 fee_amount_field)
     == total**；费用明细缺失/空则退化为纯主明细校验（纯本息还款口径不变）。**费用明细走严格
     模式**：非空时每项必须是 dict 且含合法 fee_amount_field（契约必填、无自动分配语义），
-    缺字段/非 dict → 400，禁止靠缺字段绕过三等式（codex P1）；这与主明细的「缺字段跳过」
-    逃生口刻意不对称——主明细（lenders）保留 wedap 自动分配语义 + wedap 兜底拦。
+    A missing field / non-dict item -> 400; a missing field must not bypass the equation
+    (codex P1). The main detail is strict by default too (main_strict=True: a missing
+    amount_field / non-dict item -> 400, see above); only an explicit main_strict=False falls
+    back to the "skip sum on missing field" opt-out, which no production caller uses
+    (disbursement/repayment are strict by default plus require_detail).
     容器类型：detail_key / fee_detail_key 的值若非 list（extra=allow 可透传标量）→ 400。
     """
     if detail_key not in body or body[detail_key] is None:
+        if require_detail:
+            raise HTTPException(
+                400,
+                detail={"code": "GW_400_VALIDATION", "message": f"missing {detail_key}"},
+            )
         return
 
     items = body[detail_key]
@@ -284,14 +305,16 @@ def validate_detail_consistency(
         # strict=True 下缺字段/非 dict 已 raise，非空 fee_items 必得非空 list（不会是 None）
         fee_amounts = collected or []
 
-    # 主明细 sum：strict=False 保留「部分缺字段=wedap 自动分配」逃生口（缺则跳过 sum 比较，
-    # 由 wedap 兜底拦，R4.5b 既有设计）
+    # Main-detail sum: main_strict=True by default -> a missing field is a 400 (the gateway
+    # self-validates rather than relying on the wedap backstop; fixes the R4.5b guard bypass).
+    # Only an explicit main_strict=False falls back to the "skip sum on missing field" opt-out
+    # (reserved for a future endpoint with a genuine wedap auto-allocation contract; opt-in).
     main_amounts = _collect_detail_amounts(
         items,
         amount_field=amount_field,
         detail_key=detail_key,
         currency=currency,
-        strict=False,
+        strict=main_strict,
     )
     if main_amounts is None:
         return
