@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.clients.wedap import WedapError
 from app.domain.biz_seq import validate_biz_seq_no
@@ -72,7 +73,7 @@ async def _reverse_original(
 
 
 async def submit_reversal(
-    factory: Any,
+    factory: async_sessionmaker[AsyncSession],
     *,
     wedap_reverse: Callable[..., Awaitable[dict[str, Any]]],
     req: SubmitRequest,
