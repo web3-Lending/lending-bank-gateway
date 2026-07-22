@@ -206,9 +206,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object",
-                  "title": "Response Collect From Users Api V1 Bank Funds Collect From Users Post"
+                  "$ref": "#/components/schemas/SubmitAckEnvelope"
                 }
               }
             }
@@ -249,9 +247,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object",
-                  "title": "Response Distribute To Users Api V1 Bank Funds Distribute To Users Post"
+                  "$ref": "#/components/schemas/SubmitAckEnvelope"
                 }
               }
             }
@@ -293,9 +289,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object",
-                  "title": "Response Refund To User Api V1 Bank Funds Refunds Post"
+                  "$ref": "#/components/schemas/SubmitAckEnvelope"
                 }
               }
             }
@@ -337,9 +331,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object",
-                  "title": "Response Reverse Transaction Api V1 Bank Funds Reversals Post"
+                  "$ref": "#/components/schemas/SubmitAckEnvelope"
                 }
               }
             }
@@ -1424,6 +1416,105 @@
           "oriTxnAmount"
         ],
         "title": "ReversalRequest"
+      },
+      "SubmitAck": {
+        "properties": {
+          "bizSeqNo": {
+            "type": "string",
+            "title": "Bizseqno"
+          },
+          "txnStatus": {
+            "type": "string",
+            "title": "Txnstatus"
+          },
+          "orderStatus": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Orderstatus"
+          },
+          "errorCode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Errorcode"
+          },
+          "errorMsg": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Errormsg"
+          },
+          "inFlight": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inflight"
+          }
+        },
+        "type": "object",
+        "required": [
+          "bizSeqNo",
+          "txnStatus"
+        ],
+        "title": "SubmitAck",
+        "description": "写原语提交响应 data 段最小字段契约（collect/distribute/refund/reversal 共用）。\n\n- ``txnStatus``：wedap 同步语义（SUCCESS 已同步终态 / PROCESSING 异步在途 /\n  FAILED / RESULT_UNKNOWN）\n- ``orderStatus``：gateway 台账 :class:`~app.domain.states.OrderStatus`\n  （ACCEPTED/SUBMITTED/SUCCEEDED/FAILED/RESULT_UNKNOWN/...），受理 vs 落账\n  以此字段区分；权威终态仍以 ``GET /bank-funds/status`` 为准。\n  缺失的两种情形：契约上线前受理单的幂等重放（first_response 冻结不回填）；\n  in-flight 重放（``inFlight=true``，零查询路径不读 order 行）——均应查单。\n- 未设置字段序列化省略（端点挂 ``response_model_exclude_unset``）：线格式对既有\n  调用方纯增量（不出现 ``errorCode: null`` 噪声）。不能用 model_serializer 丢 None\n  ——wrap serializer 的 dict 返回注解会把 openapi schema 打回 additionalProperties。"
+      },
+      "SubmitAckEnvelope": {
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "title": "Success"
+          },
+          "data": {
+            "$ref": "#/components/schemas/SubmitAck"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "trace_id": {
+            "type": "string",
+            "title": "Trace Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "trace_id"
+        ],
+        "title": "SubmitAckEnvelope",
+        "description": "写原语提交 200 响应统一 envelope（:func:`app.core.envelope.ok` 的类型化形态）。"
       },
       "ValidationError": {
         "properties": {

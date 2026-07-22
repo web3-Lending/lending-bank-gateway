@@ -95,8 +95,10 @@ async def submit_reversal(
             tenant_id=req.tenant_id, request_id=req.request_id, payload=req.wedap_payload
         )
         new_status = OrderStatus.SUCCEEDED
+        # txnStatus 归一化为 str（同 submit_order：防非 str 值经 response_model 升格永久 500）
+        raw_txn_status = data.get("txnStatus")
         response: dict[str, Any] = {
-            "txnStatus": data.get("txnStatus", "REVERSED"),
+            "txnStatus": raw_txn_status if isinstance(raw_txn_status, str) else "REVERSED",
             "bizSeqNo": req.biz_seq_no,
         }
     except (httpx.TimeoutException, httpx.TransportError):
@@ -166,6 +168,9 @@ async def submit_reversal(
                         trace_id=req.request_id,
                         caller_service=req.caller_service,
                     )
+            # 同 submit_order：orderStatus = CAS 后 RVSL 单真实状态，record_response 前
+            # 写入 → 随 first_response 冻结，幂等重放一致。
+            response["orderStatus"] = str(rvsl.status)
             await record_response(
                 session,
                 tenant_id=req.tenant_id,

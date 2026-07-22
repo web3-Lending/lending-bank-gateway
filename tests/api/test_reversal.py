@@ -76,6 +76,8 @@ def test_reversal_succeeds_and_flips_original(client: TestClient) -> None:
     r = client.post("/api/v1/bank-funds/reversals", json=REVERSAL_BODY, headers=HEADERS)
     assert r.status_code == 200
     assert r.json()["data"]["txnStatus"] == "REVERSED"
+    # 提交响应最小字段契约（2026-07-22）：RVSL 单 CAS 后状态随响应返回
+    assert r.json()["data"]["orderStatus"] == "SUCCEEDED"
 
     async def _check() -> tuple[str, str]:
         async with client.app.state.session_factory() as s:  # type: ignore[union-attr]

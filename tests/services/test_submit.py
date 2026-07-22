@@ -247,3 +247,69 @@ async def test_http_4xx_sets_failed_with_error_code_and_idempotency(factory) -> 
     replay = await submit_order(factory, wedap_call=wedap2.submit_disbursement, req=_req())
     assert replay["txnStatus"] == "FAILED"
     assert wedap2.submit_disbursement.await_count == 0
+
+
+# ── 提交响应最小字段契约：orderStatus（2026-07-22）─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_order_status_reflects_terminal_and_unknown(factory) -> None:
+    """orderStatus = CAS 后订单真实状态：同步 SUCCESS→SUCCEEDED；超时→RESULT_UNKNOWN；
+    重放冻结返回同值。"""
+    wedap = AsyncMock()
+    wedap.submit_disbursement.return_value = {"txnStatus": "SUCCESS"}
+    result = await submit_order(factory, wedap_call=wedap.submit_disbursement, req=_req())
+    assert result["orderStatus"] == "SUCCEEDED"
+
+    wedap_to = AsyncMock()
+    wedap_to.submit_disbursement.side_effect = httpx.ConnectTimeout("t")
+    req2 = _req(biz_seq_no="DSB-20260611-0001234567891")
+    result2 = await submit_order(factory, wedap_call=wedap_to.submit_disbursement, req=req2)
+    assert result2["orderStatus"] == "RESULT_UNKNOWN"
+
+    # 重放：first_response 冻结含 orderStatus，零外呼
+    wedap_replay = AsyncMock()
+    replay = await submit_order(factory, wedap_call=wedap_replay.submit_disbursement, req=req2)
+    assert replay == result2
+    wedap_replay.submit_disbursement.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_in_flight_replay_has_no_order_status(factory) -> None:
+    """in-flight 重放（幂等行存在但无 first_response）：零查询路径不读 order 行，
+    不带 orderStatus——inFlight=true 即「去查单」信号。"""
+    from app.services.idempotency import check_or_register
+
+    req = _req(biz_seq_no="DSB-20260611-0001234567892")
+    async with factory() as session:
+        async with session.begin():
+            await check_or_register(
+                session,
+                tenant_id=req.tenant_id,
+                business_scope=req.business_scope,
+                idempotency_key=req.biz_seq_no,
+                method="POST",
+                path=req.business_scope,
+                payload=req.wedap_payload,
+            )
+    wedap = AsyncMock()
+    result = await submit_order(factory, wedap_call=wedap.submit_disbursement, req=req)
+    assert result == {"txnStatus": "PROCESSING", "bizSeqNo": req.biz_seq_no, "inFlight": True}
+    assert "orderStatus" not in result
+    wedap.submit_disbursement.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_null_txn_status_normalized_to_str(factory) -> None:
+    """wedap 200 返回显式 txnStatus=null/非 str → 归一化 PROCESSING（独立评审 MEDIUM）：
+    防 response_model 把毒值升格 ResponseValidationError 500 且冻结进 first_response
+    致同 key 重放永久 500。"""
+    wedap = AsyncMock()
+    wedap.submit_disbursement.return_value = {"txnStatus": None}
+    req = _req(biz_seq_no="DSB-20260611-0001234567893")
+    result = await submit_order(factory, wedap_call=wedap.submit_disbursement, req=req)
+    assert result["txnStatus"] == "PROCESSING"
+    assert result["orderStatus"] == "SUBMITTED"
+    # 重放同样健康
+    replay = await submit_order(factory, wedap_call=AsyncMock(), req=req)
+    assert replay == result

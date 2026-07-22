@@ -368,6 +368,8 @@ def test_submit_reversal_rvsl_cas_skip_when_already_advanced(factory) -> None:  
             factory, wedap_reverse=wedap_reverse, req=_req("RVSL-CAS"), ori_biz_seq_no="CLT-CAS"
         )
         assert resp["txnStatus"] == "REVERSED"
+        # 提交响应契约：CAS skip 时 orderStatus = 外部已推进的真实状态
+        assert resp["orderStatus"] == "SUCCEEDED"
         async with factory() as s:
             rvsl = (
                 await s.execute(select(BankTxnOrder).where(BankTxnOrder.biz_seq_no == "RVSL-CAS"))
@@ -377,5 +379,24 @@ def test_submit_reversal_rvsl_cas_skip_when_already_advanced(factory) -> None:  
             ).scalar_one()
         assert rvsl.status == OrderStatus.SUCCEEDED  # 外部推进的状态被保留，未被覆写
         assert ori.status == OrderStatus.SUCCEEDED  # CAS skip 路径不触发原单翻转
+
+    asyncio.run(_run())
+
+
+def test_submit_reversal_null_txn_status_normalized(factory) -> None:  # type: ignore[no-untyped-def]
+    """wedap 200 返回显式 txnStatus=null → 归一化 REVERSED（同 submit_order，独立评审 MEDIUM）：
+    防 response_model 把毒值升格 500 且冻结进 first_response 致重放永久 500。"""
+
+    async def _run() -> None:
+        await _seed_succeeded_collect(factory, "CLT-NULLTS")
+        wedap_reverse = AsyncMock(return_value={"txnStatus": None})
+        resp = await submit_reversal(
+            factory,
+            wedap_reverse=wedap_reverse,
+            req=_req("RVSL-NULLTS"),
+            ori_biz_seq_no="CLT-NULLTS",
+        )
+        assert resp["txnStatus"] == "REVERSED"
+        assert resp["orderStatus"] == "SUCCEEDED"
 
     asyncio.run(_run())
