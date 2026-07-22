@@ -5,16 +5,38 @@ services:
       dockerfile: deploy/Dockerfile
       args:
         GIT_SHA: ${GIT_SHA:-unknown}
+        PROJECT_ID: ${PROJECT_ID:-lending-bank-gateway}
+        SERVICE_NAME: ${SERVICE_NAME:-lending-bank-gateway-api}
+        APP_VERSION: ${APP_VERSION:-0.1.0}
+        APP_SCHEMA_REVISION: ${APP_SCHEMA_REVISION:-d3e4f5a6b7c8_0021_platform_bank_account}
+        DATA_ACTION: ${DATA_ACTION:-none}
+        SOURCE_CONFIG_DIGEST: ${SOURCE_CONFIG_DIGEST:-digest_missing}
+        IMAGE_DIGEST: ${IMAGE_DIGEST:-digest_missing}
+    # buildops promote 以 --no-build 复用既有制品：image 指向 local-verify 产出的 APP_IMAGE。
+    image: ${APP_IMAGE:-lending-bank-gateway:latest}
     container_name: lending-bank-gateway
     ports:
       - "8022:8022"
     env_file:
-      - env.local
+      - ${GW_ENV_FILE:-env.local}
     environment:
       GW_DB_URL: mysql+asyncmy://${DB_USER}:${DB_PASS}@${DB_HOST}:3306/lending_bank_gateway
       GW_WEDAP_BASE_URL: ${WEDAP_BASE_URL}
       GW_S2S_SECRET: ${GW_S2S_SECRET}
       GW_ENV: ${GW_ENV:-local}
+      # 运行态发布身份 env（/api/version 回显源；规范0707）。buildops promote 经上传的 .env 覆盖。
+      PROJECT_ID: ${PROJECT_ID:-lending-bank-gateway}
+      SERVICE_NAME: ${SERVICE_NAME:-lending-bank-gateway-api}
+      APP_VERSION: ${APP_VERSION:-0.1.0}
+      GIT_SHA: ${GIT_SHA:-unknown}
+      BUILD_TIME_HKT: ${BUILD_TIME_HKT:-}
+      COLLAB_RELEASE_ID: ${COLLAB_RELEASE_ID:-not-reported}
+      COLLAB_RELEASE_RUN_ID: ${COLLAB_RELEASE_RUN_ID:-not-reported}
+      COLLAB_RELEASE_ENV: ${COLLAB_RELEASE_ENV:-local}
+      IMAGE_DIGEST: ${IMAGE_DIGEST:-digest_missing}
+      SOURCE_CONFIG_DIGEST: ${SOURCE_CONFIG_DIGEST:-digest_missing}
+      APP_SCHEMA_REVISION: ${APP_SCHEMA_REVISION:-d3e4f5a6b7c8_0021_platform_bank_account}
+      DATA_ACTION: ${DATA_ACTION:-none}
       # flow-import 透传（Pydantic 只认 GW_ 前缀；deploy.sh 已 set -a source env 文件，
       # 无前缀名与 GW_ 前缀名都参与替换）。嵌套默认 ${X:-${GW_X:-…}}：优先无前缀惯例名，
       # 回落 GW_ 前缀直写名——防 environment 段用空串/false 静默覆盖 env_file 里的 GW_ 条目。
