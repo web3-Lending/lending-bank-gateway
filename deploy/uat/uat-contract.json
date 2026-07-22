@@ -16,7 +16,7 @@
     "engine": "mysql-rds",
     "database": "lending_bank_gateway",
     "schemaRevisionField": "alembic_version.version_num",
-    "requiredSchemaRevision": "a7b8c9d0e1f2_0018_wedap_delivery_guardrails"
+    "requiredSchemaRevision": "d3e4f5a6b7c8"
   },
   "releaseGates": {
     "manifestRequired": true,

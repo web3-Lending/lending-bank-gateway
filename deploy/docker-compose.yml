@@ -20,8 +20,11 @@ services:
     env_file:
       - ${GW_ENV_FILE:-env.local}
     environment:
-      GW_DB_URL: mysql+asyncmy://${DB_USER}:${DB_PASS}@${DB_HOST}:3306/lending_bank_gateway
-      GW_WEDAP_BASE_URL: ${WEDAP_BASE_URL}
+      # remote promote：.env 已带拼好的 GW_DB_URL/GW_WEDAP_BASE_URL（无未前缀 DB_*/WEDAP_BASE_URL），
+      # 故优先复用 GW_ 值，回落到 local 的未前缀拼装——否则 remote compose 插值取空会清空 DB 连接串
+      # 与 wedap 基址（environment 覆盖 env_file，实测 docker compose config 证实）。
+      GW_DB_URL: ${GW_DB_URL:-mysql+asyncmy://${DB_USER}:${DB_PASS}@${DB_HOST}:3306/lending_bank_gateway}
+      GW_WEDAP_BASE_URL: ${GW_WEDAP_BASE_URL:-${WEDAP_BASE_URL}}
       GW_S2S_SECRET: ${GW_S2S_SECRET}
       GW_ENV: ${GW_ENV:-local}
       # 运行态发布身份 env（/api/version 回显源；规范0707）。buildops promote 经上传的 .env 覆盖。
