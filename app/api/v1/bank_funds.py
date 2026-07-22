@@ -83,6 +83,41 @@ class ReversalRequest(BaseModel):
     """原交易金额（wedap 防冲错校验用，非可调冲正金额）。"""
 
 
+# ── Response schema（提交响应最小字段契约 · 2026-07-22）──────────────────────────
+
+
+class SubmitAck(BaseModel):
+    """写原语提交响应 data 段最小字段契约（collect/distribute/refund/reversal 共用）。
+
+    - ``txnStatus``：wedap 同步语义（SUCCESS 已同步终态 / PROCESSING 异步在途 /
+      FAILED / RESULT_UNKNOWN）
+    - ``orderStatus``：gateway 台账 :class:`~app.domain.states.OrderStatus`
+      （ACCEPTED/SUBMITTED/SUCCEEDED/FAILED/RESULT_UNKNOWN/...），受理 vs 落账
+      以此字段区分；权威终态仍以 ``GET /bank-funds/status`` 为准。
+      缺失的两种情形：契约上线前受理单的幂等重放（first_response 冻结不回填）；
+      in-flight 重放（``inFlight=true``，零查询路径不读 order 行）——均应查单。
+    - 未设置字段序列化省略（端点挂 ``response_model_exclude_unset``）：线格式对既有
+      调用方纯增量（不出现 ``errorCode: null`` 噪声）。不能用 model_serializer 丢 None
+      ——wrap serializer 的 dict 返回注解会把 openapi schema 打回 additionalProperties。
+    """
+
+    bizSeqNo: str
+    txnStatus: str
+    orderStatus: str | None = None
+    errorCode: str | None = None
+    errorMsg: str | None = None
+    inFlight: bool | None = None
+
+
+class SubmitAckEnvelope(BaseModel):
+    """写原语提交 200 响应统一 envelope（:func:`app.core.envelope.ok` 的类型化形态）。"""
+
+    success: bool
+    data: SubmitAck
+    error: dict[str, Any] | None
+    trace_id: str
+
+
 # ── 内部提交 helper ────────────────────────────────────────────────────────────
 
 
@@ -147,7 +182,9 @@ async def _submit(
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 
-@router.post("/collect-from-users")
+@router.post(
+    "/collect-from-users", response_model=SubmitAckEnvelope, response_model_exclude_unset=True
+)
 async def collect_from_users(
     body: CollectRequest,
     request: Request,
@@ -181,7 +218,9 @@ async def collect_from_users(
     )
 
 
-@router.post("/distribute-to-users")
+@router.post(
+    "/distribute-to-users", response_model=SubmitAckEnvelope, response_model_exclude_unset=True
+)
 async def distribute_to_users(
     body: DistributeRequest,
     request: Request,
@@ -237,7 +276,7 @@ async def distribute_to_users(
     )
 
 
-@router.post("/refunds")
+@router.post("/refunds", response_model=SubmitAckEnvelope, response_model_exclude_unset=True)
 async def refund_to_user(
     body: RefundRequest,
     request: Request,
@@ -283,7 +322,7 @@ async def refund_to_user(
     )
 
 
-@router.post("/reversals")
+@router.post("/reversals", response_model=SubmitAckEnvelope, response_model_exclude_unset=True)
 async def reverse_transaction(
     body: ReversalRequest,
     request: Request,

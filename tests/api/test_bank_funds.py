@@ -353,3 +353,93 @@ def test_distribute_recipient_null_amount_400(client: TestClient) -> None:
     r = client.post("/api/v1/bank-funds/distribute-to-users", json=body, headers=h)
     assert r.status_code == 400, r.json()
     assert "recipients[0].distributeAmount" in r.json()["error"]["message"]
+
+
+# ── 提交响应最小字段契约（SubmitAck · 2026-07-22）──────────────────────────────
+
+
+def test_collect_response_order_status_submitted(client: TestClient) -> None:
+    """契约锁定：wedap PROCESSING → data 含 orderStatus=SUBMITTED；
+    None 可选字段（errorCode/errorMsg/inFlight）序列化省略，不出现 null 噪声。"""
+    r = client.post("/api/v1/bank-funds/collect-from-users", json=COLLECT_BODY, headers=HEADERS)
+    data = r.json()["data"]
+    assert data["orderStatus"] == "SUBMITTED"
+    # 旧字段不变（纯增量）
+    assert data["txnStatus"] == "PROCESSING"
+    assert data["bizSeqNo"] == COLLECT_BODY["bizSeqNo"]
+    for absent in ("errorCode", "errorMsg", "inFlight"):
+        assert absent not in data
+
+
+def test_collect_sync_success_order_status_succeeded(client: TestClient) -> None:
+    """wedap 同步终态 SUCCESS → orderStatus=SUCCEEDED（受理即落账，调用方免查单）。"""
+    client.app.state.wedap.collect_from_users.return_value = {"txnStatus": "SUCCESS"}  # type: ignore[union-attr]
+    body = {**COLLECT_BODY, "bizSeqNo": "CLT-20260611-0009000000001"}
+    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-sync-ok"}
+    r = client.post("/api/v1/bank-funds/collect-from-users", json=body, headers=h)
+    data = r.json()["data"]
+    assert data["txnStatus"] == "SUCCESS" and data["orderStatus"] == "SUCCEEDED"
+
+
+def test_collect_replay_returns_same_order_status(client: TestClient) -> None:
+    """幂等重放：first_response 冻结（含 orderStatus），重放与首次一致且零外呼。"""
+    r1 = client.post("/api/v1/bank-funds/collect-from-users", json=COLLECT_BODY, headers=HEADERS)
+    r2 = client.post("/api/v1/bank-funds/collect-from-users", json=COLLECT_BODY, headers=HEADERS)
+    assert r1.json()["data"] == r2.json()["data"]
+    assert r2.json()["data"]["orderStatus"] == "SUBMITTED"
+    assert client.app.state.wedap.collect_from_users.await_count == 1  # type: ignore[union-attr]
+
+
+def test_legacy_replay_without_order_status_key(client: TestClient) -> None:
+    """契约上线前受理单的重放：first_response 无 orderStatus → 不回填、键不出现
+    （幂等铁律：重放逐字节等于首次；orderStatus 以查单为准）。"""
+    import asyncio as _asyncio
+
+    from sqlalchemy import select, update
+
+    from app.models.idempotency import IdempotencyRecord
+
+    client.post("/api/v1/bank-funds/collect-from-users", json=COLLECT_BODY, headers=HEADERS)
+
+    async def _strip() -> None:
+        factory = client.app.state.session_factory  # type: ignore[union-attr]
+        async with factory() as session:
+            async with session.begin():
+                row = (
+                    await session.execute(
+                        select(IdempotencyRecord).where(
+                            IdempotencyRecord.idempotency_key == COLLECT_BODY["bizSeqNo"]
+                        )
+                    )
+                ).scalar_one()
+                legacy = {k: v for k, v in row.first_response.items() if k != "orderStatus"}
+                await session.execute(
+                    update(IdempotencyRecord)
+                    .where(IdempotencyRecord.id == row.id)
+                    .values(first_response=legacy)
+                )
+
+    _asyncio.run(_strip())
+    r = client.post("/api/v1/bank-funds/collect-from-users", json=COLLECT_BODY, headers=HEADERS)
+    data = r.json()["data"]
+    assert "orderStatus" not in data
+    assert data["txnStatus"] == "PROCESSING" and data["bizSeqNo"] == COLLECT_BODY["bizSeqNo"]
+
+
+def test_submit_endpoints_openapi_declare_submit_ack(client: TestClient) -> None:
+    """openapi 契约：四写原语 200 响应引用 SubmitAckEnvelope（不再是无字段 object）。"""
+    spec = client.get("/openapi.json", headers={"X-Caller-Service": "test-runner"}).json()
+    for path in (
+        "/api/v1/bank-funds/collect-from-users",
+        "/api/v1/bank-funds/distribute-to-users",
+        "/api/v1/bank-funds/refunds",
+        "/api/v1/bank-funds/reversals",
+    ):
+        ref = spec["paths"][path]["post"]["responses"]["200"]["content"]["application/json"][
+            "schema"
+        ]["$ref"]
+        assert ref.endswith("/SubmitAckEnvelope"), (path, ref)
+    props = spec["components"]["schemas"]["SubmitAck"]["properties"]
+    assert {"bizSeqNo", "txnStatus", "orderStatus", "errorCode", "errorMsg", "inFlight"} <= set(
+        props
+    )

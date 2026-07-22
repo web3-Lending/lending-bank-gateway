@@ -207,6 +207,10 @@ async def submit_order(
                         },
                     )
             # else：order 已被回调/兜底 worker 推进到更强态 → CAS skip 不覆盖，仅写 record_response
+            # 提交响应最小字段契约：orderStatus = CAS 后订单真实状态（CAS skip 时即回调/兜底
+            # 已聚合的更强态）。写在 record_response 前 → 随 first_response 一并冻结，
+            # 幂等重放响应与首次逐字节一致。
+            response["orderStatus"] = str(order.status)
             await record_response(
                 session,
                 tenant_id=req.tenant_id,

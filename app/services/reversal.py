@@ -166,6 +166,9 @@ async def submit_reversal(
                         trace_id=req.request_id,
                         caller_service=req.caller_service,
                     )
+            # 同 submit_order：orderStatus = CAS 后 RVSL 单真实状态，record_response 前
+            # 写入 → 随 first_response 冻结，幂等重放一致。
+            response["orderStatus"] = str(rvsl.status)
             await record_response(
                 session,
                 tenant_id=req.tenant_id,
