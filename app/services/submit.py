@@ -42,6 +42,60 @@ class SubmitRequest:
     ori_req_date: str | None = None
 
 
+async def register_and_accept_order(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    req: SubmitRequest,
+) -> dict[str, Any] | None:
+    """事务1：check_or_register 幂等登记 + 落 BankTxnOrder(ACCEPTED)（禁外呼），同事务 commit。
+
+    返回：
+      - dict → 直接作为响应 return（已完成重放的 first_response，或 in-flight 的 PROCESSING 响应），调用方不外呼
+      - None → 全新受理，order 已落 ACCEPTED，调用方继续外呼 + tx2
+    IntegrityError（order 存在但幂等行缺失）→ IdempotencyConflict（上抛由 API 层转 409）。
+    """
+    try:
+        async with factory() as session:
+            try:
+                async with session.begin():
+                    hit = await check_or_register(
+                        session,
+                        tenant_id=req.tenant_id,
+                        business_scope=req.business_scope,
+                        idempotency_key=req.biz_seq_no,
+                        method="POST",
+                        path=req.business_scope,
+                        payload=req.wedap_payload,
+                    )
+                    if hit is not None:
+                        return hit
+                    session.add(
+                        BankTxnOrder(
+                            tenant_id=req.tenant_id,
+                            biz_seq_no=req.biz_seq_no,
+                            business_action=req.business_action,
+                            biz_type=req.biz_type,
+                            amount=req.amount,
+                            currency=req.currency,
+                            caller_service=req.caller_service,
+                            status=OrderStatus.ACCEPTED,
+                            request_id=req.request_id,
+                            trans_type=(str(req.wedap_payload.get("transType") or "") or None),
+                            ori_req_date=req.ori_req_date,
+                        )
+                    )
+            except IntegrityError:
+                logger.error(
+                    "order exists without idempotency record: %s/%s",
+                    req.tenant_id,
+                    req.biz_seq_no,
+                )
+                raise IdempotencyConflict(req.biz_seq_no) from None
+    except IdempotencyInFlight:
+        return {"txnStatus": "PROCESSING", "bizSeqNo": req.biz_seq_no, "inFlight": True}
+    return None
+
+
 async def submit_order(
     factory: async_sessionmaker[AsyncSession],
     *,
@@ -57,54 +111,9 @@ async def submit_order(
     推进（见 spec §7 在途单宽限）。
     """
     validate_biz_seq_no(req.biz_seq_no)
-
-    # 事务1：check_or_register + BankTxnOrder(ACCEPTED) 落库，同事务 commit（禁外呼）
-    try:
-        async with factory() as session:
-            try:
-                async with session.begin():
-                    hit = await check_or_register(
-                        session,
-                        tenant_id=req.tenant_id,
-                        business_scope=req.business_scope,
-                        idempotency_key=req.biz_seq_no,
-                        method="POST",
-                        path=req.business_scope,
-                        payload=req.wedap_payload,
-                    )
-                    if hit is not None:
-                        # 已完成重放：直接返回 first_response，零外呼
-                        return hit
-                    session.add(
-                        BankTxnOrder(
-                            tenant_id=req.tenant_id,
-                            biz_seq_no=req.biz_seq_no,
-                            business_action=req.business_action,
-                            biz_type=req.biz_type,
-                            amount=req.amount,
-                            currency=req.currency,
-                            caller_service=req.caller_service,
-                            status=OrderStatus.ACCEPTED,
-                            request_id=req.request_id,
-                            # 通用状态回查供参（0020）：transType 存调用方原值——wedap 按
-                            # (oriBizSeqNo, transType) 消歧，查询值必须等于提交值。
-                            # 无损落库（codex P1）：入口 pydantic 已强制必填且 ≤20，禁止
-                            # 静默截断（截断致回查值 != 提交值，单据永久查不到）。
-                            trans_type=(str(req.wedap_payload.get("transType") or "") or None),
-                            ori_req_date=req.ori_req_date,
-                        )
-                    )
-            except IntegrityError:
-                # order 已存在但幂等行缺失（人工补数/迁移脏状态）
-                logger.error(
-                    "order exists without idempotency record: %s/%s",
-                    req.tenant_id,
-                    req.biz_seq_no,
-                )
-                raise IdempotencyConflict(req.biz_seq_no) from None
-    except IdempotencyInFlight:
-        # 崩溃重放/并发重放：事务1 已 commit 但 record_response 未写，禁止重复执行业务
-        return {"txnStatus": "PROCESSING", "bizSeqNo": req.biz_seq_no, "inFlight": True}
+    early = await register_and_accept_order(factory, req=req)
+    if early is not None:
+        return early
 
     # 外呼（事务外）：成功→SUBMITTED；超时/传输错误→RESULT_UNKNOWN；
     # HTTPStatusError 5xx→RESULT_UNKNOWN（上游不可用结果未知）；
