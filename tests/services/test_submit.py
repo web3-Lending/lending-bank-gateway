@@ -297,3 +297,19 @@ async def test_in_flight_replay_has_no_order_status(factory) -> None:
     assert result == {"txnStatus": "PROCESSING", "bizSeqNo": req.biz_seq_no, "inFlight": True}
     assert "orderStatus" not in result
     wedap.submit_disbursement.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_null_txn_status_normalized_to_str(factory) -> None:
+    """wedap 200 返回显式 txnStatus=null/非 str → 归一化 PROCESSING（独立评审 MEDIUM）：
+    防 response_model 把毒值升格 ResponseValidationError 500 且冻结进 first_response
+    致同 key 重放永久 500。"""
+    wedap = AsyncMock()
+    wedap.submit_disbursement.return_value = {"txnStatus": None}
+    req = _req(biz_seq_no="DSB-20260611-0001234567893")
+    result = await submit_order(factory, wedap_call=wedap.submit_disbursement, req=req)
+    assert result["txnStatus"] == "PROCESSING"
+    assert result["orderStatus"] == "SUBMITTED"
+    # 重放同样健康
+    replay = await submit_order(factory, wedap_call=AsyncMock(), req=req)
+    assert replay == result

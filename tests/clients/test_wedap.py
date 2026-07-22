@@ -1227,9 +1227,7 @@ async def test_get_internal_account_info_passthrough() -> None:
 async def test_get_internal_account_info_not_found_raises_with_code() -> None:
     # 内部户不存在：wedap 返 404/422 业务码（§5.7 响应状态码表）→ WedapError 保留业务码
     respx.get(f"{BASE}/api/v1/deposit/internal-accounts/info").mock(
-        return_value=httpx.Response(
-            404, json={"code": "404", "msg": "RESOURCE_NOT_FOUND"}
-        )
+        return_value=httpx.Response(404, json={"code": "404", "msg": "RESOURCE_NOT_FOUND"})
     )
     with pytest.raises(WedapError) as exc:
         await _client().get_internal_account_info(
@@ -1247,9 +1245,7 @@ async def test_get_internal_account_info_not_found_raises_with_code() -> None:
 async def test_unwrap_4xx_envelope_raises_wedap_error_with_business_code() -> None:
     """HTTP 422 + 可解析 envelope → WedapError（业务码/文案透传，不再降级 HTTP_422）。"""
     respx.post(f"{BASE}/api/v1/bank-funds/user-collections").mock(
-        return_value=httpx.Response(
-            422, json={"code": "422", "message": "可用余额不足"}
-        )
+        return_value=httpx.Response(422, json={"code": "422", "message": "可用余额不足"})
     )
     with pytest.raises(WedapError) as exc:
         await _client().collect_from_users(tenant_id="WBTHK01", request_id="r", payload={})

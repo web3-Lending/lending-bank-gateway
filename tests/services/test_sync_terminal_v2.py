@@ -96,7 +96,9 @@ async def test_cas_skips_when_callback_already_advanced(factory) -> None:
                 order.finalized_via = "CALLBACK"
         return {"txnStatus": "PROCESSING"}  # 本次外呼返回 PROCESSING（弱于已有终态）
 
-    await submit_order(factory, wedap_call=_wedap_call, req=_req())
+    resp = await submit_order(factory, wedap_call=_wedap_call, req=_req())
+    # 提交响应契约：CAS skip 时 orderStatus = 回调已聚合的更强态（非本次弱结果 SUBMITTED）
+    assert resp["orderStatus"] == "SUCCEEDED"
     async with factory() as s:
         order = (await s.execute(select(BankTxnOrder))).scalar_one()
         # CAS skip：未被本次 PROCESSING/SUBMITTED 覆盖，仍是回调置的 SUCCEEDED

@@ -133,8 +133,12 @@ async def submit_order(
         wedap_status = str(data.get("txnStatus", "")).upper()
         # 同步收口复用 G2 共享映射；None（PROCESSING/缺省/未知）回落 SUBMITTED 保持既有语义。
         new_status = map_wedap_txn_status(wedap_status) or OrderStatus.SUBMITTED
+        # txnStatus 归一化为 str（显式 null / 非字符串 → 兜底值）：response_model 挂上后
+        # 非 str 会触发 ResponseValidationError 500，且毒响应已冻结进 first_response →
+        # 同 key 重放永久 500（独立评审 MEDIUM）。改动前该场景是 200 透传，不允许回归。
+        raw_txn_status = data.get("txnStatus")
         response: dict[str, Any] = {
-            "txnStatus": data.get("txnStatus", "PROCESSING"),
+            "txnStatus": raw_txn_status if isinstance(raw_txn_status, str) else "PROCESSING",
             "bizSeqNo": req.biz_seq_no,
         }
     except (httpx.TimeoutException, httpx.TransportError):
@@ -209,7 +213,7 @@ async def submit_order(
             # else：order 已被回调/兜底 worker 推进到更强态 → CAS skip 不覆盖，仅写 record_response
             # 提交响应最小字段契约：orderStatus = CAS 后订单真实状态（CAS skip 时即回调/兜底
             # 已聚合的更强态）。写在 record_response 前 → 随 first_response 一并冻结，
-            # 幂等重放响应与首次逐字节一致。
+            # 幂等重放 data 段与首次逐字节一致（envelope trace_id 每请求各异）。
             response["orderStatus"] = str(order.status)
             await record_response(
                 session,
