@@ -263,6 +263,27 @@ class WedapClient:
             payload=payload,
         )
 
+    async def reverse(
+        self,
+        *,
+        tenant_id: str,
+        request_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """通用冲正（对接文档 Public.md §4.4.2，一期已实现）：全额冲正原归集单。
+
+        同步接口：成功同步返回 txnStatus=REVERSED（当日 DCN / 跨日 BANK-104），无回调。
+        transType=原交易类型，一期仅归集类 BANK_FUND_COLLECT_LOAN/BANK_FUND_COLLECT_CLEARING；
+        资金到客户账不支持冲正。防冲错：wedap 三方校验 oriTxnAmount/currencyCode，不一致返 422。
+        幂等 X-Request-Id：已 REVERSED 重复冲正返回 REVERSED 不报错。gateway 薄透传不复刻业务校验。
+        """
+        return await self._post(
+            "/api/v1/transactions/reversal",
+            tenant_id=tenant_id,
+            request_id=request_id,
+            payload=payload,
+        )
+
     async def query_transaction_status(
         self,
         *,
