@@ -50,7 +50,8 @@ async def register_and_accept_order(
     """事务1：check_or_register 幂等登记 + 落 BankTxnOrder(ACCEPTED)（禁外呼），同事务 commit。
 
     返回：
-      - dict → 直接作为响应 return（已完成重放的 first_response，或 in-flight 的 PROCESSING 响应），调用方不外呼
+      - dict → 直接作为响应 return（已完成重放的 first_response，或 in-flight 的
+        PROCESSING 响应），调用方不外呼
       - None → 全新受理，order 已落 ACCEPTED，调用方继续外呼 + tx2
     IntegrityError（order 存在但幂等行缺失）→ IdempotencyConflict（上抛由 API 层转 409）。
     """
