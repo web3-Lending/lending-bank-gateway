@@ -1,0 +1,32 @@
+{
+  "projectId": "lending-bank-gateway",
+  "serviceName": "lending-bank-gateway-api",
+  "environment": "uat",
+  "status": "adapter-required",
+  "uatHost": "43.198.198.78",
+  "uatUser": "uat",
+  "uatRemoteHome": "/home/uat",
+  "devHost": "139.159.161.9",
+  "api": {
+    "port": 8022,
+    "versionEndpoint": "/api/version",
+    "readinessEndpoint": "/readyz"
+  },
+  "database": {
+    "engine": "mysql-rds",
+    "database": "lending_bank_gateway",
+    "schemaRevisionField": "alembic_version.version_num",
+    "requiredSchemaRevision": "d3e4f5a6b7c8"
+  },
+  "releaseGates": {
+    "manifestRequired": true,
+    "devVerifyRunIdRequired": true,
+    "sameDigestAsDevRequired": true,
+    "sameSchemaAsDevRequired": true,
+    "dataActionMustBeNone": true
+  },
+  "notes": [
+    "正式 UAT confirm 必须选择已 local+dev verified 的 release manifest。",
+    "UAT 只通过 DEV 跳板复制同一 image.tar.gz，并以 --no-build 启动同一 release tag。"
+  ]
+}

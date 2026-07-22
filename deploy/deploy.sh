@@ -28,7 +28,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEPLOY_DIR="$SCRIPT_DIR"
 
-SERVICE_NAME="Lending Bank Gateway"
+DISPLAY_SERVICE_NAME="Lending Bank Gateway"
 CONTAINER_NAME="lending-bank-gateway"
 APP_PORT="8022"
 HEALTH_ENDPOINT="/healthz"
@@ -47,15 +47,11 @@ if [[ "${1:-}" == "local" || "${1:-}" == "dev-hw" ]]; then
 fi
 ENV_FILE="$DEPLOY_DIR/env.${ENV}"
 
-# [REQ-5] dev-hw 发布前 conventional-commits 自动升版（semantic-release 模式）：
-# 树脏/无新提交自动跳过；NO_AUTO_BUMP=1 应急关闭。必须在算 GIT_SHA 之前跑——
-# bump 会产生一个 chore(release) commit，GIT_SHA 要指到它。bump 后记得 push。
-if [ "$ENV" = "dev-hw" ] && [ "${NO_AUTO_BUMP:-0}" != "1" ]; then
-    python3 "$PROJECT_ROOT/scripts/release_version.py" auto-bump
-fi
-
-# Git commit SHA baked into the image for GET /build-info anchoring.
-GIT_SHA="$(git -C "$PROJECT_ROOT" describe --always --dirty 2>/dev/null || echo unknown)"
+# 发布身份 GIT_SHA：buildops promote 经 release_payload env 传入既定 sha（部署既有制品，
+# 不重算）；直接部署时回落 git describe。烘进镜像供 GET /build-info 与 /api/version anchoring。
+# 版本升版已移交发布链（scripts/ds-build.sh local-verify），deploy.sh 不再自动 bump——
+# dev-hw 禁止 deploy.sh 直接 build（见 remote 段治理护栏）。
+GIT_SHA="${GIT_SHA:-$(git -C "$PROJECT_ROOT" describe --always --dirty 2>/dev/null || echo unknown)}"
 # Harden against command injection: git describe can emit tag names with shell
 # metacharacters. Reject anything outside a safe charset and fall back to the
 # bare short hash (+ -dirty). Defensive parity with lending-recon remote path.
@@ -70,6 +66,17 @@ export GIT_SHA
 APP_VERSION="${APP_VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' "$PROJECT_ROOT/pyproject.toml" | head -1)}"
 APP_VERSION="${APP_VERSION:-0.1.0}"
 export APP_VERSION
+# buildops promote 经 release_payload env 覆盖以下发布身份字段（digest / release id 等）；
+# 直接部署时用下方默认值，/api/version 显式占位而非猜测。
+export PROJECT_ID="${PROJECT_ID:-lending-bank-gateway}"
+export SERVICE_NAME="${SERVICE_NAME:-lending-bank-gateway-api}"
+export APP_SCHEMA_REVISION="${APP_SCHEMA_REVISION:-d3e4f5a6b7c8_0021_platform_bank_account}"
+export DATA_ACTION="${DATA_ACTION:-none}"
+export COLLAB_RELEASE_ID="${COLLAB_RELEASE_ID:-not-reported}"
+export COLLAB_RELEASE_RUN_ID="${COLLAB_RELEASE_RUN_ID:-not-reported}"
+export COLLAB_RELEASE_ENV="${COLLAB_RELEASE_ENV:-$ENV}"
+export IMAGE_DIGEST="${IMAGE_DIGEST:-digest_missing}"
+export SOURCE_CONFIG_DIGEST="${SOURCE_CONFIG_DIGEST:-digest_missing}"
 export BUILD_TIME_HKT="${BUILD_TIME_HKT:-$(TZ=Asia/Hong_Kong date '+%Y-%m-%d %H:%M:%S HKT')}"
 
 # ── Colors & logging ─────────────────────────────────────────
@@ -135,7 +142,7 @@ ensure_networks_local() {
 
 # ── Banner ───────────────────────────────────────────────────
 echo "=========================================="
-echo "  ${SERVICE_NAME} - Deployment"
+echo "  ${DISPLAY_SERVICE_NAME} - Deployment"
 echo "=========================================="
 echo "  Env:       ${ENV}"
 echo "  Mode:      ${DEPLOY_MODE}"
@@ -177,51 +184,61 @@ if [ "$DEPLOY_MODE" = "remote" ]; then
             "$1" "${REMOTE_USER}@${REMOTE_SERVER}:$2"
     }
 
-    # 注意：dev-hw 容器内 build 偶发 pip→files.pythonhosted.org read timeout（2026-06-18 实测，
-    # 甚至把 SSH 会话拖断），故 remote 不在 dev-hw 上 build，而是「本机 build → docker save →
-    # scp → dev-hw docker load → docker run」：本机网络可靠、镜像一次性传输，绕开 dev-hw 出网坑。
-    # （与 recon 的"远程 build"差异在此——dev-hw gateway 出网比 recon 当时更不稳。）
-    IMAGE_TAG="lending-bank-gateway:${ENV}"
+    remote_compose_cmd() {
+        ssh_cmd "cd ${REMOTE_PATH}/${REMOTE_APP_DIRNAME} && docker compose -p ${COMPOSE_PROJECT} -f deploy/docker-compose.yml --env-file deploy/.env $*"
+    }
+
+    # 发布治理（buildops 不可变发布链）：dev-hw 禁止远端 build，只允许 promote 一个已在本地
+    # local-verify 通过、带 digest 的既有 APP_IMAGE 制品。正规入口 scripts/ds-build.sh
+    # dev-promote --confirm——它先 scp + docker load 镜像到 dev-hw、再以 --no-build 调本脚本
+    # 走 docker compose up（不上传源码、不远端 build，绕开 dev-hw 出网坑同时保证制品不可变）。
+    # 日志轮转由 docker-compose.yml 的 logging 块承载（compose up 生效，与旧 docker run 口径一致）。
+    if [ "$NO_BUILD" = false ]; then
+        print_error "dev/UAT remote build is forbidden by Lending group governance"
+        print_error "Run scripts/ds-build.sh local-verify first, then promote with scripts/ds-build.sh dev-promote --confirm."
+        exit 1
+    fi
+    if [ -z "${APP_IMAGE:-}" ]; then
+        print_error "APP_IMAGE is required for remote --no-build promotion"
+        exit 1
+    fi
+    if [ "${IMAGE_DIGEST}" = "digest_missing" ] || [ "${SOURCE_CONFIG_DIGEST}" = "digest_missing" ]; then
+        print_error "IMAGE_DIGEST and SOURCE_CONFIG_DIGEST are required for remote --no-build promotion"
+        exit 1
+    fi
+
     # mktemp 唯一路径 + trap 清理，避免并发/重试碰撞与失败残留（codex review LOW）。
-    TARBALL="$(mktemp "/tmp/${COMPOSE_PROJECT}-${ENV}-XXXXXX.tar.gz")"
     GW_RUN_ENV="$(mktemp "/tmp/${COMPOSE_PROJECT}-runenv-XXXXXX")"
-    REMOTE_TARBALL="/tmp/$(basename "$TARBALL")"
-    REMOTE_RUN_ENV="/tmp/$(basename "$GW_RUN_ENV")"
-    trap 'rm -f "$TARBALL" "$GW_RUN_ENV"' EXIT
+    trap 'rm -f "$GW_RUN_ENV"' EXIT
 
-    print_info "本机 build 镜像 ${IMAGE_TAG}（GIT_SHA=${GIT_SHA}）..."
-    cd "$PROJECT_ROOT"
-    DOCKER_BUILDKIT=1 docker build -f deploy/Dockerfile -t "${IMAGE_TAG}" \
-        --build-arg GIT_SHA="${GIT_SHA}" \
-        --build-arg APP_VERSION="${APP_VERSION}" \
-        --build-arg RELEASE_ID="${COLLAB_RELEASE_ID:-not-reported}" \
-        --build-arg SCHEMA_REVISION="${APP_SCHEMA_REVISION:-schema_unknown}" .
-
-    print_info "docker save + gzip + scp 到 dev-hw + load ..."
-    docker save "${IMAGE_TAG}" | gzip > "${TARBALL}"
-    scp_cmd "${TARBALL}" "${REMOTE_TARBALL}"
-    ssh_cmd "gunzip -c ${REMOTE_TARBALL} | docker load && rm -f ${REMOTE_TARBALL}"
-
-    print_info "确保 wedap-network 存在 ..."
+    print_info "确保 wedap-network 存在 + 远端 deploy 目录 ..."
     ssh_cmd "docker network create wedap-network 2>/dev/null || true"
+    ssh_cmd "mkdir -p ${REMOTE_PATH}/${REMOTE_APP_DIRNAME}/deploy"
 
-    # 容器 env 写临时文件 → scp(600) → docker run --env-file，避免把 secret 插进远程 shell
+    # 容器 env 写临时文件 → scp(600) → docker compose --env-file，避免把 secret 插进远程 shell
     # 字符串（含 ' 会破坏引用/注入，codex review HIGH）。注：env 仍会出现在 docker inspect，
     # 与其它服务一致，属 dev-hw 可接受口径。GW_S2S_SECRET 非 local/test 必填（资金网关 fail-fast）。
-    print_info "dev-hw 起容器（${APP_PORT} / wedap-network；entrypoint alembic→uvicorn）..."
+    print_info "dev-hw 起容器（${APP_PORT} / wedap-network；entrypoint alembic→uvicorn；--no-build promote 既有制品）..."
     {
+        # compose 变量替换 + 容器 env 同源：image 与发布身份 build-arg/env 都从这份 .env 取。
+        printf 'APP_IMAGE=%s\n' "$APP_IMAGE"
         printf 'GW_DB_URL=mysql+asyncmy://%s:%s@%s:3306/lending_bank_gateway\n' "$DB_USER" "$DB_PASS" "$DB_HOST"
         printf 'GW_WEDAP_BASE_URL=%s\n' "$WEDAP_BASE_URL"
         printf 'GW_S2S_SECRET=%s\n' "$GW_S2S_SECRET"
         printf 'GW_ENV=%s\n' "$GW_ENV"
         # 运行态发布身份 env（/api/version 回显源；规范0707 §Docker/OCI Label 与环境变量）
+        printf 'PROJECT_ID=%s\n' "$PROJECT_ID"
+        printf 'SERVICE_NAME=%s\n' "$SERVICE_NAME"
         printf 'APP_VERSION=%s\n' "$APP_VERSION"
         printf 'GIT_SHA=%s\n' "$GIT_SHA"
         printf 'BUILD_TIME_HKT=%s\n' "$BUILD_TIME_HKT"
-        printf 'COLLAB_RELEASE_ENV=%s\n' "$GW_ENV"
-        [ -n "${COLLAB_RELEASE_ID:-}" ] && printf 'COLLAB_RELEASE_ID=%s\n' "$COLLAB_RELEASE_ID"
-        [ -n "${COLLAB_RELEASE_RUN_ID:-}" ] && printf 'COLLAB_RELEASE_RUN_ID=%s\n' "$COLLAB_RELEASE_RUN_ID"
-        [ -n "${APP_SCHEMA_REVISION:-}" ] && printf 'APP_SCHEMA_REVISION=%s\n' "$APP_SCHEMA_REVISION"
+        printf 'COLLAB_RELEASE_ENV=%s\n' "$COLLAB_RELEASE_ENV"
+        printf 'COLLAB_RELEASE_ID=%s\n' "$COLLAB_RELEASE_ID"
+        printf 'COLLAB_RELEASE_RUN_ID=%s\n' "$COLLAB_RELEASE_RUN_ID"
+        printf 'APP_SCHEMA_REVISION=%s\n' "$APP_SCHEMA_REVISION"
+        printf 'IMAGE_DIGEST=%s\n' "$IMAGE_DIGEST"
+        printf 'SOURCE_CONFIG_DIGEST=%s\n' "$SOURCE_CONFIG_DIGEST"
+        printf 'DATA_ACTION=%s\n' "$DATA_ACTION"
         # flow-import + S3 可选透传：env.<ENV> 定义即注入容器；未定义留空。
         # 银行南向走 gw-internal（Phase 1 无鉴权），前缀由 GW_WEDAP_BASE_URL 承载（/lending-gw），
         # 无凭证可透传；flow-import 独立 base 走 GW_WEDAP_IMPORT_BASE_URL（/external/web2-core）。
@@ -249,16 +266,15 @@ if [ "$DEPLOY_MODE" = "remote" ]; then
             "AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-}"; do
             [ -n "${_kv#*=}" ] && printf '%s\n' "$_kv"
         done
+        printf 'GW_ENV_FILE=.env\n'
     } > "$GW_RUN_ENV"
     chmod 600 "$GW_RUN_ENV"
-    scp_cmd "$GW_RUN_ENV" "$REMOTE_RUN_ENV"
-    ssh_cmd "chmod 600 ${REMOTE_RUN_ENV}"
+    print_info "上传 release runtime compose/env（不上传源码，不远端 build）..."
+    scp_cmd "$DEPLOY_DIR/docker-compose.yml" "${REMOTE_PATH}/${REMOTE_APP_DIRNAME}/deploy/docker-compose.yml"
+    scp_cmd "$GW_RUN_ENV" "${REMOTE_PATH}/${REMOTE_APP_DIRNAME}/deploy/.env"
+    ssh_cmd "chmod 600 ${REMOTE_PATH}/${REMOTE_APP_DIRNAME}/deploy/.env"
     ssh_cmd "docker rm -f ${CONTAINER_NAME} 2>/dev/null || true"
-    # remote 走 docker run 不经 compose，compose 的 json-file logging 块在 dev-hw 不生效；
-    # dev-hw daemon.json 也无全局 log-opts（2026-07-13 实测 LogConfig=json-file map[]），
-    # 轮转上限必须在 run 命令显式带上，与 compose 口径一致（3 × 100MB）。
-    ssh_cmd "docker run -d --name ${CONTAINER_NAME} --network wedap-network --restart unless-stopped --log-driver json-file --log-opt max-size=100m --log-opt max-file=3 -p ${APP_PORT}:${APP_PORT} --env-file ${REMOTE_RUN_ENV} ${IMAGE_TAG}"
-    ssh_cmd "rm -f ${REMOTE_RUN_ENV}"
+    remote_compose_cmd "up -d --force-recreate --remove-orphans --no-build"
 
     print_info "远程健康检查（容器内先跑 alembic 再起服务，首次可能稍久）..."
     backend_up=false
@@ -315,7 +331,20 @@ if [ "$BUILD_ONLY" = true ]; then
 fi
 
 print_info "Starting service..."
-compose_cmd up -d --force-recreate
+if [ "$NO_BUILD" = true ]; then
+    # local --no-build promote：起一个已 local-verify 通过、带 digest 的既有 APP_IMAGE 制品
+    if [ -z "${APP_IMAGE:-}" ]; then
+        print_error "APP_IMAGE is required for local --no-build promotion"
+        exit 1
+    fi
+    if [ "${IMAGE_DIGEST}" = "digest_missing" ] || [ "${SOURCE_CONFIG_DIGEST}" = "digest_missing" ]; then
+        print_error "IMAGE_DIGEST and SOURCE_CONFIG_DIGEST are required for local --no-build promotion"
+        exit 1
+    fi
+    compose_cmd up -d --force-recreate --remove-orphans --no-build
+else
+    compose_cmd up -d --force-recreate --remove-orphans
+fi
 
 print_info "Waiting for service..."
 sleep 3
