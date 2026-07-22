@@ -24,6 +24,7 @@
 | 文件 | 动作 | 职责 |
 |---|---|---|
 | `app/clients/wedap.py` | Modify | 加 `reverse()` 方法，POST wedap 通用冲正 |
+| `app/services/submit.py` | Modify | 抽出共享 `register_and_accept_order()`（tx1 幂等落库）供两处复用 |
 | `app/services/reversal.py` | Create | `submit_reversal()` 编排 + `_reverse_original()` 原单翻转 |
 | `app/api/v1/bank_funds.py` | Modify | 加 `ReversalRequest` schema + `reverse_transaction` 端点 |
 | `app/core/config.py` | Modify | `refund_full_amount_guard` 默认 `False`→`True` |
@@ -128,14 +129,97 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 ## Task 2: `submit_reversal` 编排服务
 
 **Files:**
+- Modify: `app/services/submit.py`（抽出 `register_and_accept_order`，`submit_order` 改调它）
 - Create: `app/services/reversal.py`
-- Test: `tests/services/test_reversal_service.py`（Create）
+- Test: `tests/services/test_reversal_service.py`（Create）；既有 `tests/services/test_submit.py` 作重构护栏
 
 **Interfaces:**
-- Consumes: `SubmitRequest`（`app/services/submit.py`）；`finalize_terminal_in_session`、`is_terminal`（`app/services/order_finalize.py`）；`check_or_register`、`record_response`、`IdempotencyConflict`、`IdempotencyInFlight`（`app/services/idempotency.py`）；`OrderStatus`、`assert_transition`、`IllegalTransition`（`app/domain/states.py`）；`BankTxnOrder`（`app/models/txn.py`）；`validate_biz_seq_no`（`app/domain/biz_seq.py`）；`write_audit`（`app/services/audit.py`）；`WedapError`（`app/clients/wedap.py`）。
-- Produces: `async def submit_reversal(factory, *, wedap_reverse: Callable[..., Awaitable[dict[str, Any]]], req: SubmitRequest, ori_biz_seq_no: str) -> dict[str, Any]`。
+- Consumes: `SubmitRequest`、`register_and_accept_order`（`app/services/submit.py`，本任务抽出）；`finalize_terminal_in_session`、`is_terminal`（`app/services/order_finalize.py`）；`record_response`、`IdempotencyConflict`（`app/services/idempotency.py`）；`OrderStatus`、`assert_transition`、`IllegalTransition`（`app/domain/states.py`）；`BankTxnOrder`（`app/models/txn.py`）；`validate_biz_seq_no`（`app/domain/biz_seq.py`）；`write_audit`（`app/services/audit.py`）；`WedapError`（`app/clients/wedap.py`）。
+- Produces: `async def register_and_accept_order(factory, *, req: SubmitRequest) -> dict[str, Any] | None`（事务1 幂等落库，返回 first_response/PROCESSING 响应表示直接 return，None 表示继续外呼）；`async def submit_reversal(factory, *, wedap_reverse: Callable[..., Awaitable[dict[str, Any]]], req: SubmitRequest, ori_biz_seq_no: str) -> dict[str, Any]`。
 
-> **设计说明（对齐 spec §4.2）**：不复用 `submit_order`——`submit_order` 把 wedap 响应 `txnStatus` 映射到提交单，而通用冲正返回的 `REVERSED` 描述的是**原单**状态、非冲正指令成败。故独立编排：HTTP 200 → RVSL 单 SUCCEEDED（指令受理成功），原单在同一事务翻 REVERSED。幂等/账户守门等硬核逻辑仍复用共享原语（`check_or_register`/`record_response`/`finalize_terminal_in_session`），只有编排骨架与 `submit_order` 平行（两者若改幂等语义需同步）。
+> **设计说明（对齐 spec §4.2 + 用户 2026-07-22 pre-flight 决策）**：不复用 `submit_order` 的**整体**——`submit_order` 把 wedap 响应 `txnStatus` 映射到提交单，而通用冲正返回的 `REVERSED` 描述的是**原单**状态、非冲正指令成败。故 tx2 独立编排：HTTP 200 → RVSL 单 SUCCEEDED（指令受理成功），原单在同一事务翻 REVERSED。但 **tx1（幂等登记 + 落 ACCEPTED 单）两者语义完全相同，抽成共享 `register_and_accept_order` 消除重复**（用户 pre-flight 选"抽共享 helper"），`submit_order` 与 `submit_reversal` 都调它；既有 `test_submit.py` 护栏保证重构无回退。
+
+- [ ] **Step 0a: 抽共享 helper `register_and_accept_order`（重构，行为不变）**
+
+在 `app/services/submit.py` 加函数（放在 `submit_order` 之前）：
+
+```python
+async def register_and_accept_order(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    req: SubmitRequest,
+) -> dict[str, Any] | None:
+    """事务1：check_or_register 幂等登记 + 落 BankTxnOrder(ACCEPTED)（禁外呼），同事务 commit。
+
+    返回：
+      - dict → 直接作为响应 return（已完成重放的 first_response，或 in-flight 的 PROCESSING 响应），调用方不外呼
+      - None → 全新受理，order 已落 ACCEPTED，调用方继续外呼 + tx2
+    IntegrityError（order 存在但幂等行缺失）→ IdempotencyConflict（上抛由 API 层转 409）。
+    """
+    try:
+        async with factory() as session:
+            try:
+                async with session.begin():
+                    hit = await check_or_register(
+                        session,
+                        tenant_id=req.tenant_id,
+                        business_scope=req.business_scope,
+                        idempotency_key=req.biz_seq_no,
+                        method="POST",
+                        path=req.business_scope,
+                        payload=req.wedap_payload,
+                    )
+                    if hit is not None:
+                        return hit
+                    session.add(
+                        BankTxnOrder(
+                            tenant_id=req.tenant_id,
+                            biz_seq_no=req.biz_seq_no,
+                            business_action=req.business_action,
+                            biz_type=req.biz_type,
+                            amount=req.amount,
+                            currency=req.currency,
+                            caller_service=req.caller_service,
+                            status=OrderStatus.ACCEPTED,
+                            request_id=req.request_id,
+                            trans_type=(str(req.wedap_payload.get("transType") or "") or None),
+                            ori_req_date=req.ori_req_date,
+                        )
+                    )
+            except IntegrityError:
+                logger.error(
+                    "order exists without idempotency record: %s/%s",
+                    req.tenant_id,
+                    req.biz_seq_no,
+                )
+                raise IdempotencyConflict(req.biz_seq_no) from None
+    except IdempotencyInFlight:
+        return {"txnStatus": "PROCESSING", "bizSeqNo": req.biz_seq_no, "inFlight": True}
+    return None
+```
+
+然后把 `submit_order` 里从 `validate_biz_seq_no(req.biz_seq_no)` 之后、到外呼之前的整段 tx1 块（`try: async with factory() ... except IdempotencyInFlight: return {...PROCESSING...}`）替换为：
+
+```python
+    validate_biz_seq_no(req.biz_seq_no)
+    early = await register_and_accept_order(factory, req=req)
+    if early is not None:
+        return early
+```
+
+- [ ] **Step 0b: 跑既有 submit 测试确认重构无回退**
+
+Run: `pytest tests/services/test_submit.py tests/services/test_sync_terminal_v2.py -v`
+Expected: PASS（全绿——纯提取重构，行为不变）
+
+- [ ] **Step 0c: 提交重构**
+
+```bash
+git add app/services/submit.py
+git commit -m "refactor(gateway): 抽出 register_and_accept_order 供 submit 复用
+
+Co-Authored-By: Claude <noreply@anthropic.com>"
+```
 
 - [ ] **Step 1: 写失败测试（原单翻转 + RVSL 落 SUCCEEDED）**
 
@@ -250,21 +334,15 @@ from typing import Any
 
 import httpx
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 
 from app.clients.wedap import WedapError
 from app.domain.biz_seq import validate_biz_seq_no
 from app.domain.states import IllegalTransition, OrderStatus, assert_transition
 from app.models.txn import BankTxnOrder
 from app.services.audit import write_audit
-from app.services.idempotency import (
-    IdempotencyConflict,
-    IdempotencyInFlight,
-    check_or_register,
-    record_response,
-)
+from app.services.idempotency import record_response
 from app.services.order_finalize import finalize_terminal_in_session, is_terminal
-from app.services.submit import SubmitRequest
+from app.services.submit import SubmitRequest, register_and_accept_order
 
 logger = logging.getLogger(__name__)
 
@@ -320,45 +398,10 @@ async def submit_reversal(
     """受理：事务1 幂等+RVSL(ACCEPTED) 落库（禁外呼）→ wedap 冲正外呼 → 事务2 RVSL 推进 + 原单翻转。"""
     validate_biz_seq_no(req.biz_seq_no)
 
-    # 事务1：check_or_register + RVSL(ACCEPTED) 落库
-    try:
-        async with factory() as session:
-            try:
-                async with session.begin():
-                    hit = await check_or_register(
-                        session,
-                        tenant_id=req.tenant_id,
-                        business_scope=req.business_scope,
-                        idempotency_key=req.biz_seq_no,
-                        method="POST",
-                        path=req.business_scope,
-                        payload=req.wedap_payload,
-                    )
-                    if hit is not None:
-                        return hit
-                    session.add(
-                        BankTxnOrder(
-                            tenant_id=req.tenant_id,
-                            biz_seq_no=req.biz_seq_no,
-                            business_action=req.business_action,
-                            biz_type=req.biz_type,
-                            amount=req.amount,
-                            currency=req.currency,
-                            caller_service=req.caller_service,
-                            status=OrderStatus.ACCEPTED,
-                            request_id=req.request_id,
-                            trans_type=(str(req.wedap_payload.get("transType") or "") or None),
-                            ori_req_date=req.ori_req_date,
-                        )
-                    )
-            except IntegrityError:
-                logger.error(
-                    "reversal order exists without idempotency record: %s/%s",
-                    req.tenant_id, req.biz_seq_no,
-                )
-                raise IdempotencyConflict(req.biz_seq_no) from None
-    except IdempotencyInFlight:
-        return {"txnStatus": "PROCESSING", "bizSeqNo": req.biz_seq_no, "inFlight": True}
+    # 事务1：复用共享 helper（幂等登记 + 落 ACCEPTED 单）；命中重放/in-flight → 直接 return
+    early = await register_and_accept_order(factory, req=req)
+    if early is not None:
+        return early
 
     # 外呼：HTTP 200 → 冲正指令受理成功（RVSL SUCCEEDED）；超时/5xx→RESULT_UNKNOWN；4xx/WedapError→FAILED
     try:
