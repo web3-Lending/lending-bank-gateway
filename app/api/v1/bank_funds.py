@@ -20,6 +20,7 @@ from app.core.envelope import ok
 from app.models.txn import BankTxnOrder
 from app.services.account_guard import assert_platform_account_allowed
 from app.services.idempotency import IdempotencyConflict
+from app.services.reversal import submit_reversal
 from app.services.submit import SubmitRequest, submit_order
 
 router = APIRouter(prefix="/api/v1/bank-funds", tags=["bank-funds"])
@@ -64,6 +65,22 @@ class RefundRequest(BaseModel):
     refundAmount: str
     oriBizSeqNo: str
     """关联被退款的原归集单（清算超收退款只对未分发归集单做，业务约束在调用方）。"""
+
+
+class ReversalRequest(BaseModel):
+    # 通用冲正薄透传（对接文档 Public.md §4.4.2）：全额冲正原归集单，gateway 只取记账/幂等
+    # /原单翻转所需最少键；channelId/oriRequestId/bankAccountNo 等经 extra=allow 原样透传。
+    # 三方防冲错校验（oriTxnAmount/currencyCode == 本地原单 == BANK-313）
+    # 在 wedap 侧，gateway 不复刻。
+    model_config = ConfigDict(extra="allow")
+    bizSeqNo: str
+    currencyCode: str
+    # transType=原交易类型（一期归集类），wedap 按 (oriBizSeqNo, transType) 消歧；≤20 落库供回查。
+    transType: str = Field(min_length=1, max_length=20)
+    oriBizSeqNo: str
+    """被冲正的原交易流水号；本地查得到则同步翻 REVERSED，查不到不拦（同 refund）。"""
+    oriTxnAmount: str
+    """原交易金额（wedap 防冲错校验用，非可调冲正金额）。"""
 
 
 # ── 内部提交 helper ────────────────────────────────────────────────────────────
@@ -265,6 +282,59 @@ async def refund_to_user(
         currency=body.currencyCode,
         wedap_payload=payload,
     )
+
+
+@router.post("/reversals")
+async def reverse_transaction(
+    body: ReversalRequest,
+    request: Request,
+    ids: dict[str, str] = Depends(require_headers),
+) -> dict[str, Any]:
+    """通用冲正北向端点（对接 wedap Public.md §4.4.2，全额冲正原归集单）。
+
+    落 RVSL 单（biz_type=RVSL）→ 同步调 wedap 通用冲正 → HTTP 200 即指令受理成功
+    （RVSL 单 SUCCEEDED），同一事务把本地原单 SUCCEEDED→REVERSED（查不到不拦）。
+    通用冲正同步无回调，不走既有 callback 摄取链。仅全额冲正，部分退款走 /refunds。
+    """
+    assert_idempotency_key_matches(request, body.bizSeqNo)
+    amount = parse_amount(body.oriTxnAmount, body.currencyCode)
+    # 账户守门：冲正把资金退回原付款方，与 refund 同向，须过 platform_account 守门。
+    await assert_platform_account_allowed(
+        request.app.state.session_factory,
+        body.model_dump(mode="json", exclude_none=True).get("bankAccountNo"),
+        tenant_id=ids["tenant_id"],
+        business_scope="bank_reversal",
+        currency=body.currencyCode,
+        caller=ids["caller_service"],
+        trace_id=ids["trace_id"],
+        mode=request.app.state.settings.account_guard_mode,
+    )
+    try:
+        result = await submit_reversal(
+            request.app.state.session_factory,
+            wedap_reverse=request.app.state.wedap.reverse,
+            req=SubmitRequest(
+                tenant_id=ids["tenant_id"],
+                biz_seq_no=body.bizSeqNo,
+                business_action="REVERSE",
+                biz_type="RVSL",
+                amount=amount,
+                currency=body.currencyCode,
+                caller_service=ids["caller_service"],
+                request_id=ids["request_id"],
+                business_scope="bank_reversal",
+                wedap_payload=body.model_dump(mode="json", exclude_none=True),
+                ori_req_date=bank_req_date(request),
+            ),
+            ori_biz_seq_no=body.oriBizSeqNo,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, detail={"code": "GW_400_VALIDATION", "message": str(exc)}) from exc
+    except IdempotencyConflict as exc:
+        raise HTTPException(
+            409, detail={"code": "GW_409_IDEMPOTENCY", "message": f"idempotency conflict: {exc}"}
+        ) from exc
+    return ok(result, trace_id=ids["trace_id"])
 
 
 @router.get("/status")

@@ -313,6 +313,50 @@
         }
       }
     },
+    "/api/v1/bank-funds/reversals": {
+      "post": {
+        "tags": [
+          "bank-funds"
+        ],
+        "summary": "Reverse Transaction",
+        "description": "通用冲正北向端点（对接 wedap Public.md §4.4.2，全额冲正原归集单）。\n\n落 RVSL 单（biz_type=RVSL）→ 同步调 wedap 通用冲正 → HTTP 200 即指令受理成功\n（RVSL 单 SUCCEEDED），同一事务把本地原单 SUCCEEDED→REVERSED（查不到不拦）。\n通用冲正同步无回调，不走既有 callback 摄取链。仅全额冲正，部分退款走 /refunds。",
+        "operationId": "reverse_transaction_api_v1_bank_funds_reversals_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReversalRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Reverse Transaction Api V1 Bank Funds Reversals Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/bank-funds/status": {
       "get": {
         "tags": [
@@ -1344,6 +1388,42 @@
           "currencyCode"
         ],
         "title": "RepaymentInfo"
+      },
+      "ReversalRequest": {
+        "properties": {
+          "bizSeqNo": {
+            "type": "string",
+            "title": "Bizseqno"
+          },
+          "currencyCode": {
+            "type": "string",
+            "title": "Currencycode"
+          },
+          "transType": {
+            "type": "string",
+            "maxLength": 20,
+            "minLength": 1,
+            "title": "Transtype"
+          },
+          "oriBizSeqNo": {
+            "type": "string",
+            "title": "Oribizseqno"
+          },
+          "oriTxnAmount": {
+            "type": "string",
+            "title": "Oritxnamount"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "bizSeqNo",
+          "currencyCode",
+          "transType",
+          "oriBizSeqNo",
+          "oriTxnAmount"
+        ],
+        "title": "ReversalRequest"
       },
       "ValidationError": {
         "properties": {
