@@ -122,3 +122,17 @@ def test_reversal_same_key_different_payload_409(client: TestClient) -> None:
     r = client.post("/api/v1/bank-funds/reversals", json=mutated, headers=HEADERS)
     assert r.status_code == 409
     assert r.json()["error"]["code"] == "GW_409_IDEMPOTENCY"
+
+
+def test_reversal_not_blocked_by_account_guard_enforce_mode(client: TestClient) -> None:
+    """冲正契约无 bankAccountNo，enforce 模式下账户守门也不应拦冲正。
+
+    只拦 collect/distribute/refund；锁住冲正端点不受账户守门影响的行为，防回归。
+    """
+    client.app.state.settings.account_guard_mode = "enforce"  # type: ignore[union-attr]
+    try:
+        r = client.post("/api/v1/bank-funds/reversals", json=REVERSAL_BODY, headers=HEADERS)
+    finally:
+        client.app.state.settings.account_guard_mode = "off"  # type: ignore[union-attr]
+    assert r.status_code == 200
+    assert r.json()["data"]["txnStatus"] == "REVERSED"

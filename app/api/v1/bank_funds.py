@@ -250,8 +250,9 @@ async def refund_to_user(
     """
     assert_idempotency_key_matches(request, body.bizSeqNo)
     amount = parse_amount(body.refundAmount, body.currencyCode)
-    # 全额退款护栏（flag 默认关，wedap 冲正 4.8 落地后启用）：全额退款应走冲正原交易，
-    # refund 仅部分退款（用户拍板 2026-07-15）。原单以 (tenant, oriBizSeqNo) 查本地台账；
+    # 全额退款护栏（flag 默认开，全额退款导流 /bank-funds/reversals 冲正端点）：
+    # 全额退款应走冲正原交易，refund 仅部分退款（用户拍板 2026-07-15）。
+    # 原单以 (tenant, oriBizSeqNo) 查本地台账；
     # 查不到不拦（可能非本 gateway 出单，业务校验交 wedap）。
     if request.app.state.settings.refund_full_amount_guard:
         async with request.app.state.session_factory() as session:
@@ -299,17 +300,6 @@ async def reverse_transaction(
     assert_idempotency_key_matches(request, body.bizSeqNo)
     amount = parse_amount(body.oriTxnAmount, body.currencyCode)
     payload = body.model_dump(mode="json", exclude_none=True)
-    # 账户守门：冲正把资金退回原付款方，与 refund 同向，须过 platform_account 守门。
-    await assert_platform_account_allowed(
-        request.app.state.session_factory,
-        payload.get("bankAccountNo"),
-        tenant_id=ids["tenant_id"],
-        business_scope="bank_reversal",
-        currency=body.currencyCode,
-        caller=ids["caller_service"],
-        trace_id=ids["trace_id"],
-        mode=request.app.state.settings.account_guard_mode,
-    )
     try:
         result = await submit_reversal(
             request.app.state.session_factory,
