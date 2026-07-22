@@ -250,26 +250,24 @@ async def refund_to_user(
     """
     assert_idempotency_key_matches(request, body.bizSeqNo)
     amount = parse_amount(body.refundAmount, body.currencyCode)
-    # 全额退款护栏（flag 默认开，全额退款导流 /bank-funds/reversals 冲正端点）：
-    # 全额退款应走冲正原交易，refund 仅部分退款（用户拍板 2026-07-15）。
-    # 原单以 (tenant, oriBizSeqNo) 查本地台账；
-    # 查不到不拦（可能非本 gateway 出单，业务校验交 wedap）。
-    if request.app.state.settings.refund_full_amount_guard:
-        async with request.app.state.session_factory() as session:
-            ori = await session.scalar(
-                select(BankTxnOrder).where(
-                    BankTxnOrder.tenant_id == ids["tenant_id"],
-                    BankTxnOrder.biz_seq_no == body.oriBizSeqNo,
-                )
+    # 全额退款护栏（硬规则 · 用户拍板 2026-07-22：全额退款一律走冲正，不再可配置）：
+    # 全额退款应走冲正原交易 /bank-funds/reversals，refund 仅部分退款。原单以
+    # (tenant, oriBizSeqNo) 查本地台账；查不到不拦（可能非本 gateway 出单，业务校验交 wedap）。
+    async with request.app.state.session_factory() as session:
+        ori = await session.scalar(
+            select(BankTxnOrder).where(
+                BankTxnOrder.tenant_id == ids["tenant_id"],
+                BankTxnOrder.biz_seq_no == body.oriBizSeqNo,
             )
-        if ori is not None and amount == ori.amount:
-            raise HTTPException(
-                422,
-                detail={
-                    "code": "GW_422_FULL_REFUND_USE_REVERSAL",
-                    "message": "full-amount refund must use reversal; refund is partial-only",
-                },
-            )
+        )
+    if ori is not None and amount == ori.amount:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "GW_422_FULL_REFUND_USE_REVERSAL",
+                "message": "full-amount refund must use reversal; refund is partial-only",
+            },
+        )
     payload = body.model_dump(mode="json", exclude_none=True)
     return await _submit(
         request,

@@ -68,9 +68,9 @@ liquidation abort(全额) → POST /api/v1/bank-funds/reversals(oriBizSeqNo=原�
 
 镜像 `refund()`：`POST /api/v1/transactions/reversal`，`tenant_id` / `request_id` / `payload` 透传。docstring 标注契约来源 §4.4.2 + 一期归集类限制。
 
-### 4.4 护栏 flag `refund_full_amount_guard`（`app/core/config.py:57`）
+### 4.4 全额退款护栏（硬规则 · 不可配置，用户拍板 2026-07-22）
 
-已存在。本设计将**默认值改为 `True`**：端点建好后，凡 gateway 本地能查到原单、且 refund 金额 == 原单金额的**全额退款请求返回 422 `GW_422_FULL_REFUND_USE_REVERSAL`**，引导调用方改走 reversal。部分退款不受影响（`amount != ori.amount`）。
+护栏为**无条件强制**，无 flag（原 `refund_full_amount_guard` 配置已移除）：凡 gateway 本地能查到原单、且 refund 金额 == 原单金额的**全额退款请求一律返回 422 `GW_422_FULL_REFUND_USE_REVERSAL`**，引导调用方改走 reversal。部分退款不受影响（`amount != ori.amount`）；原单不在本地台账 → 不拦（交 wedap 校验）。
 
 ## 5. 错误处理与幂等
 
@@ -89,7 +89,7 @@ liquidation abort(全额) → POST /api/v1/bank-funds/reversals(oriBizSeqNo=原�
 | 账户守门 | `bankAccountNo` 未注册 platform_accounts + enforce → fail-closed 拒绝，不落单不调 wedap |
 | wedap 422 | 金额/币种不一致 → gateway 返 422，原单不翻 |
 | wedap 失败降级 | wedap 500/超时 → 端点不吞成静默成功，原单保持原态 |
-| 护栏开·全额 refund | `refund_full_amount_guard=True` + 全额 refund（能查到原单）→ 422 GW_422_FULL_REFUND_USE_REVERSAL |
+| 护栏·全额 refund | 全额 refund（能查到原单）→ 422 GW_422_FULL_REFUND_USE_REVERSAL（无条件硬规则，无 flag） |
 | 护栏开·部分 refund | 部分金额 → 正常放行 |
 
 覆盖率遵循 gateway 质量门禁（后端行+分支，见 `08-quality-gate.md`）。

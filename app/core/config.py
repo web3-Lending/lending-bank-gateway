@@ -51,10 +51,6 @@ class Settings(BaseSettings):
     # 空=dev 降级放行（仅 local/test）；非 local/test 环境未配则 create_app 启动期 fail-fast
     # （资金网关禁 fail-open），prod/dev-hw 必配。
     wedap_callback_api_key: str = ""
-    # 退款分流护栏（FU-GW-REVERSAL-INGESTION · 用户拍板 2026-07-15：全额退款走冲正、
-    # refund 仅部分退款）。默认开（2026-07-22 通用冲正端点落地后翻 True）：refundAmount ==
-    # 原归集单金额的全额退款被 422 导流 /bank-funds/reversals；部分退款不受影响。
-    refund_full_amount_guard: bool = True
     wedap_delivery_interval_seconds: float = 5.0
     wedap_delivery_max_attempts: int = 5
     wedap_delivery_enabled: bool = False  # wedap 投递 worker 开关（默认关，e2e/部署显式开）
