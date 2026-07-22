@@ -48,7 +48,10 @@ class P2PDisbursementRequest(BaseModel):
     transType: str = Field(min_length=1, max_length=20)
     disbursementInfo: DisbursementInfo
     lenders: list[dict[str, Any]] | None = None
-    """显式 null 视同缺省，契约 C 下 wedap 可选字段缺省=null 语义等价。"""
+    """Schema allows absent/null so validate_detail_consistency can emit a uniform GW_400
+    "missing lenders" (rather than a pydantic 422, keeping the error envelope consistent);
+    wedap DisbursementAdapterRequest.lenders is @NotEmpty, so the endpoint passes
+    require_detail=True to enforce non-empty."""
 
 
 class P2PRepaymentRequest(BaseModel):
@@ -125,6 +128,7 @@ async def p2p_disbursement(
         currency=body.disbursementInfo.currencyCode,
         detail_key="lenders",
         amount_field="lendAmount",
+        require_detail=True,  # wedap DisbursementAdapterRequest.lenders is @NotEmpty
     )
     return await _submit(
         request,
@@ -161,6 +165,7 @@ async def p2p_repayment(
         amount_field="txnAmount",
         fee_detail_key="feeDeductions",
         fee_amount_field="feeAmount",
+        require_detail=True,  # wedap RepaymentAdapterRequest.lenders is @NotEmpty
     )
     return await _submit(
         request,
