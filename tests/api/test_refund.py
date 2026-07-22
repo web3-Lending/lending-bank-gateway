@@ -134,11 +134,39 @@ def test_refund_wedap_business_failure_wraps_200_failed(client: TestClient) -> N
     assert order.status == "FAILED"
 
 
-def test_refund_full_amount_guard_off_by_default(client: TestClient) -> None:
-    """flag 默认关：全额退款（== 原单金额）不被 gateway 拦，照常提交 wedap（过渡口径）。"""
-    # 先种一笔归集原单
+def test_refund_full_amount_guard_off_when_explicitly_disabled(client: TestClient) -> None:
+    """flag 显式关：全额退款（== 原单金额）不被 gateway 拦，照常提交 wedap（过渡口径）。"""
+    client.app.state.settings.refund_full_amount_guard = False
+    try:
+        coll = {
+            "bizSeqNo": "CLT-20260715-GUARD-OFF-01",
+            "transType": "LOAN_COLLECT",
+            "txnAmount": "1.00",
+            "currencyCode": "USD",
+        }
+        client.app.state.wedap.collect_from_users = AsyncMock(  # type: ignore[union-attr]
+            return_value={"txnStatus": "SUCCESS"}
+        )
+        h = {**HEADERS, "Idempotency-Key": coll["bizSeqNo"], "X-Request-Id": "req-goff-c"}
+        client.post("/api/v1/bank-funds/collect-from-users", json=coll, headers=h)
+        body = {
+            **REFUND_BODY,
+            "bizSeqNo": "RFD-20260715-GUARD-OFF-01",
+            "oriBizSeqNo": coll["bizSeqNo"],
+            "refundAmount": "1.00",  # == 原单金额（全额）
+        }
+        h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-goff-r"}
+        r = client.post("/api/v1/bank-funds/refunds", json=body, headers=h)
+        assert r.status_code == 200
+        assert r.json()["data"]["txnStatus"] == "SUCCESS"
+    finally:
+        client.app.state.settings.refund_full_amount_guard = True
+
+
+def test_refund_full_amount_guard_on_by_default_rejects(client: TestClient) -> None:
+    """默认（True）：能查到原单的全额退款被 422 导流冲正。"""
     coll = {
-        "bizSeqNo": "CLT-20260715-GUARD-OFF-01",
+        "bizSeqNo": "CLT-20260722-GUARD-DEF-01",
         "transType": "LOAN_COLLECT",
         "txnAmount": "1.00",
         "currencyCode": "USD",
@@ -146,18 +174,18 @@ def test_refund_full_amount_guard_off_by_default(client: TestClient) -> None:
     client.app.state.wedap.collect_from_users = AsyncMock(  # type: ignore[union-attr]
         return_value={"txnStatus": "SUCCESS"}
     )
-    h = {**HEADERS, "Idempotency-Key": coll["bizSeqNo"], "X-Request-Id": "req-goff-c"}
+    h = {**HEADERS, "Idempotency-Key": coll["bizSeqNo"], "X-Request-Id": "req-gdef-c"}
     client.post("/api/v1/bank-funds/collect-from-users", json=coll, headers=h)
     body = {
         **REFUND_BODY,
-        "bizSeqNo": "RFD-20260715-GUARD-OFF-01",
+        "bizSeqNo": "RFD-20260722-GUARD-DEF-01",
         "oriBizSeqNo": coll["bizSeqNo"],
-        "refundAmount": "1.00",  # == 原单金额（全额）
+        "refundAmount": "1.00",
     }
-    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-goff-r"}
+    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-gdef-r"}
     r = client.post("/api/v1/bank-funds/refunds", json=body, headers=h)
-    assert r.status_code == 200
-    assert r.json()["data"]["txnStatus"] == "SUCCESS"
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "GW_422_FULL_REFUND_USE_REVERSAL"
 
 
 def test_refund_full_amount_guard_on_rejects_and_partial_passes(client: TestClient) -> None:
