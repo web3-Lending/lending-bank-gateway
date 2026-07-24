@@ -37,9 +37,12 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     conn = op.get_bind()
-    length_fn = "CHAR_LENGTH" if conn.dialect.name == "mysql" else "LENGTH"
+    length_fn = sa.func.char_length if conn.dialect.name == "mysql" else sa.func.length
+    trans_type = sa.column("trans_type", sa.String())
     overlong = conn.execute(
-        sa.text(f"SELECT COUNT(*) FROM bank_txn_order WHERE {length_fn}(trans_type) > 20")
+        sa.select(sa.func.count())
+        .select_from(sa.table("bank_txn_order", trans_type))
+        .where(length_fn(trans_type) > 20)
     ).scalar()
     if overlong:
         raise RuntimeError(
