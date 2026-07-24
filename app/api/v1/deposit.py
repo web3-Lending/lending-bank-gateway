@@ -6,6 +6,7 @@ deposit/users 查询透传端点：
 - GET /api/v1/deposit/account/detail          → 账户详情（仅审计，§5.3）
 - GET /api/v1/deposit/transactions            → 交易流水（仅审计，§5.4）
 - GET /api/v1/deposit/internal-accounts/info  → 内部户信息（审计 + 快照，§5.7）
+- GET /api/v1/deposit/internal-accounts/transactions → 内部户交易流水（仅审计，§5.8）
 - GET /api/v1/users/info                      → 用户信息（仅审计）
 
 所有端点均写 QueryAudit；balances/total 与 internal-accounts/info 额外写 BalanceSnapshot。
@@ -331,4 +332,32 @@ async def internal_account_info(
             account_no,
             exc_info=True,
         )
+    return ok(data, trace_id=hdr["trace_id"])
+
+
+@router.get("/api/v1/deposit/internal-accounts/transactions")
+async def internal_account_transactions(
+    request: Request,
+    hdr: dict[str, str] = Depends(require_headers),
+) -> dict[str, Any]:
+    """内部户交易流水查询（对接文档 v0.4.0 §5.8，底层银行 328）：透传 + 审计。
+
+    内部户对账的流水面（与 §5.7 余额锚点互相印证）；分页/时间窗/方向参数
+    （accountNo/startDate/endDate/txnDirection/pageNum/pageSize）由调用方带，
+    gateway 不剪裁（契约 C）。流水明细不落快照——与 §5.4 deposit/transactions
+    同口径，快照只锚余额。
+    """
+    params = dict(request.query_params)
+    wedap = request.app.state.wedap
+    data = await _audited_passthrough(
+        request,
+        endpoint="deposit/internal-accounts/transactions",
+        params=params,
+        hdr=hdr,
+        call=lambda: wedap.get_internal_account_transactions(
+            tenant_id=hdr["tenant_id"],
+            request_id=hdr["request_id"],
+            params=params,
+        ),
+    )
     return ok(data, trace_id=hdr["trace_id"])

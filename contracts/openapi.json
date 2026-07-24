@@ -889,6 +889,30 @@
         }
       }
     },
+    "/api/v1/deposit/internal-accounts/transactions": {
+      "get": {
+        "tags": [
+          "deposit"
+        ],
+        "summary": "Internal Account Transactions",
+        "description": "内部户交易流水查询（对接文档 v0.4.0 §5.8，底层银行 328）：透传 + 审计。\n\n内部户对账的流水面（与 §5.7 余额锚点互相印证）；分页/时间窗/方向参数\n（accountNo/startDate/endDate/txnDirection/pageNum/pageSize）由调用方带，\ngateway 不剪裁（契约 C）。流水明细不落快照——与 §5.4 deposit/transactions\n同口径，快照只锚余额。",
+        "operationId": "internal_account_transactions_api_v1_deposit_internal_accounts_transactions_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Internal Account Transactions Api V1 Deposit Internal Accounts Transactions Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/wedap/import/enqueue": {
       "post": {
         "tags": [
