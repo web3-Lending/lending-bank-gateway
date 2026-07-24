@@ -44,5 +44,5 @@ class BankTxnOrder(Base, TenantMixin, TimestampMixin):
     # wedap 通用状态回查四必填参数的本单供参（0020）：trans_type=提交时调用方 transType 原值
     # （wedap 按 (oriBizSeqNo, transType) 消歧，查询值必须等于提交值，不可由 biz_type 反推）；
     # ori_req_date=提交日 YYYYMMDD（bank_timezone）。存量行 NULL → 回查跳过交 G6。
-    trans_type: Mapped[str | None] = mapped_column(String(20))
+    trans_type: Mapped[str | None] = mapped_column(String(32))
     ori_req_date: Mapped[str | None] = mapped_column(String(8))

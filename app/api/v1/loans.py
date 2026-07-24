@@ -44,8 +44,9 @@ class P2PDisbursementRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
     bizSeqNo: str
     channelId: str = ""
-    # wedap 必填且 ≤20；落库供状态回查（提交值==查询值），缺失/超长入口显式拒绝（codex P1）
-    transType: str = Field(min_length=1, max_length=20)
+    # wedap 必填且 ≤32（2026-07-24 wedap 定稿字典后上限 20→32，BANK_FUND_COLLECT_CLEARING=26）；
+    # 落库供状态回查（提交值==查询值），缺失/超长入口显式拒绝（codex P1）
+    transType: str = Field(min_length=1, max_length=32)
     disbursementInfo: DisbursementInfo
     lenders: list[dict[str, Any]] | None = None
     """Schema allows absent/null so validate_detail_consistency can emit a uniform GW_400
@@ -58,7 +59,7 @@ class P2PRepaymentRequest(BaseModel):
     # 顶层 extra=allow 透传 lenders[] 等字段（不显式声明 lenders，靠 extra 捕获并进 model_dump）。
     model_config = ConfigDict(extra="allow")
     bizSeqNo: str
-    transType: str = Field(min_length=1, max_length=20)
+    transType: str = Field(min_length=1, max_length=32)
     repaymentInfo: RepaymentInfo
 
 

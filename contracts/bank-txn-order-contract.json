@@ -67,7 +67,7 @@
     "trans_type": {
       "python_type": "str",
       "nullable": true,
-      "length": 20
+      "length": 32
     },
     "ori_req_date": {
       "python_type": "str",
