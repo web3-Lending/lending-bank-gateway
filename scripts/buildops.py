@@ -91,6 +91,7 @@ APP_IMPACT_PREFIXES = (
     "alembic/",
     "alembic.ini",
     "contracts/openapi.json",
+    "contracts/bank-txn-order-contract.json",
     "pyproject.toml",
     "requirements.txt",
     "deploy/Dockerfile",
