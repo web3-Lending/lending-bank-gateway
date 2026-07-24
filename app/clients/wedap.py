@@ -415,6 +415,28 @@ class WedapClient:
             params=params,
         )
 
+    async def get_internal_account_transactions(
+        self,
+        *,
+        tenant_id: str,
+        request_id: str,
+        params: dict[str, str],
+    ) -> dict[str, Any]:
+        """内部户交易流水查询（对接文档 v0.4.0 §5.8，底层银行 328）。
+
+        内部户对账的流水面：与 §5.7 的余额锚点互相印证（客户户流水走 §5.4/304，
+        内部户流水走本接口）。必填 accountNo + startDate；可选 endDate（缺省为
+        银行当前交易日期）/txnDirection/pageNum/pageSize，契约 C 薄透传。响应
+        list[] 含冲正状态 reverseFlag（0 正常/1 被冲账/2 冲账）与 orgBankTxnId，
+        冲账笔 bizSeqNo 为空——对账侧按此识别冲正对，gateway 不加工。
+        """
+        return await self._get(
+            "/api/v1/deposit/internal-accounts/transactions",
+            tenant_id=tenant_id,
+            request_id=request_id,
+            params=params,
+        )
+
     async def get_user_info(
         self,
         *,

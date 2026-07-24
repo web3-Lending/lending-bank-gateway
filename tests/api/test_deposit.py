@@ -110,6 +110,35 @@ INTERNAL_DATA = {
     "balanceDirection": "C",
 }
 
+INTERNAL_TXN_DATA = {
+    "accountNo": "INT00101001USD",
+    "pageNum": 1,
+    "pageSize": 20,
+    "total": 2,
+    "list": [
+        {
+            "bankTxnId": "BANK20260722001",
+            "txnDate": "20260722",
+            "txnDirection": "IN",
+            "txnAmount": "5000.0000",
+            "currencyCode": "USD",
+            "summaryCode": "LOAN_COLLECT",
+            "reverseFlag": "1",
+            "bizSeqNo": "WB-1704067200000-COLL-10-0001-123456",
+        },
+        {
+            "bankTxnId": "BANK20260722002",
+            "txnDate": "20260722",
+            "txnDirection": "OUT",
+            "txnAmount": "5000.0000",
+            "currencyCode": "USD",
+            "reverseFlag": "2",
+            "orgBankTxnId": "BANK20260722001",
+            "bizSeqNo": None,
+        },
+    ],
+}
+
 
 @pytest.fixture()
 def client() -> TestClient:
@@ -122,6 +151,7 @@ def client() -> TestClient:
     wedap.get_deposit_account_detail.return_value = DETAIL_DATA
     wedap.get_deposit_transactions.return_value = TXN_DATA
     wedap.get_internal_account_info.return_value = INTERNAL_DATA
+    wedap.get_internal_account_transactions.return_value = INTERNAL_TXN_DATA
     app.state.wedap = wedap
     return TestClient(app)
 
@@ -735,3 +765,60 @@ def test_balance_total_snapshot_write_failure_does_not_pollute_response(
     )
     assert count == 1
     assert asyncio.run(_get_snapshots(real_factory, tenant_id="OCBC")) == []
+
+
+# ── 5.8 internal-accounts/transactions 透传（对接文档 v0.4.0 §5.8 · 银行 328）──
+
+
+def test_internal_account_transactions_passthrough_and_audit(client: TestClient) -> None:
+    """内部户流水：透传 + 审计落行、无快照；冲正字段（reverseFlag/orgBankTxnId）原样透出。"""
+    params = {
+        "bizSeqNo": "Q-2",
+        "channelId": "LEN",
+        "accountNo": "INT00101001USD",
+        "startDate": "20260701",
+        "endDate": "20260723",
+        "txnDirection": "IN",
+        "pageNum": "1",
+        "pageSize": "100",
+    }
+    r = client.get("/api/v1/deposit/internal-accounts/transactions", params=params, headers=HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["success"] is True
+    assert body["data"] == INTERNAL_TXN_DATA
+    # 冲账笔标记原样透出（gateway 不加工）：冲账行 reverseFlag=2 + orgBankTxnId 回指原笔
+    reversal = body["data"]["list"][1]
+    assert reversal["reverseFlag"] == "2"
+    assert reversal["orgBankTxnId"] == "BANK20260722001"
+
+    # params 原样进 wedap call（契约 C 全透传，时间窗/方向/分页参数不剪裁）
+    wedap = client.app.state.wedap  # type: ignore[union-attr]
+    called = wedap.get_internal_account_transactions.await_args.kwargs
+    assert called["params"] == params
+    assert called["tenant_id"] == "OCBC"
+    assert called["request_id"] == "req-deposit-1"
+
+    sf = client.app.state.session_factory  # type: ignore[union-attr]
+    count = asyncio.run(
+        _count_audit_rows(sf, tenant_id="OCBC", endpoint="deposit/internal-accounts/transactions")
+    )
+    assert count == 1
+
+    # 流水查询不落余额快照（快照只锚余额，同 §5.4 口径）
+    snapshots = asyncio.run(_get_snapshots(sf, tenant_id="OCBC"))
+    assert snapshots == []
+
+
+def test_internal_account_transactions_upstream_error_maps_502(client: TestClient) -> None:
+    """内部户不存在（wedap 422 业务码，§5.8 响应状态码表）→ 502 GW_502_UPSTREAM。"""
+    wedap = client.app.state.wedap  # type: ignore[union-attr]
+    wedap.get_internal_account_transactions.side_effect = WedapError("422", "内部户不存在")
+    r = client.get(
+        "/api/v1/deposit/internal-accounts/transactions",
+        params={"accountNo": "INT_NOPE", "startDate": "20260701"},
+        headers=HEADERS,
+    )
+    assert r.status_code == 502
+    assert r.json()["error"]["code"] == "GW_502_UPSTREAM"
+    assert "wedap code 422" in r.json()["error"]["message"]

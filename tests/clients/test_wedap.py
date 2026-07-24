@@ -1237,6 +1237,74 @@ async def test_get_internal_account_info_not_found_raises_with_code() -> None:
 
 
 # ---------------------------------------------------------------------------
+# get_internal_account_transactions（GET /api/v1/deposit/internal-accounts/transactions，
+# 对接文档 v0.4.0 §5.8 · 银行 328）
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_get_internal_account_transactions_passthrough() -> None:
+    route = respx.get(f"{BASE}/api/v1/deposit/internal-accounts/transactions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "code": "200",
+                "msg": "SUCCESS",
+                "data": {
+                    "accountNo": "INT00101001USD",
+                    "pageNum": 1,
+                    "total": 1,
+                    "list": [
+                        {
+                            "bankTxnId": "BANK20260722001",
+                            "txnDirection": "IN",
+                            "txnAmount": "5000.0000",
+                            "reverseFlag": "0",
+                        }
+                    ],
+                },
+            },
+        )
+    )
+    resp = await _client().get_internal_account_transactions(
+        tenant_id="WBTHK01",
+        request_id="int-txn-001",
+        params={
+            "bizSeqNo": "Q-2",
+            "channelId": "LEN",
+            "accountNo": "INT00101001USD",
+            "startDate": "20260701",
+            "endDate": "20260723",
+            "pageSize": "100",
+        },
+    )
+    assert resp["list"][0]["bankTxnId"] == "BANK20260722001"
+    assert resp["list"][0]["reverseFlag"] == "0"
+    req = route.calls.last.request
+    assert req.headers["X-Tenant-Id"] == "WBTHK01"
+    assert req.headers["X-Request-Id"] == "int-txn-001"
+    params = dict(httpx.QueryParams(req.url.query))
+    assert params["accountNo"] == "INT00101001USD"
+    assert params["startDate"] == "20260701"
+    assert params["pageSize"] == "100"
+
+
+@respx.mock
+async def test_get_internal_account_transactions_not_found_raises_with_code() -> None:
+    # 内部户不存在：wedap 返 422 业务码（§5.8 响应状态码表）→ WedapError 保留业务码
+    respx.get(f"{BASE}/api/v1/deposit/internal-accounts/transactions").mock(
+        return_value=httpx.Response(422, json={"code": "422", "msg": "内部户不存在"})
+    )
+    with pytest.raises(WedapError) as exc:
+        await _client().get_internal_account_transactions(
+            tenant_id="WBTHK01",
+            request_id="r",
+            params={"accountNo": "INT_NOPE", "startDate": "20260701"},
+        )
+    assert exc.value.code == "422"
+
+
+# ---------------------------------------------------------------------------
 # _unwrap 4xx envelope 升格（对接文档 v0.4.0 · wedap#82：业务失败 500→422 + 业务码）
 # ---------------------------------------------------------------------------
 
