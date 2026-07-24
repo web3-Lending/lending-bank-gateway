@@ -254,12 +254,24 @@ def test_collect_missing_trans_type_rejected_422(client: TestClient) -> None:
 
 
 def test_collect_overlong_trans_type_rejected_422(client: TestClient) -> None:
-    """transType 超 20 字符 → 422（不静默截断，防回查值 != 提交值）。"""
-    body = {**COLLECT_BODY, "transType": "X" * 21}
+    """transType 超 32 字符 → 422（不静默截断，防回查值 != 提交值；07-24 上限 20→32）。"""
+    body = {**COLLECT_BODY, "transType": "X" * 33}
     headers = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-long-tt"}
     r = client.post("/api/v1/bank-funds/collect-from-users", json=body, headers=headers)
     assert r.status_code == 422
     client.app.state.wedap.collect_from_users.assert_not_called()  # type: ignore[union-attr]
+
+
+def test_collect_official_26char_trans_type_accepted(client: TestClient) -> None:
+    """定稿值 BANK_FUND_COLLECT_CLEARING（26 字符，旧限 20 会拒）→ 200 且提交值原样落库回查。"""
+    body = {**COLLECT_BODY, "transType": "BANK_FUND_COLLECT_CLEARING"}
+    headers = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-official-tt"}
+    r = client.post("/api/v1/bank-funds/collect-from-users", json=body, headers=headers)
+    assert r.status_code == 200
+    sent = client.app.state.wedap.collect_from_users.call_args.kwargs["payload"]  # type: ignore[union-attr]
+    assert sent["transType"] == "BANK_FUND_COLLECT_CLEARING"
+    st = client.get(STATUS_URL, params={"bizSeqNo": body["bizSeqNo"]}, headers=HEADERS)
+    assert st.status_code == 200
 
 
 @pytest.mark.parametrize(

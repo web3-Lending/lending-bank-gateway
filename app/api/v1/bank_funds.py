@@ -36,9 +36,10 @@ class CollectRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
     bizSeqNo: str
     currencyCode: str
-    # wedap 必填且 ≤20（W2 实测硬限）；gateway 落库供状态回查（提交值==查询值），
+    # wedap 必填且 ≤32（2026-07-24 定稿字典后上限 20→32，BANK_FUND_COLLECT_CLEARING=26）；
+    # gateway 落库供状态回查（提交值==查询值），
     # 缺失/超长在入口显式拒绝——静默截断会造成「回查值 != 提交值」永久查不到（codex P1）。
-    transType: str = Field(min_length=1, max_length=20)
+    transType: str = Field(min_length=1, max_length=32)
     txnAmount: str | None = None
     totalAmount: str | None = None
 
@@ -49,7 +50,7 @@ class DistributeRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
     bizSeqNo: str
     currencyCode: str
-    transType: str = Field(min_length=1, max_length=20)
+    transType: str = Field(min_length=1, max_length=32)
     recipients: list[dict[str, Any]] | None = None
     """显式 null 视同缺省，契约 C 下 wedap 可选字段缺省=null 语义等价。"""
 
@@ -61,7 +62,7 @@ class RefundRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
     bizSeqNo: str
     currencyCode: str
-    transType: str = Field(min_length=1, max_length=20)
+    transType: str = Field(min_length=1, max_length=32)
     refundAmount: str
     oriBizSeqNo: str
     """关联被退款的原归集单（清算超收退款只对未分发归集单做，业务约束在调用方）。"""
@@ -75,8 +76,8 @@ class ReversalRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
     bizSeqNo: str
     currencyCode: str
-    # transType=原交易类型（一期归集类），wedap 按 (oriBizSeqNo, transType) 消歧；≤20 落库供回查。
-    transType: str = Field(min_length=1, max_length=20)
+    # transType=原交易类型（一期归集类），wedap 按 (oriBizSeqNo, transType) 消歧；≤32 落库供回查。
+    transType: str = Field(min_length=1, max_length=32)
     oriBizSeqNo: str
     """被冲正的原交易流水号；本地查得到则同步翻 REVERSED，查不到不拦（同 refund）。"""
     oriTxnAmount: str

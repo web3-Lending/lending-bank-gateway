@@ -972,7 +972,7 @@
           },
           "transType": {
             "type": "string",
-            "maxLength": 20,
+            "maxLength": 32,
             "minLength": 1,
             "title": "Transtype"
           },
@@ -1049,7 +1049,7 @@
           },
           "transType": {
             "type": "string",
-            "maxLength": 20,
+            "maxLength": 32,
             "minLength": 1,
             "title": "Transtype"
           },
@@ -1159,7 +1159,7 @@
           },
           "transType": {
             "type": "string",
-            "maxLength": 20,
+            "maxLength": 32,
             "minLength": 1,
             "title": "Transtype"
           },
@@ -1199,7 +1199,7 @@
           },
           "transType": {
             "type": "string",
-            "maxLength": 20,
+            "maxLength": 32,
             "minLength": 1,
             "title": "Transtype"
           },
@@ -1362,7 +1362,7 @@
           },
           "transType": {
             "type": "string",
-            "maxLength": 20,
+            "maxLength": 32,
             "minLength": 1,
             "title": "Transtype"
           },
@@ -1417,7 +1417,7 @@
           },
           "transType": {
             "type": "string",
-            "maxLength": 20,
+            "maxLength": 32,
             "minLength": 1,
             "title": "Transtype"
           },
