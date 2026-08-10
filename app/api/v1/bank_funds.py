@@ -32,7 +32,7 @@ router = APIRouter(prefix="/api/v1/bank-funds", tags=["bank-funds"])
 class CollectRequest(BaseModel):
     # 归集对齐 wedap 真契约：单用户扁平，顶层 txnAmount + bankAccountName 必填。
     # extra=allow 薄透传：lending 补 bankAccountName/userId 等原样透传 wedap，gateway 不剪裁。
-    # 金额优先扁平 txnAmount（wedap 形态）；过渡期回退 totalAmount，lending 改扁平后只用 txnAmount。
+    # 金额只认扁平 txnAmount（wedap §4.3 唯一金额字段）；旧 totalAmount 回退已删（2026-08-10）。
     model_config = ConfigDict(extra="allow")
     bizSeqNo: str
     currencyCode: str
@@ -40,8 +40,15 @@ class CollectRequest(BaseModel):
     # gateway 落库供状态回查（提交值==查询值），
     # 缺失/超长在入口显式拒绝——静默截断会造成「回查值 != 提交值」永久查不到（codex P1）。
     transType: str = Field(min_length=1, max_length=32)
-    txnAmount: str | None = None
-    totalAmount: str | None = None
+    # 语义上**必填**，但 schema 故意留 optional：缺失时由端点手工检查抛统一的
+    # GW_400_VALIDATION 封套，而非 pydantic 的 422（与 loans.lenders 同一模式）。
+    # description 显式声明必填语义——调用方会从 openapi 的 required 集推契约，
+    # 只留类型会让它们误以为可省（2026-08-10 独立评审 finding）。
+    txnAmount: str | None = Field(
+        default=None,
+        description="归集金额（DECIMAL(21,4) 字符串）。**业务上必填**；缺失/空串返 400 "
+        "GW_400_VALIDATION。schema 标 optional 仅为统一错误封套，勿据此省略。",
+    )
 
 
 class DistributeRequest(BaseModel):
@@ -193,18 +200,20 @@ async def collect_from_users(
 ) -> dict[str, Any]:
     assert_idempotency_key_matches(request, body.bizSeqNo)
     payload = body.model_dump(mode="json", exclude_none=True)
-    # 金额优先 wedap 扁平 txnAmount，过渡回退 totalAmount；空串/缺失视为缺。
+    # 金额取 wedap 扁平 txnAmount（对接文档 §4.3 唯一定义的金额字段）；空串/缺失视为缺。
     # 归集单用户无明细，不做 sum 校验。
-    raw_amount = body.txnAmount or body.totalAmount
-    if not raw_amount:
+    # 过渡期的 totalAmount 回退已于 2026-08-10 删除：上游 lending-lifecycel
+    # bank_fund.py:100-107 早已无条件带顶层 txnAmount 且注释明写「不门控」，
+    # 过渡结束；且 totalAmount 本就不在 wedap 契约内，留着等于多一条伪字段路径。
+    if not body.txnAmount:
         raise HTTPException(
             400,
             detail={"code": "GW_400_VALIDATION", "message": "missing txnAmount"},
         )
-    amount = parse_amount(raw_amount, body.currencyCode)
-    # txnAmount 在场时 totalAmount 属旧形态噪声字段，不透传 wedap（避免注入伪字段 + 幂等漂移）
-    if body.txnAmount and "totalAmount" in payload:
-        payload.pop("totalAmount")
+    amount = parse_amount(body.txnAmount, body.currencyCode)
+    # totalAmount 已不是本端点的合法入参，但 extra=allow 会让上游误传的它经 model_dump
+    # 漏进 payload → wedap §3.8 严格校验对未定义字段直接 400 拒收。故无条件剪掉。
+    payload.pop("totalAmount", None)
     return await _submit(
         request,
         ids=ids,

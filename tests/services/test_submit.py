@@ -301,14 +301,17 @@ async def test_in_flight_replay_has_no_order_status(factory) -> None:
 
 @pytest.mark.asyncio
 async def test_null_txn_status_normalized_to_str(factory) -> None:
-    """wedap 200 返回显式 txnStatus=null/非 str → 归一化 PROCESSING（独立评审 MEDIUM）：
-    防 response_model 把毒值升格 ResponseValidationError 500 且冻结进 first_response
-    致同 key 重放永久 500。"""
+    """wedap 200 返回显式 txnStatus=null/非 str → 归一化为 str（防 response_model 把毒值
+    升格 ResponseValidationError 500 且冻结进 first_response 致同 key 重放永久 500）。
+
+    归一化目标 2026-08-10 由 PROCESSING 改为 RESULT_UNKNOWN：上游对 PROCESSING 走
+    `is_ok=False` 且**回滚本地状态**，只有 RESULT_UNKNOWN 才挂起不回滚——毒响应下资金
+    状态本就未知，绝不能让上游回滚。"""
     wedap = AsyncMock()
     wedap.submit_disbursement.return_value = {"txnStatus": None}
     req = _req(biz_seq_no="DSB-20260611-0001234567893")
     result = await submit_order(factory, wedap_call=wedap.submit_disbursement, req=req)
-    assert result["txnStatus"] == "PROCESSING"
+    assert result["txnStatus"] == "RESULT_UNKNOWN"
     assert result["orderStatus"] == "SUBMITTED"
     # 重放同样健康
     replay = await submit_order(factory, wedap_call=AsyncMock(), req=req)
@@ -404,14 +407,16 @@ async def test_repayment_ack_failed_is_terminal(factory) -> None:
 
 
 @pytest.mark.asyncio
-async def test_repayment_ack_missing_status_normalized_to_processing(factory) -> None:
-    """还款响应缺 status / 非 str（毒响应）→ 归一化 PROCESSING + 订单 SUBMITTED：
-    保守挂起等轮询，绝不当失败回滚（同 test_null_txn_status_normalized_to_str 的动机）。"""
+async def test_repayment_ack_missing_status_normalized_to_result_unknown(factory) -> None:
+    """还款响应缺 status / 非 str（毒响应）→ 北向归一化 RESULT_UNKNOWN + 订单 SUBMITTED。
+
+    北向取 RESULT_UNKNOWN 而非 PROCESSING：后者会让上游回滚本地状态（只有前者挂起）。
+    订单仍落 SUBMITTED 这一非终态，兜底 worker 照常收敛，两者语义不冲突。"""
     wedap = AsyncMock()
     wedap.submit_repayment.return_value = {"bizSeqNo": "x", "status": None}
     req = _repay_req(biz_seq_no="RPMT-20260810-0001234567893")
     result = await submit_order(factory, wedap_call=wedap.submit_repayment, req=req)
-    assert result["txnStatus"] == "PROCESSING"
+    assert result["txnStatus"] == "RESULT_UNKNOWN"
     assert result["orderStatus"] == OrderStatus.SUBMITTED
     assert result["debtSettled"] is False
     replay = await submit_order(factory, wedap_call=AsyncMock(), req=req)

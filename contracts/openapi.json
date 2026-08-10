@@ -120,9 +120,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object",
-                  "title": "Response P2P Disbursement Api V1 Loans P2P Disbursements Post"
+                  "$ref": "#/components/schemas/SubmitAckEnvelope"
                 }
               }
             }
@@ -163,9 +161,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object",
-                  "title": "Response P2P Repayment Api V1 Loans P2P Repayments Post"
+                  "$ref": "#/components/schemas/RepaymentAckEnvelope"
                 }
               }
             }
@@ -208,9 +204,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Query Repayment Status Api V1 Loans P2P Repayments  Biz Seq No  Status Get"
+                  "$ref": "#/components/schemas/RepaymentStatusEnvelope"
                 }
               }
             }
@@ -1030,18 +1024,8 @@
                 "type": "null"
               }
             ],
-            "title": "Txnamount"
-          },
-          "totalAmount": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Totalamount"
+            "title": "Txnamount",
+            "description": "归集金额（DECIMAL(21,4) 字符串）。**业务上必填**；缺失/空串返 400 GW_400_VALIDATION。schema 标 optional 仅为统一错误封套，勿据此省略。"
           }
         },
         "additionalProperties": true,
@@ -1431,6 +1415,138 @@
         ],
         "title": "RefundRequest"
       },
+      "RepaymentAck": {
+        "properties": {
+          "bizSeqNo": {
+            "type": "string",
+            "title": "Bizseqno"
+          },
+          "txnStatus": {
+            "type": "string",
+            "title": "Txnstatus"
+          },
+          "orderStatus": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Orderstatus"
+          },
+          "errorCode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Errorcode"
+          },
+          "errorMsg": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Errormsg"
+          },
+          "inFlight": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inflight"
+          },
+          "debtSettled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Debtsettled"
+          },
+          "globalTxId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Globaltxid"
+          },
+          "detailStatus": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detailstatus"
+          }
+        },
+        "type": "object",
+        "required": [
+          "bizSeqNo",
+          "txnStatus"
+        ],
+        "title": "RepaymentAck",
+        "description": "还款受理响应 data 段（对接文档 v0.6.1 §4.2，SubmitAck + DTC 三字段）。\n\n这三个字段是 v0.5.0 随组合交易引擎新增的，**必须在 openapi 里可见**——否则调用方\n无从知道 ``debtSettled`` 存在，只能靠口头传达（上游至今未接该字段正是此成因）。\n\n- ``debtSettled``：契约指定的**债务核销唯一依据**，仅全部资金步骤成功时为 true\n- ``globalTxId``：wedap 组合交易实例号，报障/对账时提供给 wedap\n- ``detailStatus``：细分状态，供排查参考；**状态机仍以 txnStatus 为准**\n逐笔 ``steps[]`` 与 ``strandedAmount`` 不在受理响应，须查本模块的专用状态查询端点。"
+      },
+      "RepaymentAckEnvelope": {
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "title": "Success"
+          },
+          "data": {
+            "$ref": "#/components/schemas/RepaymentAck"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "trace_id": {
+            "type": "string",
+            "title": "Trace Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "trace_id"
+        ],
+        "title": "RepaymentAckEnvelope",
+        "description": "还款受理 200 响应统一 envelope。"
+      },
       "RepaymentInfo": {
         "properties": {
           "txnAmount": {
@@ -1449,6 +1565,67 @@
           "currencyCode"
         ],
         "title": "RepaymentInfo"
+      },
+      "RepaymentStatusData": {
+        "properties": {
+          "bizSeqNo": {
+            "type": "string",
+            "title": "Bizseqno"
+          },
+          "orderStatus": {
+            "type": "string",
+            "title": "Orderstatus"
+          },
+          "wedap": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Wedap"
+          }
+        },
+        "type": "object",
+        "required": [
+          "bizSeqNo",
+          "orderStatus",
+          "wedap"
+        ],
+        "title": "RepaymentStatusData",
+        "description": "还款专用状态查询 200 响应 data 段。\n\n``wedap`` 是**薄透传**段：正常时为 wedap 专用状态查询响应（含 ``debtSettled`` /\n``strandedAmount`` / ``steps[]``），wedap 不可达时降级为\n``{\"unavailable\": true, \"reason\": ...}``。逐笔 ``steps[]`` 的结构由 wedap 契约决定、\n本网关不复刻，故此段保持开放对象——但顶层三键必须在 openapi 里可见，否则调用方\n连「响应长什么样」都要靠口头传达（2026-08-10 独立评审 finding）。"
+      },
+      "RepaymentStatusEnvelope": {
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "title": "Success"
+          },
+          "data": {
+            "$ref": "#/components/schemas/RepaymentStatusData"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "trace_id": {
+            "type": "string",
+            "title": "Trace Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "trace_id"
+        ],
+        "title": "RepaymentStatusEnvelope",
+        "description": "还款专用状态查询 200 响应统一 envelope。"
       },
       "ReversalRequest": {
         "properties": {

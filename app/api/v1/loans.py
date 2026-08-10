@@ -15,6 +15,7 @@ from app.api.deps import (
     require_headers,
     validate_detail_consistency,
 )
+from app.api.v1.bank_funds import SubmitAck, SubmitAckEnvelope
 from app.clients.wedap import WedapError
 from app.core.envelope import ok
 from app.models.txn import BankTxnOrder
@@ -65,6 +66,61 @@ class P2PRepaymentRequest(BaseModel):
     bizSeqNo: str
     transType: str = Field(min_length=1, max_length=32)
     repaymentInfo: RepaymentInfo
+
+
+# ── 响应契约（openapi 可见） ────────────────────────────────────────────────────
+# 复用 bank_funds 的 SubmitAck 而非另起一套：写原语提交响应对调用方是同一形态契约，
+# 分叉会让「查 openapi 就知道能拿到什么」失效。还款额外带 DTC 三字段，故子类扩展。
+
+
+class RepaymentAck(SubmitAck):
+    """还款受理响应 data 段（对接文档 v0.6.1 §4.2，SubmitAck + DTC 三字段）。
+
+    这三个字段是 v0.5.0 随组合交易引擎新增的，**必须在 openapi 里可见**——否则调用方
+    无从知道 ``debtSettled`` 存在，只能靠口头传达（上游至今未接该字段正是此成因）。
+
+    - ``debtSettled``：契约指定的**债务核销唯一依据**，仅全部资金步骤成功时为 true
+    - ``globalTxId``：wedap 组合交易实例号，报障/对账时提供给 wedap
+    - ``detailStatus``：细分状态，供排查参考；**状态机仍以 txnStatus 为准**
+    逐笔 ``steps[]`` 与 ``strandedAmount`` 不在受理响应，须查本模块的专用状态查询端点。
+    """
+
+    debtSettled: bool | None = None
+    globalTxId: str | None = None
+    detailStatus: str | None = None
+
+
+class RepaymentAckEnvelope(BaseModel):
+    """还款受理 200 响应统一 envelope。"""
+
+    success: bool
+    data: RepaymentAck
+    error: dict[str, Any] | None
+    trace_id: str
+
+
+class RepaymentStatusData(BaseModel):
+    """还款专用状态查询 200 响应 data 段。
+
+    ``wedap`` 是**薄透传**段：正常时为 wedap 专用状态查询响应（含 ``debtSettled`` /
+    ``strandedAmount`` / ``steps[]``），wedap 不可达时降级为
+    ``{"unavailable": true, "reason": ...}``。逐笔 ``steps[]`` 的结构由 wedap 契约决定、
+    本网关不复刻，故此段保持开放对象——但顶层三键必须在 openapi 里可见，否则调用方
+    连「响应长什么样」都要靠口头传达（2026-08-10 独立评审 finding）。
+    """
+
+    bizSeqNo: str
+    orderStatus: str
+    wedap: dict[str, Any]
+
+
+class RepaymentStatusEnvelope(BaseModel):
+    """还款专用状态查询 200 响应统一 envelope。"""
+
+    success: bool
+    data: RepaymentStatusData
+    error: dict[str, Any] | None
+    trace_id: str
 
 
 # ── 内部提交 helper ────────────────────────────────────────────────────────────
@@ -120,7 +176,9 @@ async def _submit(
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 
-@router.post("/p2p-disbursements")
+@router.post(
+    "/p2p-disbursements", response_model=SubmitAckEnvelope, response_model_exclude_unset=True
+)
 async def p2p_disbursement(
     body: P2PDisbursementRequest,
     request: Request,
@@ -151,7 +209,9 @@ async def p2p_disbursement(
     )
 
 
-@router.post("/p2p-repayments")
+@router.post(
+    "/p2p-repayments", response_model=RepaymentAckEnvelope, response_model_exclude_unset=True
+)
 async def p2p_repayment(
     body: P2PRepaymentRequest,
     request: Request,
@@ -191,7 +251,7 @@ async def p2p_repayment(
     )
 
 
-@router.get("/p2p-repayments/{biz_seq_no}/status")
+@router.get("/p2p-repayments/{biz_seq_no}/status", response_model=RepaymentStatusEnvelope)
 async def query_repayment_status(
     biz_seq_no: str,
     request: Request,

@@ -18,7 +18,7 @@ HEADERS = {
 COLLECT_BODY = {
     "bizSeqNo": "CLT-20260611-0001234567890",
     "transType": "LOAN_COLLECT",
-    "totalAmount": "500.0000",
+    "txnAmount": "500.0000",
     "currencyCode": "USD",
     "userList": [{"userId": "U1", "amount": "500.0000"}],
 }
@@ -69,8 +69,8 @@ def test_collect_idempotent_replay_no_extra_call(client: TestClient) -> None:
 
 
 def test_collect_missing_amount_400(client: TestClient) -> None:
-    """txnAmount/totalAmount 都缺 → 400（归集对齐 wedap 后 totalAmount 非必填）。"""
-    body_no_amount = {k: v for k, v in COLLECT_BODY.items() if k != "totalAmount"}
+    """txnAmount 缺失 → 400（旧 totalAmount 回退已删，金额只认扁平 txnAmount）。"""
+    body_no_amount = {k: v for k, v in COLLECT_BODY.items() if k != "txnAmount"}
     r = client.post("/api/v1/bank-funds/collect-from-users", json=body_no_amount, headers=HEADERS)
     assert r.status_code == 400
     assert r.json()["error"]["code"] == "GW_400_VALIDATION"
@@ -78,8 +78,8 @@ def test_collect_missing_amount_400(client: TestClient) -> None:
 
 
 def test_collect_invalid_amount_str_400(client: TestClient) -> None:
-    """totalAmount 无法解析为 Decimal → 400 GW_400_VALIDATION。"""
-    body_bad = {**COLLECT_BODY, "totalAmount": "not-a-number"}
+    """txnAmount 无法解析为 Decimal → 400 GW_400_VALIDATION。"""
+    body_bad = {**COLLECT_BODY, "txnAmount": "not-a-number"}
     r = client.post("/api/v1/bank-funds/collect-from-users", json=body_bad, headers=HEADERS)
     assert r.status_code == 400
     assert r.json()["error"]["code"] == "GW_400_VALIDATION"
@@ -125,7 +125,7 @@ def test_collect_same_key_different_payload_409(client: TestClient) -> None:
     client.post("/api/v1/bank-funds/collect-from-users", json=COLLECT_BODY, headers=HEADERS)
     mutated = {
         **COLLECT_BODY,
-        "totalAmount": "999.0000",
+        "txnAmount": "999.0000",
         "userList": [{"userId": "U1", "amount": "999.0000"}],
     }
     r = client.post("/api/v1/bank-funds/collect-from-users", json=mutated, headers=HEADERS)
@@ -173,7 +173,7 @@ def test_collect_without_userlist_passes_validation(client: TestClient) -> None:
     body = {
         "bizSeqNo": "CLT-20260611-0002000000001",
         "transType": "LOAN_COLLECT",
-        "totalAmount": "500.0000",
+        "txnAmount": "500.0000",
         "currencyCode": "USD",
         # 不传 userList
     }
@@ -187,7 +187,7 @@ def test_collect_without_userlist_payload_excludes_key(client: TestClient) -> No
     body = {
         "bizSeqNo": "CLT-20260611-0002000000002",
         "transType": "LOAN_COLLECT",
-        "totalAmount": "300.0000",
+        "txnAmount": "300.0000",
         "currencyCode": "USD",
     }
     h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-excl"}
@@ -219,8 +219,13 @@ def test_collect_wedap_flat_txnamount_passthrough(client: TestClient) -> None:
     assert "bankAccountName" in call_str and "txnAmount" in call_str
 
 
-def test_collect_txnamount_preferred_over_totalamount(client: TestClient) -> None:
-    """同时给 txnAmount 与 totalAmount → 取扁平 txnAmount(777)；旧 totalAmount 不透传 wedap。"""
+def test_collect_stray_totalamount_never_reaches_wedap(client: TestClient) -> None:
+    """误传的旧字段 totalAmount 绝不透传给 wedap（金额只认 txnAmount）。
+
+    2026-08-10 删掉 totalAmount 回退后，它不再是本端点的合法入参；但 CollectRequest 是
+    extra=allow 薄透传，上游若仍误传会经 model_dump 漏进 payload → wedap §3.8 未定义字段
+    严格校验直接 400 拒收。本例钉死端点侧的无条件剪除。
+    """
     body = {
         "bizSeqNo": "CLT-20260611-0002000000005",
         "transType": "LOAN_COLLECT",
@@ -231,14 +236,13 @@ def test_collect_txnamount_preferred_over_totalamount(client: TestClient) -> Non
     h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-both"}
     r = client.post("/api/v1/bank-funds/collect-from-users", json=body, headers=h)
     assert r.status_code == 200, r.json()
-    # 实际取 777（非 500）+ totalAmount 已从透传 wedap 的 payload 移除（I1/I3）
     call_str = str(client.app.state.wedap.collect_from_users.call_args)  # type: ignore[union-attr]
     assert "777.0000" in call_str
     assert "totalAmount" not in call_str and "500.0000" not in call_str
 
 
 def test_collect_empty_txnamount_falls_back_or_400(client: TestClient) -> None:
-    """txnAmount 空串且无 totalAmount → 400 missing（C1：空串视为缺，不报误导的 bad amount）。"""
+    """txnAmount 空串 → 400 missing（C1：空串视为缺，不报误导的 bad amount）。"""
     body = {
         "bizSeqNo": "CLT-20260611-0002000000006",
         "transType": "LOAN_COLLECT",
