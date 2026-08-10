@@ -2,6 +2,7 @@ import hashlib
 import json
 import re
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -207,6 +208,28 @@ class WedapClient:
             tenant_id=tenant_id,
             request_id=request_id,
             payload=payload,
+        )
+
+    async def query_repayment_status(
+        self,
+        *,
+        tenant_id: str,
+        request_id: str,
+        biz_seq_no: str,
+    ) -> dict[str, Any]:
+        """还款专用状态查询 `GET /api/v1/loans/p2p-repayments/{bizSeqNo}/status`
+        （对接文档 v0.6.1 §4.2，v0.5.0 随 DTC 引擎新增）。
+
+        与 5.5 通用状态查询（query_transaction_status）的分工——**两者都要，不可互替**：
+        - 5.5 自 v0.6.0 起可查还款**顶层状态**（不再 404），四必填参数走 query string
+        - 但 `debtSettled`（Lending 核销债务的唯一依据）与逐笔 `steps[]`（与银行对账）
+          **仅本接口提供**，5.5 不含
+        无请求 Body，`bizSeqNo` 走路径参数 + 公共请求头（3.3）。
+        """
+        return await self._get(
+            f"/api/v1/loans/p2p-repayments/{quote(biz_seq_no, safe='')}/status",
+            tenant_id=tenant_id,
+            request_id=request_id,
         )
 
     async def collect_from_users(

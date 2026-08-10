@@ -1,10 +1,12 @@
-"""北向贷款交易 API：p2p-disbursements + p2p-repayments。"""
+"""北向贷款交易 API：p2p-disbursements + p2p-repayments（含还款专用状态查询）。"""
 
 from decimal import Decimal
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
 
 from app.api.deps import (
     assert_idempotency_key_matches,
@@ -13,7 +15,9 @@ from app.api.deps import (
     require_headers,
     validate_detail_consistency,
 )
+from app.clients.wedap import WedapError
 from app.core.envelope import ok
+from app.models.txn import BankTxnOrder
 from app.services.idempotency import IdempotencyConflict
 from app.services.submit import SubmitRequest, submit_order
 
@@ -184,4 +188,52 @@ async def p2p_repayment(
         # 还款走 DTC 组合交易引擎的专属受理响应契约（v0.6.1 §4.2）：status/detailStatus/
         # debtSettled/globalTxId，无 txnStatus。仅本端点置 True。
         repayment_contract=True,
+    )
+
+
+@router.get("/p2p-repayments/{biz_seq_no}/status")
+async def query_repayment_status(
+    biz_seq_no: str,
+    request: Request,
+    ids: dict[str, str] = Depends(require_headers),
+) -> dict[str, Any]:
+    """还款专用状态查询（对接文档 v0.6.1 §4.2）：本地 order 状态 + wedap 逐笔明细。
+
+    为什么不复用 `/bank-funds/status`（5.5 通用查询）：5.5 自 v0.6.0 起虽能查还款**顶层
+    状态**，但 `debtSettled`（Lending 核销债务的唯一依据）与 `steps[]`（逐笔与银行对账）
+    **只有本专用接口提供**。受理响应为 PROCESSING 时按本接口轮询至终态。
+
+    本地 order 不存在 → 404 且不打 wedap：存在性判据在本方台账，不拿外部系统当权威
+    （亦防 bizSeqNo 探测）。wedap 不可用 → 降级 `unavailable`，本地 orderStatus 仍可读。
+    """
+    factory = request.app.state.session_factory
+    async with factory() as session:
+        row = await session.scalar(
+            select(BankTxnOrder).where(
+                BankTxnOrder.tenant_id == ids["tenant_id"],
+                BankTxnOrder.biz_seq_no == biz_seq_no,
+            )
+        )
+    if row is None:
+        raise HTTPException(
+            404,
+            detail={"code": "GW_404_ORDER", "message": f"order not found: {biz_seq_no}"},
+        )
+
+    try:
+        wedap_data: dict[str, Any] = await request.app.state.wedap.query_repayment_status(
+            tenant_id=ids["tenant_id"],
+            request_id=ids["request_id"],
+            biz_seq_no=biz_seq_no,
+        )
+    except (httpx.TimeoutException, httpx.TransportError):
+        wedap_data = {"unavailable": True, "reason": "timeout"}
+    except httpx.HTTPStatusError:
+        wedap_data = {"unavailable": True, "reason": "http_error"}
+    except WedapError:
+        wedap_data = {"unavailable": True, "reason": "wedap_error"}
+
+    return ok(
+        {"bizSeqNo": row.biz_seq_no, "orderStatus": row.status, "wedap": wedap_data},
+        trace_id=ids["trace_id"],
     )
