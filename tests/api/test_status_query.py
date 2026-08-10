@@ -22,7 +22,7 @@ HEADERS = {
 
 COLLECT_BODY = {
     "bizSeqNo": "CLT-20260611-0001234567890",
-    "totalAmount": "500.0000",
+    "txnAmount": "500.0000",
     "currencyCode": "USD",
     "transType": "LOAN_COLLECT",
     "userList": [{"userId": "U1", "amount": "500.0000"}],
