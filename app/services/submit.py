@@ -13,9 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.clients.wedap import WedapError
 from app.domain.biz_seq import validate_biz_seq_no
 from app.domain.states import (
-    WEDAP_PENDING_BUSINESS_CODES,
     OrderStatus,
     assert_transition,
+    is_repayment_terminal_reject,
     map_wedap_repayment_status,
     map_wedap_txn_status,
 )
@@ -203,11 +203,13 @@ async def submit_order(
                 "errorCode": f"HTTP_{status_code}",
             }
     except WedapError as exc:
-        # 待轮询业务码（还款 6605U00900211 结果待确认 / 6605B00900212 需人工处理）不是失败：
-        # 此时 wedap 侧资金可能已部分变动或在柜面人工处置中，判 FAILED 会让上游回滚 →
-        # 与 wedap 挂起态脱节（§3.6.1 状态撕裂）。改判 RESULT_UNKNOWN 挂起等兜底 worker 收敛。
-        pending = exc.code in WEDAP_PENDING_BUSINESS_CODES
-        new_status = OrderStatus.RESULT_UNKNOWN if pending else OrderStatus.FAILED
+        # 还款走白名单制（对接文档 v0.6.1 §4.2 的 13 位业务码）：只有明确的「确证拒绝」码
+        # 才是可回滚终态；待轮询码（211 结果待确认 / 212 需人工处理）与**任何未知码**一律
+        # 挂 RESULT_UNKNOWN 等兜底 worker 查真实状态——此时 wedap 侧资金可能已部分变动或在
+        # 柜面处置中，判 FAILED 会让上游回滚而与 wedap 挂起态脱节（§3.6.1 状态撕裂）。
+        # 其余交易类型（放款/归集/分发/退款/冲正）保持既有语义：业务失败即终态 FAILED。
+        terminal_reject = is_repayment_terminal_reject(exc.code) if req.repayment_contract else True
+        new_status = OrderStatus.FAILED if terminal_reject else OrderStatus.RESULT_UNKNOWN
         response = {
             "txnStatus": str(new_status),
             "bizSeqNo": req.biz_seq_no,
@@ -262,7 +264,8 @@ async def submit_order(
             # else：order 已被回调/兜底 worker 推进到更强态 → CAS skip 不覆盖，仅写 record_response
             # 提交响应最小字段契约：orderStatus = CAS 后订单真实状态（CAS skip 时即回调/兜底
             # 已聚合的更强态）。写在 record_response 前 → 随 first_response 一并冻结，
-            # 幂等重放 data 段与首次逐字节一致（envelope trace_id 每请求各异）。
+            # 幂等重放 data 段与首次**字段值**一致（不是字节一致：envelope trace_id 每请求
+            # 各异，且 DB JSON 列不保证对象键顺序——字节序不是契约，字段值才是）。
             response["orderStatus"] = str(order.status)
             await record_response(
                 session,

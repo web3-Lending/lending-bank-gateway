@@ -356,9 +356,7 @@ async def test_repayment_ack_success_maps_status_and_exposes_debt_settled(factor
     assert result["globalTxId"] == "GT20260727000001"
     assert result["detailStatus"] == "SUCCESS"
     async with factory() as s:
-        assert (
-            await s.execute(select(BankTxnOrder))
-        ).scalar_one().status == OrderStatus.SUCCEEDED
+        assert (await s.execute(select(BankTxnOrder))).scalar_one().status == OrderStatus.SUCCEEDED
 
 
 @pytest.mark.asyncio
@@ -481,3 +479,57 @@ async def test_terminal_business_codes_still_failed(factory) -> None:
     assert result["txnStatus"] == "FAILED"
     assert result["orderStatus"] == OrderStatus.FAILED
     assert result["errorCode"] == "6605B00900205"
+
+
+@pytest.mark.asyncio
+async def test_unknown_repayment_business_code_holds_instead_of_failing(factory) -> None:
+    """**白名单制**：文档 13 码之外的未知业务码（wedap 新增而未同步通知）不得默认判 FAILED。
+
+    两类误判代价不对称——未知码误判 FAILED → 上游回滚而 wedap 可能已扣款 = 资金错账（不可逆）；
+    误判挂起 → 多等一轮 worker 查真实状态 = 延迟（可恢复）。故取代价小的一侧。
+    """
+    from app.clients.wedap import WedapError
+
+    wedap = AsyncMock()
+    wedap.submit_repayment.side_effect = WedapError("6605B00900299", "未来新增的未知业务码")
+    result = await submit_order(
+        factory,
+        wedap_call=wedap.submit_repayment,
+        req=_repay_req(biz_seq_no="RPMT-20260810-0001234567896"),
+    )
+    assert result["txnStatus"] == "RESULT_UNKNOWN"
+    assert result["orderStatus"] == OrderStatus.RESULT_UNKNOWN
+    assert result["errorCode"] == "6605B00900299"
+
+
+@pytest.mark.asyncio
+async def test_non_repayment_business_failure_unaffected_by_whitelist(factory) -> None:
+    """白名单只作用于还款路径：其余交易（放款/归集/分发/退款/冲正）的业务失败保持既有
+    终态 FAILED 语义，不因还款加固被连带放宽成挂起。"""
+    from app.clients.wedap import WedapError
+
+    wedap = AsyncMock()
+    wedap.submit_disbursement.side_effect = WedapError("422", "可用余额不足")
+    result = await submit_order(
+        factory,
+        wedap_call=wedap.submit_disbursement,
+        req=_req(biz_seq_no="DSB-20260611-0001234567899"),
+    )
+    assert result["txnStatus"] == "FAILED"
+    assert result["orderStatus"] == OrderStatus.FAILED
+
+
+def test_repayment_terminal_reject_whitelist_matches_contract() -> None:
+    """白名单内容对照契约而非实现：文档 v0.6.1 §4.2 的 10 个「受理即拒、零资金变动」码。
+
+    刻意不断言集合大小或成员顺序——断言的是「211/212 待轮询码与 206（HTTP 500 路径）
+    不在白名单内」这个不变量，防后人误把待轮询码加进来。
+    """
+    from app.domain.states import WEDAP_TERMINAL_REJECT_CODES, is_repayment_terminal_reject
+
+    for pending in ("6605U00900211", "6605B00900212"):
+        assert not is_repayment_terminal_reject(pending)
+        assert pending not in WEDAP_TERMINAL_REJECT_CODES
+    assert not is_repayment_terminal_reject("6605T00900206")
+    for confirmed in ("6605B00900201", "6605B00900205", "6605B00900208", "6605B00900216"):
+        assert is_repayment_terminal_reject(confirmed)
