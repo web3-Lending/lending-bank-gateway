@@ -40,7 +40,15 @@ class CollectRequest(BaseModel):
     # gateway 落库供状态回查（提交值==查询值），
     # 缺失/超长在入口显式拒绝——静默截断会造成「回查值 != 提交值」永久查不到（codex P1）。
     transType: str = Field(min_length=1, max_length=32)
-    txnAmount: str | None = None
+    # 语义上**必填**，但 schema 故意留 optional：缺失时由端点手工检查抛统一的
+    # GW_400_VALIDATION 封套，而非 pydantic 的 422（与 loans.lenders 同一模式）。
+    # description 显式声明必填语义——调用方会从 openapi 的 required 集推契约，
+    # 只留类型会让它们误以为可省（2026-08-10 独立评审 finding）。
+    txnAmount: str | None = Field(
+        default=None,
+        description="归集金额（DECIMAL(21,4) 字符串）。**业务上必填**；缺失/空串返 400 "
+        "GW_400_VALIDATION。schema 标 optional 仅为统一错误封套，勿据此省略。",
+    )
 
 
 class DistributeRequest(BaseModel):

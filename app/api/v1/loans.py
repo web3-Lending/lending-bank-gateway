@@ -99,6 +99,30 @@ class RepaymentAckEnvelope(BaseModel):
     trace_id: str
 
 
+class RepaymentStatusData(BaseModel):
+    """还款专用状态查询 200 响应 data 段。
+
+    ``wedap`` 是**薄透传**段：正常时为 wedap 专用状态查询响应（含 ``debtSettled`` /
+    ``strandedAmount`` / ``steps[]``），wedap 不可达时降级为
+    ``{"unavailable": true, "reason": ...}``。逐笔 ``steps[]`` 的结构由 wedap 契约决定、
+    本网关不复刻，故此段保持开放对象——但顶层三键必须在 openapi 里可见，否则调用方
+    连「响应长什么样」都要靠口头传达（2026-08-10 独立评审 finding）。
+    """
+
+    bizSeqNo: str
+    orderStatus: str
+    wedap: dict[str, Any]
+
+
+class RepaymentStatusEnvelope(BaseModel):
+    """还款专用状态查询 200 响应统一 envelope。"""
+
+    success: bool
+    data: RepaymentStatusData
+    error: dict[str, Any] | None
+    trace_id: str
+
+
 # ── 内部提交 helper ────────────────────────────────────────────────────────────
 
 
@@ -227,7 +251,7 @@ async def p2p_repayment(
     )
 
 
-@router.get("/p2p-repayments/{biz_seq_no}/status")
+@router.get("/p2p-repayments/{biz_seq_no}/status", response_model=RepaymentStatusEnvelope)
 async def query_repayment_status(
     biz_seq_no: str,
     request: Request,
