@@ -78,6 +78,7 @@ async def _submit(
     amount: Decimal,
     currency: str,
     wedap_payload: dict[str, Any],
+    repayment_contract: bool = False,
 ) -> dict[str, Any]:
     """validate biz_seq_no → submit_order → catch IdempotencyConflict → ok envelope。"""
     try:
@@ -96,6 +97,7 @@ async def _submit(
                 business_scope=business_scope,
                 wedap_payload=wedap_payload,
                 ori_req_date=bank_req_date(request),
+                repayment_contract=repayment_contract,
             ),
         )
     except ValueError as exc:
@@ -179,4 +181,7 @@ async def p2p_repayment(
         amount=amount,
         currency=body.repaymentInfo.currencyCode,
         wedap_payload=payload,
+        # 还款走 DTC 组合交易引擎的专属受理响应契约（v0.6.1 §4.2）：status/detailStatus/
+        # debtSettled/globalTxId，无 txnStatus。仅本端点置 True。
+        repayment_contract=True,
     )
