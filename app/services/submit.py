@@ -52,6 +52,14 @@ class SubmitRequest:
     repayment_contract: bool = False
 
 
+# 北向 txnStatus 的封闭值域。落在集合外（含空串、未知值、异常大小写残留）一律输出
+# RESULT_UNKNOWN——见 _parse_ack docstring 的状态撕裂说明。
+# 通用交易（放款/归集/分发/退款/冲正）：对接文档 §5.5 交易状态枚举。
+_GENERIC_NORTHBOUND_STATUSES = frozenset({"SUCCESS", "PROCESSING", "FAILED", "REVERSED", "PENDING"})
+# 还款（DTC）：§4.2 收敛为三值，永不出现 REVERSED / PENDING。
+_REPAYMENT_NORTHBOUND_STATUSES = frozenset({"SUCCESS", "PROCESSING", "FAILED"})
+
+
 def _parse_ack(
     data: dict[str, Any],
     *,
@@ -64,22 +72,28 @@ def _parse_ack(
     `status` 归一化映射进 `txnStatus`，新增字段（debtSettled/globalTxId/detailStatus）
     以**增量**形式追加，上游零改动即恢复正确行为、按需再接新字段。
 
-    非 str 状态（显式 null / 数字等毒响应）一律归一化为 `PROCESSING`：response_model 挂上后
-    非 str 会触发 ResponseValidationError 500，且毒响应已冻结进 first_response → 同 key
-    重放永久 500（独立评审 MEDIUM）。同时保守挂起优于误判失败回滚。
+    **北向 txnStatus 值域封闭且归一化**（2026-08-10 独立评审 finding）：绝不原样透传 wedap
+    的字符串。上游按字面量匹配（`_TXN_SUCCESS_STATUSES={"SUCCESS"}`），wedap 一旦返
+    `"success"` 这类大小写偏差，gateway 台账会因内部 `.upper()` 正确落 SUCCEEDED，而北向
+    原样输出的 `"success"` 上游认不出 → 走回滚分支 = **台账说成功、上游在回滚**的状态撕裂。
+    未知值 / 毒值同理不可放行，一律归一化到 `RESULT_UNKNOWN`——上游只对该字面量挂起且不
+    回滚（`app_flow_loans.py:1118`），是唯一安全的兜底档；`PROCESSING` 在上游反而触发回滚，
+    故不能拿它当兜底值。
     """
     if not repayment:
         raw = data.get("txnStatus")
+        status = raw.strip().upper() if isinstance(raw, str) else ""
         return (
-            map_wedap_txn_status(str(raw or "").upper()),
-            {"txnStatus": raw if isinstance(raw, str) else "PROCESSING"},
+            map_wedap_txn_status(status),
+            {"txnStatus": status if status in _GENERIC_NORTHBOUND_STATUSES else "RESULT_UNKNOWN"},
         )
 
     # 还款（DTC 组合交易引擎，对接文档 v0.6.1 §4.2）
     raw_status = data.get("status")
-    status = raw_status if isinstance(raw_status, str) else "PROCESSING"
+    status = raw_status.strip().upper() if isinstance(raw_status, str) else ""
     fields: dict[str, Any] = {
-        "txnStatus": status,
+        # 还款值域仅 SUCCESS/PROCESSING/FAILED（§4.2 明确永不出现 REVERSED/PENDING）
+        "txnStatus": status if status in _REPAYMENT_NORTHBOUND_STATUSES else "RESULT_UNKNOWN",
         # 核销依据：**仅 JSON 真 boolean true 才认**。缺失 / "true" 字符串 / null 一律 False——
         # 金融安全取保守方向：宁可不核销（可人工补），不可误核销（债务凭空消失）。
         "debtSettled": data.get("debtSettled") is True,

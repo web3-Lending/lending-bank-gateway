@@ -31,10 +31,21 @@ from app.models.base import Base
 from app.models.txn import BankTxnOrder
 from app.services.submit import SubmitRequest, submit_order
 
-# 上游按字面量匹配的三个取值。左侧是 gateway 的枚举成员，右侧是上游硬编码的字符串。
-UPSTREAM_MATCHED_LITERALS = {
+# 上游读的是**北向 txnStatus**，其值域来自 wedap 契约（SUCCESS/PROCESSING/FAILED/...），
+# 与 gateway 台账的 OrderStatus 是**两套不同的取值空间**——只有 RESULT_UNKNOWN / FAILED
+# 两个字符串在两边同形。早先把 OrderStatus.SUCCEEDED→"SUCCEEDED" 也写进来是空守卫：
+# "SUCCEEDED" 只会出现在 orderStatus 字段，上游根本不读（2026-08-10 独立评审 finding）。
+#
+# 上游 bank_p2p.py:385-386 / app_flow_loans.py:1118 按字面量匹配的 txnStatus 取值：
+UPSTREAM_MATCHED_TXN_STATUS = {
+    "SUCCESS": "落账 → 上游核销债务",
+    "PROCESSING": "在途 → 上游 is_ok=False 且**会回滚**（见 FU-LIFECYCEL-REPAY-UNKNOWN-RESOLVER）",
+    "FAILED": "确证拒绝 → 上游回滚（此时零资金变动，安全）",
+    "RESULT_UNKNOWN": "唯一让上游挂起且不回滚的值",
+}
+# gateway 台账枚举中被上游同名字面量依赖的成员（仅此二者跨两套空间同形）
+ORDER_STATUS_SHARED_LITERALS = {
     OrderStatus.RESULT_UNKNOWN: "RESULT_UNKNOWN",
-    OrderStatus.SUCCEEDED: "SUCCEEDED",
     OrderStatus.FAILED: "FAILED",
 }
 
@@ -67,12 +78,71 @@ def _repay_req(**kw) -> SubmitRequest:
 
 
 def test_order_status_enum_values_are_upstream_contract() -> None:
-    """OrderStatus 成员的字符串值即跨仓契约，改名会让上游静默走错分支。"""
-    for member, literal in UPSTREAM_MATCHED_LITERALS.items():
+    """OrderStatus 中与北向 txnStatus 同形的成员，其字符串值即跨仓契约。"""
+    for member, literal in ORDER_STATUS_SHARED_LITERALS.items():
         assert str(member) == literal, (
             f"OrderStatus.{member.name} 的字符串值被改成 {str(member)!r}，"
             f"但上游 lending-lifecycel 按 {literal!r} 字面量匹配——改名前必须同步该仓 owner"
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("wedap_status", "expected_northbound"),
+    [
+        ("success", "SUCCESS"),  # 大小写偏差必须归一化，否则上游认不出 → 回滚
+        ("Success", "SUCCESS"),
+        (" SUCCESS ", "SUCCESS"),
+        ("processing", "PROCESSING"),
+        ("failed", "FAILED"),
+        ("REVERSED", "RESULT_UNKNOWN"),  # 还款契约无此值 → 落兜底档
+        ("WEIRD_NEW_VALUE", "RESULT_UNKNOWN"),  # wedap 新增未知值 → 保守挂起
+        ("", "RESULT_UNKNOWN"),
+    ],
+)
+async def test_northbound_txn_status_is_normalized_closed_set(
+    factory, wedap_status: str, expected_northbound: str
+) -> None:
+    """北向 txnStatus 必须归一化到封闭值域，绝不原样透传 wedap 字符串。
+
+    真实失败场景（2026-08-10 独立评审实测）：wedap 返 {"status":"success"}，gateway 内部
+    map_wedap_repayment_status 有 .upper() 故台账正确落 SUCCEEDED 并转发 loanRepaid，
+    但北向若原样输出 "success"，上游 _TXN_SUCCESS_STATUSES={"SUCCESS"} 匹配不上 →
+    error_code="success" ≠ "RESULT_UNKNOWN" → app_flow_loans.py:1151 回滚本地状态。
+    台账说成功、上游在回滚 = 状态撕裂。
+    """
+    wedap = AsyncMock()
+    wedap.submit_repayment.return_value = {"status": wedap_status, "debtSettled": False}
+    result = await submit_order(
+        factory,
+        wedap_call=wedap.submit_repayment,
+        req=_repay_req(biz_seq_no=f"RPMT-norm-{abs(hash(wedap_status)) % 10**10}"),
+    )
+    assert result["txnStatus"] == expected_northbound
+    assert result["txnStatus"] in UPSTREAM_MATCHED_TXN_STATUS, (
+        f"北向 txnStatus 输出了 {result['txnStatus']!r}，不在上游能识别的封闭值域内——"
+        f"上游按字面量匹配，认不出的值会让它走回滚分支"
+    )
+
+
+@pytest.mark.asyncio
+async def test_generic_txn_status_also_normalized(factory) -> None:
+    """通用交易（放款/归集/分发/退款/冲正）走同一条归一化规则，不因分支不同而漏。"""
+    wedap = AsyncMock()
+    wedap.submit_disbursement.return_value = {"txnStatus": "success"}
+    result = await submit_order(
+        factory,
+        wedap_call=wedap.submit_disbursement,
+        req=_repay_req(
+            biz_seq_no="DSB-norm-0001",
+            business_action="DISBURSE",
+            biz_type="DISB",
+            business_scope="p2p_disburse",
+            repayment_contract=False,
+        ),
+    )
+    assert result["txnStatus"] == "SUCCESS"
+    assert result["orderStatus"] == OrderStatus.SUCCEEDED
 
 
 @pytest.mark.asyncio
