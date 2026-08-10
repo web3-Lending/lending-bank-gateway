@@ -313,3 +313,223 @@ async def test_null_txn_status_normalized_to_str(factory) -> None:
     # 重放同样健康
     replay = await submit_order(factory, wedap_call=AsyncMock(), req=req)
     assert replay == result
+
+
+# ── 还款（DTC 组合交易引擎）受理响应契约 · 对接文档 v0.5.0 §4.2 ──────────────────
+
+
+def _repay_req(**kw) -> SubmitRequest:
+    """还款受理请求：与 _req 同构，但走还款专用响应契约（repayment_contract=True）。"""
+    d = dict(
+        biz_seq_no="RPMT-20260810-0001234567890",
+        business_action="REPAY",
+        biz_type="RPMT",
+        business_scope="p2p_repay",
+        repayment_contract=True,
+    )
+    d.update(kw)
+    return _req(**d)
+
+
+@pytest.mark.asyncio
+async def test_repayment_ack_success_maps_status_and_exposes_debt_settled(factory) -> None:
+    """v0.5.0 起还款受理响应**不再返回 txnStatus**，改为
+    `{bizSeqNo, globalTxId, status, detailStatus, debtSettled}`。
+
+    共用 txnStatus 解析路径会读空 → 兜底 PROCESSING + 订单滞留 SUBMITTED，
+    即「钱已落账却判处理中」的假挂起（本用例锁定修复）。北向 txnStatus 字段名保留
+    （上游 lending-lifecycel 只读仓按此解析），wedap `status` 归一化映射进来。
+    """
+    wedap = AsyncMock()
+    wedap.submit_repayment.return_value = {
+        "bizSeqNo": "RPMT-20260810-0001234567890",
+        "globalTxId": "GT20260727000001",
+        "status": "SUCCESS",
+        "detailStatus": "SUCCESS",
+        "debtSettled": True,
+    }
+    result = await submit_order(factory, wedap_call=wedap.submit_repayment, req=_repay_req())
+    assert result["txnStatus"] == "SUCCESS"
+    assert result["orderStatus"] == OrderStatus.SUCCEEDED
+    # 核销依据 + 排查锚点透传给上游（受理响应最小字段集之外的增量）
+    assert result["debtSettled"] is True
+    assert result["globalTxId"] == "GT20260727000001"
+    assert result["detailStatus"] == "SUCCESS"
+    async with factory() as s:
+        assert (await s.execute(select(BankTxnOrder))).scalar_one().status == OrderStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_repayment_ack_processing_holds_order_and_debt_not_settled(factory) -> None:
+    """status=PROCESSING（detailStatus 可为 PROCESSING/UNKNOWN/PENDING_MANUAL）→ 非终态：
+    订单 SUBMITTED 挂起等轮询，debtSettled=False（⛔ 不得记账、不得回滚、不得重发）。"""
+    wedap = AsyncMock()
+    wedap.submit_repayment.return_value = {
+        "bizSeqNo": "RPMT-20260810-0001234567891",
+        "globalTxId": "GT20260727000002",
+        "status": "PROCESSING",
+        "detailStatus": "PENDING_MANUAL",
+        "debtSettled": False,
+    }
+    result = await submit_order(
+        factory,
+        wedap_call=wedap.submit_repayment,
+        req=_repay_req(biz_seq_no="RPMT-20260810-0001234567891"),
+    )
+    assert result["txnStatus"] == "PROCESSING"
+    assert result["orderStatus"] == OrderStatus.SUBMITTED
+    assert result["debtSettled"] is False
+    assert result["detailStatus"] == "PENDING_MANUAL"
+
+
+@pytest.mark.asyncio
+async def test_repayment_ack_failed_is_terminal(factory) -> None:
+    """status=FAILED = wedap 已确证零资金变动（借款人分文未扣）→ 终态 FAILED，可安全回滚。"""
+    wedap = AsyncMock()
+    wedap.submit_repayment.return_value = {
+        "bizSeqNo": "RPMT-20260810-0001234567892",
+        "globalTxId": "GT20260727000003",
+        "status": "FAILED",
+        "detailStatus": "FAILED",
+        "debtSettled": False,
+    }
+    result = await submit_order(
+        factory,
+        wedap_call=wedap.submit_repayment,
+        req=_repay_req(biz_seq_no="RPMT-20260810-0001234567892"),
+    )
+    assert result["txnStatus"] == "FAILED"
+    assert result["orderStatus"] == OrderStatus.FAILED
+    assert result["debtSettled"] is False
+
+
+@pytest.mark.asyncio
+async def test_repayment_ack_missing_status_normalized_to_processing(factory) -> None:
+    """还款响应缺 status / 非 str（毒响应）→ 归一化 PROCESSING + 订单 SUBMITTED：
+    保守挂起等轮询，绝不当失败回滚（同 test_null_txn_status_normalized_to_str 的动机）。"""
+    wedap = AsyncMock()
+    wedap.submit_repayment.return_value = {"bizSeqNo": "x", "status": None}
+    req = _repay_req(biz_seq_no="RPMT-20260810-0001234567893")
+    result = await submit_order(factory, wedap_call=wedap.submit_repayment, req=req)
+    assert result["txnStatus"] == "PROCESSING"
+    assert result["orderStatus"] == OrderStatus.SUBMITTED
+    assert result["debtSettled"] is False
+    replay = await submit_order(factory, wedap_call=AsyncMock(), req=req)
+    assert replay == result
+
+
+@pytest.mark.asyncio
+async def test_repayment_debt_settled_non_bool_normalized_false(factory) -> None:
+    """debtSettled 非 bool（缺失 / "true" 字符串 / null）→ 归一化 False。
+
+    金融安全的保守方向：宁可不核销（可人工补），不可误核销（债务凭空消失）。
+    仅 JSON 真 boolean true 才认。
+    """
+    wedap = AsyncMock()
+    wedap.submit_repayment.return_value = {
+        "status": "SUCCESS",
+        "detailStatus": "SUCCESS",
+        "debtSettled": "true",
+    }
+    result = await submit_order(
+        factory,
+        wedap_call=wedap.submit_repayment,
+        req=_repay_req(biz_seq_no="RPMT-20260810-0001234567894"),
+    )
+    assert result["debtSettled"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["6605U00900211", "6605B00900212"])
+async def test_pending_business_codes_set_result_unknown(factory, code: str) -> None:
+    """对接文档 v0.5.0 §4.2 业务错误码：`6605U00900211`(交易结果待确认) /
+    `6605B00900212`(交易需人工处理) 的真实语义是**转轮询**，不是失败。
+
+    旧行为把 HTTP200+业务码一律判 FAILED → 上游据此回滚，而此时 wedap 侧资金可能已变动
+    或正在柜面人工处置中，违反 §3.6.1「只有确证 FAILED 才允许回滚」铁律（状态撕裂）。
+    """
+    from app.clients.wedap import WedapError
+
+    wedap = AsyncMock()
+    wedap.submit_repayment.side_effect = WedapError(code, "交易结果待确认")
+    result = await submit_order(
+        factory,
+        wedap_call=wedap.submit_repayment,
+        req=_repay_req(biz_seq_no=f"RPMT-2026081{code[-1]}-000123456789"),
+    )
+    assert result["txnStatus"] == "RESULT_UNKNOWN"
+    assert result["orderStatus"] == OrderStatus.RESULT_UNKNOWN
+    # 业务码保留供上游排障/展示（RESULT_UNKNOWN 也要能追溯到具体挂起原因）
+    assert result["errorCode"] == code
+
+
+@pytest.mark.asyncio
+async def test_terminal_business_codes_still_failed(factory) -> None:
+    """确证型业务拒绝（余额不足 6605B00900205 等）仍是终态 FAILED——零资金变动可安全回滚，
+    不因 REQ-2 的待轮询豁免被误放宽。"""
+    from app.clients.wedap import WedapError
+
+    wedap = AsyncMock()
+    wedap.submit_repayment.side_effect = WedapError("6605B00900205", "账户余额不足")
+    result = await submit_order(
+        factory,
+        wedap_call=wedap.submit_repayment,
+        req=_repay_req(biz_seq_no="RPMT-20260810-0001234567895"),
+    )
+    assert result["txnStatus"] == "FAILED"
+    assert result["orderStatus"] == OrderStatus.FAILED
+    assert result["errorCode"] == "6605B00900205"
+
+
+@pytest.mark.asyncio
+async def test_unknown_repayment_business_code_holds_instead_of_failing(factory) -> None:
+    """**白名单制**：文档 13 码之外的未知业务码（wedap 新增而未同步通知）不得默认判 FAILED。
+
+    两类误判代价不对称——未知码误判 FAILED → 上游回滚而 wedap 可能已扣款 = 资金错账（不可逆）；
+    误判挂起 → 多等一轮 worker 查真实状态 = 延迟（可恢复）。故取代价小的一侧。
+    """
+    from app.clients.wedap import WedapError
+
+    wedap = AsyncMock()
+    wedap.submit_repayment.side_effect = WedapError("6605B00900299", "未来新增的未知业务码")
+    result = await submit_order(
+        factory,
+        wedap_call=wedap.submit_repayment,
+        req=_repay_req(biz_seq_no="RPMT-20260810-0001234567896"),
+    )
+    assert result["txnStatus"] == "RESULT_UNKNOWN"
+    assert result["orderStatus"] == OrderStatus.RESULT_UNKNOWN
+    assert result["errorCode"] == "6605B00900299"
+
+
+@pytest.mark.asyncio
+async def test_non_repayment_business_failure_unaffected_by_whitelist(factory) -> None:
+    """白名单只作用于还款路径：其余交易（放款/归集/分发/退款/冲正）的业务失败保持既有
+    终态 FAILED 语义，不因还款加固被连带放宽成挂起。"""
+    from app.clients.wedap import WedapError
+
+    wedap = AsyncMock()
+    wedap.submit_disbursement.side_effect = WedapError("422", "可用余额不足")
+    result = await submit_order(
+        factory,
+        wedap_call=wedap.submit_disbursement,
+        req=_req(biz_seq_no="DSB-20260611-0001234567899"),
+    )
+    assert result["txnStatus"] == "FAILED"
+    assert result["orderStatus"] == OrderStatus.FAILED
+
+
+def test_repayment_terminal_reject_whitelist_matches_contract() -> None:
+    """白名单内容对照契约而非实现：文档 v0.6.1 §4.2 的 10 个「受理即拒、零资金变动」码。
+
+    刻意不断言集合大小或成员顺序——断言的是「211/212 待轮询码与 206（HTTP 500 路径）
+    不在白名单内」这个不变量，防后人误把待轮询码加进来。
+    """
+    from app.domain.states import WEDAP_TERMINAL_REJECT_CODES, is_repayment_terminal_reject
+
+    for pending in ("6605U00900211", "6605B00900212"):
+        assert not is_repayment_terminal_reject(pending)
+        assert pending not in WEDAP_TERMINAL_REJECT_CODES
+    assert not is_repayment_terminal_reject("6605T00900206")
+    for confirmed in ("6605B00900201", "6605B00900205", "6605B00900208", "6605B00900216"):
+        assert is_repayment_terminal_reject(confirmed)

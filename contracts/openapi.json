@@ -183,6 +183,51 @@
         }
       }
     },
+    "/api/v1/loans/p2p-repayments/{biz_seq_no}/status": {
+      "get": {
+        "tags": [
+          "loans"
+        ],
+        "summary": "Query Repayment Status",
+        "description": "还款专用状态查询（对接文档 v0.6.1 §4.2）：本地 order 状态 + wedap 逐笔明细。\n\n为什么不复用 `/bank-funds/status`（5.5 通用查询）：5.5 自 v0.6.0 起虽能查还款**顶层\n状态**，但 `debtSettled`（Lending 核销债务的唯一依据）与 `steps[]`（逐笔与银行对账）\n**只有本专用接口提供**。受理响应为 PROCESSING 时按本接口轮询至终态。\n\n本地 order 不存在 → 404 且不打 wedap：存在性判据在本方台账，不拿外部系统当权威\n（亦防 bizSeqNo 探测）。wedap 不可用 → 降级 `unavailable`，本地 orderStatus 仍可读。",
+        "operationId": "query_repayment_status_api_v1_loans_p2p_repayments__biz_seq_no__status_get",
+        "parameters": [
+          {
+            "name": "biz_seq_no",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Biz Seq No"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Query Repayment Status Api V1 Loans P2P Repayments  Biz Seq No  Status Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/bank-funds/collect-from-users": {
       "post": {
         "tags": [

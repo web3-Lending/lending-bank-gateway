@@ -1360,3 +1360,51 @@ async def test_unwrap_5xx_with_envelope_still_http_status_error() -> None:
     )
     with pytest.raises(httpx.HTTPStatusError):
         await _client().collect_from_users(tenant_id="WBTHK01", request_id="r", payload={})
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_query_repayment_status_uses_path_param_and_returns_steps() -> None:
+    """还款专用状态查询（v0.6.1 §4.2）：bizSeqNo 走**路径参数**（非 query），
+    响应含 5.5 通用查询不提供的 debtSettled / strandedAmount / steps[]。"""
+    biz = "RPMT-20260810-0001"
+    route = respx.get(f"{BASE}/api/v1/loans/p2p-repayments/{biz}/status").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "code": "200",
+                "msg": "SUCCESS",
+                "data": {
+                    "bizSeqNo": biz,
+                    "status": "PROCESSING",
+                    "detailStatus": "PENDING_MANUAL",
+                    "debtSettled": False,
+                    "strandedAmount": "55.0000",
+                    "steps": [{"stepType": "COLLECT", "stepSeq": 1, "status": "SUCCESS"}],
+                },
+            },
+        )
+    )
+    resp = await _client().query_repayment_status(
+        tenant_id="OCBC", request_id="qry-rpmt-001", biz_seq_no=biz
+    )
+    assert resp["debtSettled"] is False
+    assert resp["strandedAmount"] == "55.0000"
+    assert resp["steps"][0]["stepType"] == "COLLECT"
+    req = route.calls.last.request
+    assert req.headers["X-Tenant-Id"] == "OCBC"
+    assert req.headers["X-Request-Id"] == "qry-rpmt-001"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_query_repayment_status_escapes_path_segment() -> None:
+    """bizSeqNo 进 URL 路径前必须转义：未转义的 `/` `..` 会改写请求路径打到别的端点
+    （路径注入）。gateway 入口虽已按 [A-Za-z0-9_-] 校验，client 侧仍不假设上游已净化。"""
+    route = respx.get(url__regex=r".*/api/v1/loans/p2p-repayments/.+/status").mock(
+        return_value=httpx.Response(200, json={"code": "200", "msg": "SUCCESS", "data": {}})
+    )
+    await _client().query_repayment_status(
+        tenant_id="OCBC", request_id="qry-rpmt-002", biz_seq_no="a/../../evil"
+    )
+    assert "a%2F..%2F..%2Fevil/status" in str(route.calls.last.request.url)

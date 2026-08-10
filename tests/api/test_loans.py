@@ -3,9 +3,11 @@
 import asyncio
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from app.clients.wedap import WedapError
 from app.main import create_app
 from app.models.base import Base
 
@@ -36,7 +38,15 @@ def client() -> TestClient:
     asyncio.run(_create_tables(app.state.engine))
     wedap = AsyncMock()
     wedap.submit_disbursement.return_value = {"txnStatus": "PROCESSING"}
-    wedap.submit_repayment.return_value = {"txnStatus": "PROCESSING"}
+    # 还款受理响应按 DTC 新契约（v0.6.1 §4.2）：status 非 txnStatus，另有 detailStatus/
+    # debtSettled/globalTxId。mock 须与真契约同形，否则测试会绿在一个 wedap 不会返回的形状上。
+    wedap.submit_repayment.return_value = {
+        "bizSeqNo": "RPMT-20260810-0001234567890",
+        "globalTxId": "GT20260727000001",
+        "status": "PROCESSING",
+        "detailStatus": "PROCESSING",
+        "debtSettled": False,
+    }
     app.state.wedap = wedap
     return TestClient(app)
 
@@ -359,3 +369,122 @@ def test_disbursement_extra_fields_passthrough(client: TestClient) -> None:
     assert r.status_code == 200, r.json()
     call_str = str(client.app.state.wedap.submit_disbursement.call_args)  # type: ignore[union-attr]
     assert "postscript" in call_str and "feeDeductions" in call_str
+
+
+# ── 还款专用状态查询 · 对接文档 v0.6.1 §4.2「还款状态查询（专用接口）」 ──────────────
+
+REPAY_BODY = {
+    "bizSeqNo": "RPMT-20260810-0001234567890",
+    "channelId": "LEN",
+    "transType": "REPAYMENT",
+    "loanNo": "LN20250205000001",
+    "repaymentInfo": {"txnAmount": "100.0000", "currencyCode": "USD"},
+    "lenders": [{"userId": "L1", "txnAmount": "100.0000", "currencyCode": "USD"}],
+}
+REPAY_HEADERS = {**HEADERS, "Idempotency-Key": REPAY_BODY["bizSeqNo"]}
+WEDAP_STATUS_DATA = {
+    "bizSeqNo": REPAY_BODY["bizSeqNo"],
+    "globalTxId": "GT20260727000001",
+    "status": "PROCESSING",
+    "detailStatus": "PENDING_MANUAL",
+    "debtSettled": False,
+    "strandedAmount": "55.0000",
+    "steps": [
+        {
+            "stepType": "COLLECT",
+            "stepSeq": 1,
+            "busiOrderNo": "BO-1",
+            "bankRefNo": "BR-1",
+            "amount": "110.0000",
+            "currencyCode": "USD",
+            "payerAccountNo": "ACC001",
+            "payeeAccountNo": "INT00101001USD",
+            "status": "SUCCESS",
+        },
+        {
+            "stepType": "DISTRIBUTE",
+            "stepSeq": 2,
+            "busiOrderNo": "BO-2",
+            "bankRefNo": None,
+            "amount": "55.0000",
+            "currencyCode": "USD",
+            "payerAccountNo": "INT00101001USD",
+            "payeeAccountNo": "ACC002",
+            "status": "PENDING_MANUAL",
+            "failReason": "counter hold",
+            "failCategory": "TECHNICAL",
+        },
+    ],
+}
+
+
+def _accept_repayment(client: TestClient) -> None:
+    r = client.post("/api/v1/loans/p2p-repayments", json=REPAY_BODY, headers=REPAY_HEADERS)
+    assert r.status_code == 200
+
+
+def test_repayment_status_query_exposes_steps_and_debt_settled(client: TestClient) -> None:
+    """v0.5.0 专用状态查询：debtSettled(核销依据) 与逐笔 steps[](对账) 只此接口提供，
+    5.5 通用查询不含——故 gateway 必须单独透传，不能只靠 /bank-funds/status。"""
+    _accept_repayment(client)
+    client.app.state.wedap.query_repayment_status.return_value = WEDAP_STATUS_DATA
+    r = client.get(f"/api/v1/loans/p2p-repayments/{REPAY_BODY['bizSeqNo']}/status", headers=HEADERS)
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["bizSeqNo"] == REPAY_BODY["bizSeqNo"]
+    assert data["orderStatus"] == "SUBMITTED"
+    assert data["wedap"]["debtSettled"] is False
+    assert data["wedap"]["strandedAmount"] == "55.0000"
+    assert [s["stepType"] for s in data["wedap"]["steps"]] == ["COLLECT", "DISTRIBUTE"]
+    # 专用接口按 bizSeqNo 路径参数查询，无需 transType/oriReqDate（与 5.5 通用查询不同）
+    client.app.state.wedap.query_repayment_status.assert_awaited_once()
+    kwargs = client.app.state.wedap.query_repayment_status.await_args.kwargs
+    assert kwargs["biz_seq_no"] == REPAY_BODY["bizSeqNo"]
+    assert kwargs["tenant_id"] == "OCBC"
+
+
+def test_repayment_status_query_unknown_order_404(client: TestClient) -> None:
+    """本地无此单 → 404，不打 wedap（防拿外部系统当存在性判据）。"""
+    r = client.get(
+        "/api/v1/loans/p2p-repayments/RPMT-20260810-9999999999999/status", headers=HEADERS
+    )
+    assert r.status_code == 404 and r.json()["error"]["code"] == "GW_404_ORDER"
+    client.app.state.wedap.query_repayment_status.assert_not_awaited()
+
+
+def test_repayment_status_query_tenant_isolated_404(client: TestClient) -> None:
+    """跨租户查不到（租户隔离）：单属 OCBC，另一租户查 → 404 且不打 wedap。"""
+    _accept_repayment(client)
+    r = client.get(
+        f"/api/v1/loans/p2p-repayments/{REPAY_BODY['bizSeqNo']}/status",
+        headers={**HEADERS, "X-Tenant-Id": "WBTHK01"},
+    )
+    assert r.status_code == 404
+    client.app.state.wedap.query_repayment_status.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("exc", "reason"),
+    [
+        (httpx.ConnectTimeout("t"), "timeout"),
+        (
+            httpx.HTTPStatusError(
+                "e", request=httpx.Request("GET", "http://x"), response=httpx.Response(500)
+            ),
+            "http_error",
+        ),
+        (WedapError("500", "boom"), "wedap_error"),
+    ],
+)
+def test_repayment_status_query_degrades_when_wedap_down(
+    client: TestClient, exc: Exception, reason: str
+) -> None:
+    """wedap 不可用 → 降级 unavailable + 本地 orderStatus 仍可读，不向外抛 5xx
+    （同 /bank-funds/status 既有降级口径）。"""
+    _accept_repayment(client)
+    client.app.state.wedap.query_repayment_status.side_effect = exc
+    r = client.get(f"/api/v1/loans/p2p-repayments/{REPAY_BODY['bizSeqNo']}/status", headers=HEADERS)
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["wedap"] == {"unavailable": True, "reason": reason}
+    assert data["orderStatus"] == "SUBMITTED"

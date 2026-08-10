@@ -12,7 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.clients.wedap import WedapError
 from app.domain.biz_seq import validate_biz_seq_no
-from app.domain.states import OrderStatus, assert_transition, map_wedap_txn_status
+from app.domain.states import (
+    OrderStatus,
+    assert_transition,
+    is_repayment_terminal_reject,
+    map_wedap_repayment_status,
+    map_wedap_txn_status,
+)
 from app.models.txn import BankTxnOrder
 from app.services.audit import write_audit
 from app.services.idempotency import (
@@ -40,6 +46,51 @@ class SubmitRequest:
     wedap_payload: dict[str, Any]
     # 提交日 YYYYMMDD（bank_timezone，API 层换算注入）：wedap 通用状态回查 oriReqDate 供参。
     ori_req_date: str | None = None
+    # 还款走 DTC 组合交易引擎的专属受理响应契约（对接文档 v0.6.1 §4.2，v0.5.0 起）：
+    # 状态字段名 `status`（非 `txnStatus`），另有 detailStatus / debtSettled / globalTxId。
+    # 仅 p2p-repayments 置 True；其余资金交易（放款/归集/分发/退款/冲正）仍走通用 txnStatus。
+    repayment_contract: bool = False
+
+
+def _parse_ack(
+    data: dict[str, Any],
+    *,
+    repayment: bool,
+) -> tuple[OrderStatus | None, dict[str, Any]]:
+    """wedap 受理响应 → (终态映射 | None 非终态, 北向响应字段)。
+
+    **北向字段名 `txnStatus` 恒定不变**：上游 lending-lifecycel 是只读仓、按 `txnStatus`
+    解析（`bank_p2p.py`），故 gateway 在网关内部把 wedap 的契约变更消化掉——还款的
+    `status` 归一化映射进 `txnStatus`，新增字段（debtSettled/globalTxId/detailStatus）
+    以**增量**形式追加，上游零改动即恢复正确行为、按需再接新字段。
+
+    非 str 状态（显式 null / 数字等毒响应）一律归一化为 `PROCESSING`：response_model 挂上后
+    非 str 会触发 ResponseValidationError 500，且毒响应已冻结进 first_response → 同 key
+    重放永久 500（独立评审 MEDIUM）。同时保守挂起优于误判失败回滚。
+    """
+    if not repayment:
+        raw = data.get("txnStatus")
+        return (
+            map_wedap_txn_status(str(raw or "").upper()),
+            {"txnStatus": raw if isinstance(raw, str) else "PROCESSING"},
+        )
+
+    # 还款（DTC 组合交易引擎，对接文档 v0.6.1 §4.2）
+    raw_status = data.get("status")
+    status = raw_status if isinstance(raw_status, str) else "PROCESSING"
+    fields: dict[str, Any] = {
+        "txnStatus": status,
+        # 核销依据：**仅 JSON 真 boolean true 才认**。缺失 / "true" 字符串 / null 一律 False——
+        # 金融安全取保守方向：宁可不核销（可人工补），不可误核销（债务凭空消失）。
+        "debtSettled": data.get("debtSettled") is True,
+    }
+    # 排查/对账锚点：globalTxId 是 wedap 组合交易实例号（报障时提供给 wedap），
+    # detailStatus 供细分排查（状态机仍以 status 为准）。仅在 wedap 真给了字符串时透传。
+    for key in ("globalTxId", "detailStatus"):
+        value = data.get(key)
+        if isinstance(value, str):
+            fields[key] = value
+    return map_wedap_repayment_status(status), fields
 
 
 async def register_and_accept_order(
@@ -127,20 +178,13 @@ async def submit_order(
             request_id=req.request_id,
             payload=req.wedap_payload,
         )
-        # 同步优先：按 wedap HTTP 200 返回的 txnStatus 映射 order 终态
+        # 同步优先：按 wedap HTTP 200 返回的状态映射 order 终态
         # SUCCESS（≤5s 同步终态）→ SUCCEEDED；FAILED（HTTP 200 业务失败）→ FAILED；
         # PROCESSING（>5s 异步在途）/ 缺省 / 未知 → SUBMITTED（保守，等回调/兜底 worker）
-        wedap_status = str(data.get("txnStatus", "")).upper()
-        # 同步收口复用 G2 共享映射；None（PROCESSING/缺省/未知）回落 SUBMITTED 保持既有语义。
-        new_status = map_wedap_txn_status(wedap_status) or OrderStatus.SUBMITTED
-        # txnStatus 归一化为 str（显式 null / 非字符串 → 兜底值）：response_model 挂上后
-        # 非 str 会触发 ResponseValidationError 500，且毒响应已冻结进 first_response →
-        # 同 key 重放永久 500（独立评审 MEDIUM）。改动前该场景是 200 透传，不允许回归。
-        raw_txn_status = data.get("txnStatus")
-        response: dict[str, Any] = {
-            "txnStatus": raw_txn_status if isinstance(raw_txn_status, str) else "PROCESSING",
-            "bizSeqNo": req.biz_seq_no,
-        }
+        # 通用交易读 txnStatus、还款读 status（DTC 新契约），归一化见 _parse_ack。
+        mapped, ack_fields = _parse_ack(data, repayment=req.repayment_contract)
+        new_status = mapped or OrderStatus.SUBMITTED
+        response: dict[str, Any] = {**ack_fields, "bizSeqNo": req.biz_seq_no}
     except (httpx.TimeoutException, httpx.TransportError):
         new_status = OrderStatus.RESULT_UNKNOWN
         response = {"txnStatus": "RESULT_UNKNOWN", "bizSeqNo": req.biz_seq_no}
@@ -159,10 +203,17 @@ async def submit_order(
                 "errorCode": f"HTTP_{status_code}",
             }
     except WedapError as exc:
-        new_status = OrderStatus.FAILED
+        # 还款走白名单制（对接文档 v0.6.1 §4.2 的 13 位业务码）：只有明确的「确证拒绝」码
+        # 才是可回滚终态；待轮询码（211 结果待确认 / 212 需人工处理）与**任何未知码**一律
+        # 挂 RESULT_UNKNOWN 等兜底 worker 查真实状态——此时 wedap 侧资金可能已部分变动或在
+        # 柜面处置中，判 FAILED 会让上游回滚而与 wedap 挂起态脱节（§3.6.1 状态撕裂）。
+        # 其余交易类型（放款/归集/分发/退款/冲正）保持既有语义：业务失败即终态 FAILED。
+        terminal_reject = is_repayment_terminal_reject(exc.code) if req.repayment_contract else True
+        new_status = OrderStatus.FAILED if terminal_reject else OrderStatus.RESULT_UNKNOWN
         response = {
-            "txnStatus": "FAILED",
+            "txnStatus": str(new_status),
             "bizSeqNo": req.biz_seq_no,
+            # 业务码保留：RESULT_UNKNOWN 也要能追溯到具体挂起原因（待确认 vs 待人工）。
             "errorCode": exc.code,
             # 业务失败文案（如「可用余额不足」「子账户不存在」）截断落幂等记录，
             # 供上游展示/排障；长度上限防异常上游把 first_response 撑爆。
@@ -213,7 +264,8 @@ async def submit_order(
             # else：order 已被回调/兜底 worker 推进到更强态 → CAS skip 不覆盖，仅写 record_response
             # 提交响应最小字段契约：orderStatus = CAS 后订单真实状态（CAS skip 时即回调/兜底
             # 已聚合的更强态）。写在 record_response 前 → 随 first_response 一并冻结，
-            # 幂等重放 data 段与首次逐字节一致（envelope trace_id 每请求各异）。
+            # 幂等重放 data 段与首次**字段值**一致（不是字节一致：envelope trace_id 每请求
+            # 各异，且 DB JSON 列不保证对象键顺序——字节序不是契约，字段值才是）。
             response["orderStatus"] = str(order.status)
             await record_response(
                 session,

@@ -34,6 +34,65 @@ def map_wedap_txn_status(txn_status: str) -> "OrderStatus | None":
     return None
 
 
+# 还款（DTC 组合交易引擎）专属：受理阶段业务拒绝返 HTTP 200 + 13 位业务码（对接文档
+# v0.6.1 §4.2「业务错误码」）。
+#
+# **白名单制**：只有下列「确证拒绝」码才判 FAILED（终态、可安全回滚 + 换新 bizSeqNo 重发），
+# 其余一律判 RESULT_UNKNOWN 挂起、等兜底 worker 用状态查询收敛真实结果。
+# 为什么不用黑名单（只把 211/212 挑出来、其余默认 FAILED）：wedap 若新增业务码而未同步
+# 通知，未知码会被默认判成「零资金变动可回滚」——但该码真实语义可能是「已扣款待处理」，
+# 上游据此回滚即资金错账。两类误判代价不对称：
+#   未知码误判 FAILED → 上游回滚而 wedap 已扣款 = 资金错账（不可逆）
+#   未知码误判挂起     → 多等一轮 worker 查真实状态后收敛 = 延迟（可恢复）
+# 故取代价小的一侧，与 debtSettled 只认真 boolean 的保守取值同一逻辑。
+#
+# 下列 10 码在文档中均明确为「受理即拒、零资金变动」：勾稽不平 201/202/216、币种 203、
+# 账户信息不完整 204、余额不足 205、客户级互斥 207、借据级防重 208、缺 loanNo 209、
+# 过渡户未配置 215。（206 账户信息暂不可用是 HTTP 500，不走本分支，由 5xx → RESULT_UNKNOWN
+# 兜底；211 结果待确认 / 212 需人工处理明确要求转轮询，故不在本白名单内。）
+WEDAP_TERMINAL_REJECT_CODES: frozenset[str] = frozenset(
+    {
+        "6605B00900201",
+        "6605B00900202",
+        "6605B00900203",
+        "6605B00900204",
+        "6605B00900205",
+        "6605B00900207",
+        "6605B00900208",
+        "6605B00900209",
+        "6605B00900215",
+        "6605B00900216",
+    }
+)
+
+
+def is_repayment_terminal_reject(code: str) -> bool:
+    """还款业务码是否为「确证拒绝」终态（零资金变动，可安全回滚）。
+
+    白名单外一律 False → 调用方判 RESULT_UNKNOWN 挂起，绝不对未知码假定零资金变动。
+    """
+    return code in WEDAP_TERMINAL_REJECT_CODES
+
+
+def map_wedap_repayment_status(status: str) -> "OrderStatus | None":
+    """还款受理响应 `status` → order 终态映射（对接文档 v0.6.1 §4.2）；非终态返回 None。
+
+    与 map_wedap_txn_status 的差异（故不复用而并列）：
+    - 字段名是 `status` 不是 `txnStatus`（v0.5.0 起 wedap 切 DTC 引擎后重写受理响应体）
+    - 值域收敛为三值 SUCCESS / PROCESSING / FAILED，**永不出现 REVERSED / PENDING**
+      （还款失败不自动冲正，柜面人工处置只前向推进）
+    - FAILED 语义更强：wedap 已确证**零资金变动**（借款人分文未扣），可安全回滚 +
+      换新 bizSeqNo 重发；而通用表的 FAILED 仅表示终态
+    未知值（含空/毒值）→ None，由调用方回落非终态 SUBMITTED 挂起轮询——绝不当失败回滚。
+    """
+    s = status.upper()
+    if s == "SUCCESS":
+        return OrderStatus.SUCCEEDED
+    if s == "FAILED":
+        return OrderStatus.FAILED
+    return None
+
+
 # 非终态一律允许 → REVERSED：§3.6 组合交易中途失败不自动冲正，由 counter 人工冲正后
 # 状态查询/回调回传 REVERSED——挂在 SUBMITTED/PROCESSING/RESULT_UNKNOWN（乃至外呼成功但
 # 事务2失败滞留的 ACCEPTED）的单都可能被直接冲正，不必先经 SUCCEEDED。
