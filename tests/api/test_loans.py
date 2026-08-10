@@ -488,3 +488,84 @@ def test_repayment_status_query_degrades_when_wedap_down(
     data = r.json()["data"]
     assert data["wedap"] == {"unavailable": True, "reason": reason}
     assert data["orderStatus"] == "SUBMITTED"
+
+
+# ── response_model 不得静默丢字段（挂 response_model 的直接风险） ─────────────────
+
+
+def test_repayment_ack_response_model_keeps_dtc_fields(client: TestClient) -> None:
+    """还款受理响应经 RepaymentAck 序列化后，DTC 三字段必须仍在线格式里。
+
+    挂 response_model 的最大风险是**静默过滤**：模型没声明的键会被丢掉且不报错。
+    debtSettled 正是本次要暴露给上游的核销依据，一旦被过滤，上游永远拿不到——
+    而单测只断言 submit 层返回值的话完全发现不了（那层没经过 response_model）。
+    """
+    body = {
+        "bizSeqNo": "RPY-20260611-0009999999901",
+        "transType": "REPAYMENT",
+        "repaymentInfo": {"txnAmount": "50.0000", "currencyCode": "USD"},
+        "lenders": [{"userId": "L1", "txnAmount": "50.0000", "currencyCode": "USD"}],
+    }
+    r = client.post(
+        "/api/v1/loans/p2p-repayments",
+        json=body,
+        headers={**HEADERS, "Idempotency-Key": body["bizSeqNo"]},
+    )
+    assert r.status_code == 200
+    data = r.json()["data"]
+    # fixture 的 submit_repayment mock 按 DTC 契约返回这三个字段
+    assert data["debtSettled"] is False
+    assert data["globalTxId"] == "GT20260727000001"
+    assert data["detailStatus"] == "PROCESSING"
+    # 既有最小契约字段一并在场
+    assert data["txnStatus"] == "PROCESSING"
+    assert data["bizSeqNo"] == body["bizSeqNo"]
+    assert data["orderStatus"] == "SUBMITTED"
+
+
+def test_disbursement_ack_response_model_keeps_min_contract(client: TestClient) -> None:
+    """放款受理响应经 SubmitAck 序列化后最小字段集不缺；且不冒出还款专属字段。"""
+    r = client.post("/api/v1/loans/p2p-disbursements", json=BODY, headers=HEADERS)
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["txnStatus"] == "PROCESSING"
+    assert data["bizSeqNo"] == BODY["bizSeqNo"]
+    assert data["orderStatus"] == "SUBMITTED"
+    # exclude_unset：放款不该出现还款专属字段，也不该有 errorCode: null 噪声
+    assert "debtSettled" not in data
+    assert "errorCode" not in data
+
+
+def test_repayment_replay_shape_identical_after_response_model(client: TestClient) -> None:
+    """幂等重放经 response_model 后与首次**逐字段一致**（含 DTC 三字段）。
+
+    重放返回的是冻结的 first_response，同样要过一遍 response_model；若模型漏声明某个
+    键，首次和重放会一起丢——但更隐蔽的是二者不一致（如重放补出 null）。
+    """
+    body = {
+        "bizSeqNo": "RPY-20260611-0009999999902",
+        "transType": "REPAYMENT",
+        "repaymentInfo": {"txnAmount": "50.0000", "currencyCode": "USD"},
+        "lenders": [{"userId": "L1", "txnAmount": "50.0000", "currencyCode": "USD"}],
+    }
+    h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"]}
+    first = client.post("/api/v1/loans/p2p-repayments", json=body, headers=h).json()["data"]
+    replay = client.post("/api/v1/loans/p2p-repayments", json=body, headers=h).json()["data"]
+    assert replay == first
+    assert replay["debtSettled"] is False and replay["globalTxId"] == "GT20260727000001"
+
+
+def test_inflight_shape_representable_by_response_model() -> None:
+    """in-flight 形态 {txnStatus,bizSeqNo,inFlight}（无 orderStatus）能被 RepaymentAck 承载。
+
+    该路径由 submit_order 的 IdempotencyInFlight 分支产生（见 test_submit.py 同名覆盖），
+    在 API 层难以稳定构造，故在模型层直接验：inFlight 保留、未设置的 orderStatus 经
+    exclude_unset 不出现（不能补成 null——那会让上游把「零查询路径」误读为「无台账态」）。
+    """
+    from app.api.v1.loans import RepaymentAck
+
+    ack = RepaymentAck.model_validate(
+        {"txnStatus": "PROCESSING", "bizSeqNo": "RPY-1", "inFlight": True}
+    )
+    dumped = ack.model_dump(exclude_unset=True)
+    assert dumped == {"txnStatus": "PROCESSING", "bizSeqNo": "RPY-1", "inFlight": True}
