@@ -20,14 +20,33 @@ COLLECT_BODY = {
     "transType": "LOAN_COLLECT",
     "txnAmount": "500.0000",
     "currencyCode": "USD",
+    # wedap 归集必填集（2026-08-11 实测，app/domain/wedap_contract.COLLECT_REQUIRED）：
+    # 原 fixture 只有前四键，缺了这五个——「测试全绿」因此从来测不出真报文会被 wedap 拒。
+    "channelId": "LEN",
+    "userId": "U1",
+    "custAccountNo": "1001234567890",
+    "bankAccountNo": "9999617459809900000215",
+    "bankAccountName": "TEST COLLECTION ACCOUNT",
     "userList": [{"userId": "U1", "amount": "500.0000"}],
 }
 DISTRIBUTE_BODY = {
-    # 分发 wedap 真契约：顶层 currencyCode + recipients[].distributeAmount（无 totalAmount）。
+    # 分发 wedap 真契约：顶层 currencyCode + 顶层付款方账户 + recipients[].distributeAmount
+    # （无 totalAmount；账户身份字段只能在顶层，2026-08-11 实测）。
     "bizSeqNo": "DST-20260611-0001234567890",
     "transType": "BANK_FUND_DISTRIBUTE",
     "currencyCode": "USD",
-    "recipients": [{"userId": "U2", "distributeAmount": "200.0000", "currencyCode": "USD"}],
+    "channelId": "LEN",
+    "bankAccountNo": "9999617459809900000215",
+    "bankAccountName": "TEST PLATFORM ACCOUNT",
+    "recipients": [
+        {
+            "userId": "U2",
+            "userName": "TEST RECIPIENT",
+            "custAccountNo": "1001234567891",
+            "distributeAmount": "200.0000",
+            "currencyCode": "USD",
+        }
+    ],
 }
 
 
@@ -156,7 +175,7 @@ def test_distribute_same_key_different_payload_409(client: TestClient) -> None:
     client.post("/api/v1/bank-funds/distribute-to-users", json=DISTRIBUTE_BODY, headers=h)
     mutated = {
         **DISTRIBUTE_BODY,
-        "recipients": [{"userId": "U2", "distributeAmount": "999.0000", "currencyCode": "USD"}],
+        "recipients": [{**DISTRIBUTE_BODY["recipients"][0], "distributeAmount": "999.0000"}],
     }
     r = client.post("/api/v1/bank-funds/distribute-to-users", json=mutated, headers=h)
     assert r.status_code == 409
@@ -170,12 +189,9 @@ def test_collect_without_userlist_passes_validation(client: TestClient) -> None:
     """wedap 真契约：user-collections 不含 userList 字段 → 校验跳过，200 受理。
     修复前：default_factory=list 物化 [] → validate_detail_consistency 误判 empty → 400。
     """
-    body = {
+    body = {k: v for k, v in COLLECT_BODY.items() if k != "userList"} | {
         "bizSeqNo": "CLT-20260611-0002000000001",
-        "transType": "LOAN_COLLECT",
         "txnAmount": "500.0000",
-        "currencyCode": "USD",
-        # 不传 userList
     }
     h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-no-ul"}
     r = client.post("/api/v1/bank-funds/collect-from-users", json=body, headers=h)
@@ -184,11 +200,9 @@ def test_collect_without_userlist_passes_validation(client: TestClient) -> None:
 
 def test_collect_without_userlist_payload_excludes_key(client: TestClient) -> None:
     """缺 userList 时，透传给 wedap 的 payload 不含 userList 键（契约 C：不注入伪字段）。"""
-    body = {
+    body = {k: v for k, v in COLLECT_BODY.items() if k != "userList"} | {
         "bizSeqNo": "CLT-20260611-0002000000002",
-        "transType": "LOAN_COLLECT",
         "txnAmount": "300.0000",
-        "currencyCode": "USD",
     }
     h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-excl"}
     client.post("/api/v1/bank-funds/collect-from-users", json=body, headers=h)
@@ -207,8 +221,9 @@ def test_collect_wedap_flat_txnamount_passthrough(client: TestClient) -> None:
         "channelId": "LEN",
         "transType": "BANK_FUND_COLLECT",
         "bankAccountNo": "ESCROW001",
-        "bankAccountName": "P2P 中转户",
+        "bankAccountName": "P2P ESCROW ACCOUNT",
         "userId": "U1",
+        "custAccountNo": "1001234567890",
         "txnAmount": "500.0000",
         "currencyCode": "USD",
     }
@@ -226,12 +241,10 @@ def test_collect_stray_totalamount_never_reaches_wedap(client: TestClient) -> No
     extra=allow 薄透传，上游若仍误传会经 model_dump 漏进 payload → wedap §3.8 未定义字段
     严格校验直接 400 拒收。本例钉死端点侧的无条件剪除。
     """
-    body = {
+    body = {k: v for k, v in COLLECT_BODY.items() if k != "userList"} | {
         "bizSeqNo": "CLT-20260611-0002000000005",
-        "transType": "LOAN_COLLECT",
         "txnAmount": "777.0000",
         "totalAmount": "500.0000",
-        "currencyCode": "USD",
     }
     h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-both"}
     r = client.post("/api/v1/bank-funds/collect-from-users", json=body, headers=h)
@@ -274,21 +287,20 @@ def test_distribute_without_recipients_400(client: TestClient) -> None:
 def test_distribute_amount_summed_and_recipients_passthrough(client: TestClient) -> None:
     """分发金额 = Σ recipients[].distributeAmount；recipients+bankAccountNo 经 extra=allow 透传。"""
     body = {
+        **DISTRIBUTE_BODY,
         "bizSeqNo": "DST-20260611-0002000000010",
-        "transType": "BANK_FUND_DISTRIBUTE",
-        "currencyCode": "USD",
         "recipients": [
             {
+                **DISTRIBUTE_BODY["recipients"][0],
                 "userId": "U1",
                 "distributeAmount": "60.0000",
-                "currencyCode": "USD",
-                "bankAccountNo": "ACC1",
+                "custAccountNo": "ACC1",
             },
             {
+                **DISTRIBUTE_BODY["recipients"][0],
                 "userId": "U2",
                 "distributeAmount": "40.0000",
-                "currencyCode": "USD",
-                "bankAccountNo": "ACC2",
+                "custAccountNo": "ACC2",
             },
         ],
     }
@@ -331,9 +343,8 @@ def test_distribute_empty_recipients_400(client: TestClient) -> None:
 def test_distribute_recipient_without_amount_400(client: TestClient) -> None:
     """recipient 缺 distributeAmount → 400（决策①方案乙：金额必填，缺省≠自动分配）。"""
     body = {
+        **DISTRIBUTE_BODY,
         "bizSeqNo": "DST-20260611-0002000000013",
-        "transType": "BANK_FUND_DISTRIBUTE",
-        "currencyCode": "USD",
         "recipients": [{"userId": "U1", "currencyCode": "USD"}],
     }
     h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-no-amt"}
@@ -348,9 +359,8 @@ def test_distribute_recipient_null_amount_400(client: TestClient) -> None:
     历史演化：e480f55 曾把 null 归一为「自动分配跳过求和」防 str(None) 误炸；
     2026-07-17 审计定论该语义在 wedap 契约中不存在，缺省/null 一律显式拒收。"""
     body = {
+        **DISTRIBUTE_BODY,
         "bizSeqNo": "DST-20260611-0002000000014",
-        "transType": "BANK_FUND_DISTRIBUTE",
-        "currencyCode": "USD",
         "recipients": [{"userId": "U1", "distributeAmount": None, "currencyCode": "USD"}],
     }
     h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-null-amt"}

@@ -141,6 +141,12 @@ def test_refund_full_amount_guard_unconditional_rejects(client: TestClient) -> N
         "transType": "LOAN_COLLECT",
         "txnAmount": "1.00",
         "currencyCode": "USD",
+        # wedap 归集必填集（app/domain/wedap_contract）：原单建不起来，全额护栏就查不到基准
+        "channelId": "LEN",
+        "userId": "U1",
+        "custAccountNo": "1001234567890",
+        "bankAccountNo": "9999617459809900000215",
+        "bankAccountName": "TEST COLLECTION ACCOUNT",
     }
     client.app.state.wedap.collect_from_users = AsyncMock(  # type: ignore[union-attr]
         return_value={"txnStatus": "SUCCESS"}
@@ -167,6 +173,12 @@ def test_refund_full_amount_guard_rejects_and_partial_passes(client: TestClient)
         "transType": "LOAN_COLLECT",
         "txnAmount": "2.00",
         "currencyCode": "USD",
+        # wedap 归集必填集（app/domain/wedap_contract）：原单建不起来，全额护栏就查不到基准
+        "channelId": "LEN",
+        "userId": "U1",
+        "custAccountNo": "1001234567890",
+        "bankAccountNo": "9999617459809900000215",
+        "bankAccountName": "TEST COLLECTION ACCOUNT",
     }
     client.app.state.wedap.collect_from_users = AsyncMock(  # type: ignore[union-attr]
         return_value={"txnStatus": "SUCCESS"}
