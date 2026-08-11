@@ -79,3 +79,37 @@ REFUND_REQUIRED: tuple[str, ...] = (
     "custAccountNo",
     "subaccountSerialNo",
 )
+
+
+# ── loans 域（组合交易：放款 / 还款） ──────────────────────────────────────────
+# 2026-08-11 实测补齐（codex 复核指出 loans 域缺门禁 → 报文被 wedap 拒前已落 ACCEPTED 单
+# 再翻 FAILED，白污染 bank_txn_order 台账）。必填集取自 wedap 400 原文，非文档推断：
+#   放款 traceId 71d801a40b19460d8992838dc17fbbf8
+#   还款 traceId f1117af91cef4fe8b24de21a59ee320b
+#
+# 注：本机 wedap 源码（wedap-adapter-core 的 @NotBlank）与 dev 运行版本**存在差异**——
+# dev 实测要求 collect 的 custAccountNo，本机 DTO 只有 @Size。故一律以 dev 实测为准，
+# 源码仅作交叉参考；wedap 升级后需用 20260811-wedap契约实测-evidence/ 下脚本复测。
+DISBURSEMENT_REQUIRED: tuple[str, ...] = ("channelId",)
+DISBURSEMENT_INFO_REQUIRED: tuple[str, ...] = ("userId", "userName")
+# lendAmount 由 validate_detail_consistency 单独校验（参与金额汇总），不在此列。
+DISBURSEMENT_LENDER_REQUIRED: tuple[str, ...] = ("currencyCode",)
+
+REPAYMENT_REQUIRED: tuple[str, ...] = ("channelId",)
+# principalAmount / interestAmount 是 @NotNull 的 BigDecimal——0 是合法值（无息期还款），
+# 故判据是「键存在且非 None」而不是「非零」。
+REPAYMENT_INFO_REQUIRED: tuple[str, ...] = (
+    "interestAmount",
+    "principalAmount",
+    "repaymentType",
+    "userId",
+    "userName",
+)
+REPAYMENT_LENDER_REQUIRED: tuple[str, ...] = ("interestAmount", "principalAmount")
+
+# ── reversal（/api/v1/transactions/reversal） ─────────────────────────────────
+# **wedap 侧该端点当前不存在**：2026-08-11 实测 404 `No endpoint POST
+# /api/v1/transactions/reversal`（与 wedap 2026-07-24 自述一致——4.8 冲正归阶段 3、
+# 单数路径无路由）。故不设必填集：任何冲正请求都注定 FAILED，加字段校验也拦不住，
+# 真因是上游未实现（跟踪 FU-GW-FULL-REFUND-INTERIM）。
+# codex 复核 2026-08-11 曾判为「缺 oriReqDate 被拒」——实测证伪，是端点不存在。

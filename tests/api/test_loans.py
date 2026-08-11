@@ -133,10 +133,10 @@ def test_idempotent_replay_no_extra_call(client: TestClient) -> None:
 
 def test_repayment_endpoint_works(client: TestClient) -> None:
     body = {
+        **REPAY_BODY,
         "bizSeqNo": "RPY-20260611-0001234567890",
-        "transType": "REPAYMENT",
-        "repaymentInfo": {"txnAmount": "50.0000", "currencyCode": "USD"},
-        "lenders": [{"userId": "L1", "txnAmount": "50.0000", "currencyCode": "USD"}],
+        "repaymentInfo": {**REPAY_BODY["repaymentInfo"], "txnAmount": "50.0000"},
+        "lenders": [{**REPAY_BODY["lenders"][0], "txnAmount": "50.0000"}],
     }
     r = client.post(
         "/api/v1/loans/p2p-repayments",
@@ -193,9 +193,9 @@ def test_repayment_without_lenders_rejected_400(client: TestClient) -> None:
     call-site wiring against accidental deletion (codex R2 finding).
     """
     body = {
+        **{k: v for k, v in REPAY_BODY.items() if k != "lenders"},
         "bizSeqNo": "RPY-20260611-0002000000002",
-        "transType": "REPAYMENT",
-        "repaymentInfo": {"txnAmount": "50.0000", "currencyCode": "USD"},
+        "repaymentInfo": {**REPAY_BODY["repaymentInfo"], "txnAmount": "50.0000"},
         # no lenders
     }
     h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-no-lend-rpy"}
@@ -257,12 +257,24 @@ def test_disbursement_explicit_empty_lenders_400(client: TestClient) -> None:
 def test_repayment_lenders_txnamount_sum_ok(client: TestClient) -> None:
     """还款 lenders[].txnAmount 之和 == repaymentInfo.txnAmount → 200（lending 按占比拆分）。"""
     body = {
+        **REPAY_BODY,
         "bizSeqNo": "RPY-20260611-0002000000001",
-        "transType": "REPAYMENT",
-        "repaymentInfo": {"txnAmount": "100.0000", "currencyCode": "USD"},
+        "repaymentInfo": {**REPAY_BODY["repaymentInfo"], "txnAmount": "100.0000"},
         "lenders": [
-            {"userId": "L1", "txnAmount": "60.0000"},
-            {"userId": "L2", "txnAmount": "40.0000"},
+            {
+                **REPAY_BODY["lenders"][0],
+                "userId": "L1",
+                "txnAmount": "60.0000",
+                "principalAmount": "48.0000",
+                "interestAmount": "12.0000",
+            },
+            {
+                **REPAY_BODY["lenders"][0],
+                "userId": "L2",
+                "txnAmount": "40.0000",
+                "principalAmount": "32.0000",
+                "interestAmount": "8.0000",
+            },
         ],
     }
     h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-rpy-sum"}
@@ -273,9 +285,9 @@ def test_repayment_lenders_txnamount_sum_ok(client: TestClient) -> None:
 def test_repayment_lenders_txnamount_mismatch_400(client: TestClient) -> None:
     """lenders[].txnAmount 之和 != repaymentInfo.txnAmount → 400（原 shareAmount 会漏判此错）。"""
     body = {
+        **REPAY_BODY,
         "bizSeqNo": "RPY-20260611-0002000000002",
-        "transType": "REPAYMENT",
-        "repaymentInfo": {"txnAmount": "100.0000", "currencyCode": "USD"},
+        "repaymentInfo": {**REPAY_BODY["repaymentInfo"], "txnAmount": "100.0000"},
         "lenders": [
             {"userId": "L1", "txnAmount": "60.0000"},
             {"userId": "L2", "txnAmount": "30.0000"},
@@ -295,10 +307,10 @@ def test_repayment_with_fee_three_way_sum_ok(client: TestClient) -> None:
     FINDING，FU-GW-REPAY-FEE-SUMGUARD-20260720-001）；本例锁定修复后放行。
     """
     body = {
+        **REPAY_BODY,
         "bizSeqNo": "RPY-20260720-0002000000010",
-        "transType": "REPAYMENT",
-        "repaymentInfo": {"txnAmount": "3.0000", "currencyCode": "USD"},
-        "lenders": [{"userId": "L1", "txnAmount": "2.8000"}],
+        "repaymentInfo": {**REPAY_BODY["repaymentInfo"], "txnAmount": "3.0000"},
+        "lenders": [{**REPAY_BODY["lenders"][0], "txnAmount": "2.8000"}],
         "feeDeductions": [{"feeType": "PENALTY", "feeAmount": "0.2000"}],
     }
     h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-rpy-fee-ok"}
@@ -312,8 +324,8 @@ def test_repayment_with_fee_three_way_sum_ok(client: TestClient) -> None:
 def test_repayment_with_fee_sum_mismatch_400(client: TestClient) -> None:
     """含费还款 Σlender + Σfee != txnAmount → 400（三等式不平仍拦）。"""
     body = {
+        **REPAY_BODY,
         "bizSeqNo": "RPY-20260720-0002000000011",
-        "transType": "REPAYMENT",
         "repaymentInfo": {"txnAmount": "3.5000", "currencyCode": "USD"},
         "lenders": [{"userId": "L1", "txnAmount": "2.8000"}],
         "feeDeductions": [{"feeType": "PENALTY", "feeAmount": "0.2000"}],
@@ -327,8 +339,8 @@ def test_repayment_with_fee_sum_mismatch_400(client: TestClient) -> None:
 def test_repayment_extra_fields_passthrough(client: TestClient) -> None:
     """extra=allow：repaymentInfo 嵌套必填字段 + 顶层 lenders[] 全透传（修复前被静默丢致拒单）。"""
     body = {
+        **REPAY_BODY,
         "bizSeqNo": "RPY-20260611-0002000000003",
-        "transType": "REPAYMENT",
         "repaymentInfo": {
             "txnAmount": "100.0000",
             "currencyCode": "USD",
@@ -338,7 +350,15 @@ def test_repayment_extra_fields_passthrough(client: TestClient) -> None:
             "userName": "borrower",
             "repaymentType": "NORMAL",
         },
-        "lenders": [{"userId": "L1", "txnAmount": "100.0000"}],
+        "lenders": [
+            {
+                **REPAY_BODY["lenders"][0],
+                "userId": "L1",
+                "txnAmount": "100.0000",
+                "principalAmount": "90.0000",
+                "interestAmount": "10.0000",
+            }
+        ],
     }
     h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"], "X-Request-Id": "req-rpy-pt"}
     r = client.post("/api/v1/loans/p2p-repayments", json=body, headers=h)
@@ -378,8 +398,27 @@ REPAY_BODY = {
     "channelId": "LEN",
     "transType": "REPAYMENT",
     "loanNo": "LN20250205000001",
-    "repaymentInfo": {"txnAmount": "100.0000", "currencyCode": "USD"},
-    "lenders": [{"userId": "L1", "txnAmount": "100.0000", "currencyCode": "USD"}],
+    # wedap 还款必填集（2026-08-11 实测，app/domain/wedap_contract.REPAYMENT_INFO_REQUIRED /
+    # REPAYMENT_LENDER_REQUIRED）：原 fixture 只有 txnAmount+currencyCode，正是「缺字段报文
+    # 配 mock 成功」的测试盲点——真报文会被 wedap 400 拒（traceId f1117af9…）。
+    "repaymentInfo": {
+        "txnAmount": "100.0000",
+        "currencyCode": "USD",
+        "userId": "U1",
+        "userName": "u",
+        "repaymentType": "SCHEDULED",
+        "principalAmount": "80.0000",
+        "interestAmount": "20.0000",
+    },
+    "lenders": [
+        {
+            "userId": "L1",
+            "txnAmount": "100.0000",
+            "currencyCode": "USD",
+            "principalAmount": "80.0000",
+            "interestAmount": "20.0000",
+        }
+    ],
 }
 REPAY_HEADERS = {**HEADERS, "Idempotency-Key": REPAY_BODY["bizSeqNo"]}
 WEDAP_STATUS_DATA = {
@@ -501,10 +540,10 @@ def test_repayment_ack_response_model_keeps_dtc_fields(client: TestClient) -> No
     而单测只断言 submit 层返回值的话完全发现不了（那层没经过 response_model）。
     """
     body = {
+        **REPAY_BODY,
         "bizSeqNo": "RPY-20260611-0009999999901",
-        "transType": "REPAYMENT",
-        "repaymentInfo": {"txnAmount": "50.0000", "currencyCode": "USD"},
-        "lenders": [{"userId": "L1", "txnAmount": "50.0000", "currencyCode": "USD"}],
+        "repaymentInfo": {**REPAY_BODY["repaymentInfo"], "txnAmount": "50.0000"},
+        "lenders": [{**REPAY_BODY["lenders"][0], "txnAmount": "50.0000"}],
     }
     r = client.post(
         "/api/v1/loans/p2p-repayments",
@@ -543,10 +582,10 @@ def test_repayment_replay_shape_identical_after_response_model(client: TestClien
     键，首次和重放会一起丢——但更隐蔽的是二者不一致（如重放补出 null）。
     """
     body = {
+        **REPAY_BODY,
         "bizSeqNo": "RPY-20260611-0009999999902",
-        "transType": "REPAYMENT",
-        "repaymentInfo": {"txnAmount": "50.0000", "currencyCode": "USD"},
-        "lenders": [{"userId": "L1", "txnAmount": "50.0000", "currencyCode": "USD"}],
+        "repaymentInfo": {**REPAY_BODY["repaymentInfo"], "txnAmount": "50.0000"},
+        "lenders": [{**REPAY_BODY["lenders"][0], "txnAmount": "50.0000"}],
     }
     h = {**HEADERS, "Idempotency-Key": body["bizSeqNo"]}
     first = client.post("/api/v1/loans/p2p-repayments", json=body, headers=h).json()["data"]

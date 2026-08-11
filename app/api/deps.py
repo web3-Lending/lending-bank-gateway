@@ -332,12 +332,20 @@ def validate_detail_consistency(
 def _is_blank(value: Any) -> bool:
     """wedap 的判据是 `must not be blank` 而非「键存在」：None / 空串 / 纯空白都算缺。
 
-    非字符串标量（JSON number 形态的户口号等）只要非 None 即视为有值——
-    不在此处做类型收敛，保持「禁 normalize、全链路同值」原则。
+    容器（list / dict）同样判缺：本模块校验的 wedap 必填字段在其 DTO 里全是标量
+    （String / BigDecimal），array / object 绑不上去、必被 wedap 拒——放行等于让一条
+    注定失败的请求落 ACCEPTED 单再翻 FAILED，白污染 bank_txn_order 台账
+    （codex 复核 2026-08-11 实锤：`bankAccountName: []` 原先可通过本校验）。
+
+    非字符串**标量**（JSON number / bool）仍视为有值：`txnAmount` 在 wedap 是
+    BigDecimal，数字形态的户口号也合法；且 Jackson 对标量到 String 的强转行为未实测，
+    不在此处替 wedap 做类型收敛，保持「禁 normalize、全链路同值」原则。
     """
     if value is None:
         return True
-    return isinstance(value, str) and not value.strip()
+    if isinstance(value, str):
+        return not value.strip()
+    return isinstance(value, list | dict)
 
 
 def assert_wedap_required(

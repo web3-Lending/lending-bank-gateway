@@ -195,3 +195,37 @@ def test_distribute_second_recipient_index_reported(client: TestClient) -> None:
     status, resp = _post(client, "distribute-to-users", body)
     assert status == 400
     assert "recipients[1]" in resp["error"]["message"]
+
+
+# ── 类型契约：容器值不得冒充「有值」（codex 复核 2026-08-11 实锤的漏放行） ──────
+
+
+@pytest.mark.parametrize("bad_value", [[], {}, ["x"], {"k": "v"}], ids=["[]", "{}", "[x]", "{k}"])
+def test_collect_container_value_rejected(client: TestClient, bad_value: object) -> None:
+    """必填字段给 array/object → 400。
+
+    wedap 侧这些字段是 String，array/object 绑不上去、必被拒；放行等于让一条注定失败的
+    请求先落 ACCEPTED 单再翻 FAILED，白污染 bank_txn_order 资金台账。
+    修复前 `bankAccountName: []` 可通过校验（只判 None 与空白字符串）。
+    """
+    status, resp = _post(
+        client, "collect-from-users", {**REAL_COLLECT, "bankAccountName": bad_value}
+    )
+    assert status == 400
+    assert resp["error"]["code"] == "GW_400_VALIDATION"
+    assert "bankAccountName" in resp["error"]["message"]
+
+
+def test_collect_numeric_account_no_still_accepted(client: TestClient) -> None:
+    """JSON number 形态的户口号仍放行：wedap 侧标量能绑到 String/BigDecimal，
+    不在 gateway 替 wedap 做类型收敛（守「禁 normalize、全链路同值」）。"""
+    status, body = _post(client, "collect-from-users", {**REAL_COLLECT, "bankAccountNo": 12348401})
+    assert status == 200, body
+
+
+def test_distribute_recipient_container_value_rejected(client: TestClient) -> None:
+    """recipients[] 内同理：`userName: {}` 不得冒充有值。"""
+    rcpt = {**REAL_DISTRIBUTE["recipients"][0], "userName": {}}
+    status, resp = _post(client, "distribute-to-users", {**REAL_DISTRIBUTE, "recipients": [rcpt]})
+    assert status == 400
+    assert "recipients[0].userName" in resp["error"]["message"]
