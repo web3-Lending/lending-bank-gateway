@@ -10,6 +10,8 @@ from sqlalchemy import select
 
 from app.api.deps import (
     assert_idempotency_key_matches,
+    assert_wedap_not_rejected,
+    assert_wedap_required,
     bank_req_date,
     parse_amount,
     require_headers,
@@ -17,6 +19,14 @@ from app.api.deps import (
 )
 from app.clients.wedap import WedapError
 from app.core.envelope import ok
+from app.domain.wedap_contract import (
+    COLLECT_REJECTED,
+    COLLECT_REQUIRED,
+    DISTRIBUTE_RECIPIENT_REJECTED,
+    DISTRIBUTE_RECIPIENT_REQUIRED,
+    DISTRIBUTE_REQUIRED,
+    REFUND_REQUIRED,
+)
 from app.models.txn import BankTxnOrder
 from app.services.account_guard import assert_platform_account_allowed
 from app.services.idempotency import IdempotencyConflict
@@ -214,6 +224,11 @@ async def collect_from_users(
     # totalAmount 已不是本端点的合法入参，但 extra=allow 会让上游误传的它经 model_dump
     # 漏进 payload → wedap §3.8 严格校验对未定义字段直接 400 拒收。故无条件剪掉。
     payload.pop("totalAmount", None)
+    # wedap 字段契约门禁（2026-08-11 实测集，见 app/domain/wedap_contract）：
+    # 先查被拒结构再查必填——顶层缺 userId/custAccountNo 往往正是因为它们还留在
+    # user{} 里，倒过来查会报「缺字段」把上游引向错误的修法。
+    assert_wedap_not_rejected(payload, COLLECT_REJECTED)
+    assert_wedap_required(payload, COLLECT_REQUIRED)
     return await _submit(
         request,
         ids=ids,
@@ -251,6 +266,9 @@ async def distribute_to_users(
                 "message": "recipients is required for distribute",
             },
         )
+    # wedap 分发契约的账户分层与归集**相反**：付款方（平台户）在顶层、收款人在
+    # recipients[]（2026-08-11 实测，见 app/domain/wedap_contract）。
+    assert_wedap_required(payload, DISTRIBUTE_REQUIRED)
     for idx, r in enumerate(recipients):
         if not isinstance(r, dict) or r.get("distributeAmount") is None:
             raise HTTPException(
@@ -260,6 +278,10 @@ async def distribute_to_users(
                     "message": f"recipients[{idx}].distributeAmount is required",
                 },
             )
+        # 账户身份字段留在 recipients[] 会让 wedap 整包拒（`Unknown field`），先挡位置错误
+        # 再挡必填缺失——位置错时报「缺 userName」会把上游引偏。
+        assert_wedap_not_rejected(r, DISTRIBUTE_RECIPIENT_REJECTED, where=f"recipients[{idx}]")
+        assert_wedap_required(r, DISTRIBUTE_RECIPIENT_REQUIRED, where=f"recipients[{idx}]")
     amount = sum(
         (parse_amount(str(r["distributeAmount"]), body.currencyCode) for r in recipients),
         Decimal("0"),
@@ -318,6 +340,9 @@ async def refund_to_user(
             },
         )
     payload = body.model_dump(mode="json", exclude_none=True)
+    # wedap 退款必填集（bankAccountNo + custAccountNo + subaccountSerialNo 三者齐为
+    # 2026-07-24 实测；channelId 为 2026-08-11 实测新增，wedap 近期加严）。
+    assert_wedap_required(payload, REFUND_REQUIRED)
     return await _submit(
         request,
         ids=ids,

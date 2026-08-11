@@ -327,3 +327,74 @@ def validate_detail_consistency(
                 "message": "detail amount sum mismatch",
             },
         )
+
+
+def _is_blank(value: Any) -> bool:
+    """wedap 的判据是 `must not be blank` 而非「键存在」：None / 空串 / 纯空白都算缺。
+
+    容器（list / dict）同样判缺：本模块校验的 wedap 必填字段在其 DTO 里全是标量
+    （String / BigDecimal），array / object 绑不上去、必被 wedap 拒——放行等于让一条
+    注定失败的请求落 ACCEPTED 单再翻 FAILED，白污染 bank_txn_order 台账
+    （codex 复核 2026-08-11 实锤：`bankAccountName: []` 原先可通过本校验）。
+
+    非字符串**标量**（JSON number / bool）仍视为有值：`txnAmount` 在 wedap 是
+    BigDecimal，数字形态的户口号也合法；且 Jackson 对标量到 String 的强转行为未实测，
+    不在此处替 wedap 做类型收敛，保持「禁 normalize、全链路同值」原则。
+    """
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    return isinstance(value, list | dict)
+
+
+def assert_wedap_required(
+    payload: dict[str, Any],
+    required: tuple[str, ...],
+    *,
+    where: str = "",
+) -> None:
+    """校验 wedap 必填集，缺失项**一次列全**。
+
+    一次列全而非逐个报：wedap 自身就是这么做的（一个 400 里列出全部 must-not-be-blank
+    字段），逐个报会让上游「改一个再试一次」来回好几轮。
+
+    ``where`` 用于 recipients[] 等嵌套位置的定位前缀。
+    """
+    missing = [field for field in required if _is_blank(payload.get(field))]
+    if not missing:
+        return
+    prefix = f"{where}." if where else ""
+    raise HTTPException(
+        400,
+        detail={
+            "code": "GW_400_VALIDATION",
+            "message": "missing required wedap field(s): "
+            + ", ".join(f"{prefix}{field}" for field in missing),
+        },
+    )
+
+
+def assert_wedap_not_rejected(
+    payload: dict[str, Any],
+    rejected: dict[str, str],
+    *,
+    where: str = "",
+) -> None:
+    """校验「wedap 明确拒收」的字段不在报文里，并回带迁移指引。
+
+    这些字段一旦上行，wedap 会以 `Unknown field ...` **整包拒收**（非忽略），故必须挡。
+    不静默剪掉：被拒字段往往携带必填值（如 collect 的 ``user{}``），剪掉会把「结构不对」
+    伪装成「字段缺失」，上游按报错补顶层字段仍会错第二次。
+    """
+    for field, hint in rejected.items():
+        if field not in payload:
+            continue
+        prefix = f"{where}." if where else ""
+        raise HTTPException(
+            400,
+            detail={
+                "code": "GW_400_VALIDATION",
+                "message": f"{prefix}{field} is not accepted by wedap: {hint}",
+            },
+        )

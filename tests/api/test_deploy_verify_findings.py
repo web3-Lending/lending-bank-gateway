@@ -33,6 +33,12 @@ COLLECT_BODY = {
     "transType": "LOAN_COLLECT",
     "txnAmount": "500.0000",
     "currencyCode": "USD",
+    # wedap 归集必填集（2026-08-11 实测，app/domain/wedap_contract.COLLECT_REQUIRED）
+    "channelId": "LEN",
+    "userId": "U1",
+    "custAccountNo": "1001234567890",
+    "bankAccountName": "TEST COLLECTION ACCOUNT",
+    "bankAccountNo": "9999617459809900000215",
     "userList": [{"userId": "U1", "amount": "500.0000"}],
 }
 

@@ -34,6 +34,11 @@ COLLECT_BODY = {
     "txnAmount": "500.0000",
     "currencyCode": "USD",
     "bankAccountNo": ESCROW,
+    # wedap 归集必填集（2026-08-11 实测，app/domain/wedap_contract.COLLECT_REQUIRED）
+    "channelId": "LEN",
+    "userId": "U1",
+    "custAccountNo": "1001234567890",
+    "bankAccountName": "TEST COLLECTION ACCOUNT",
     "userList": [{"userId": "U1", "amount": "500.0000"}],
 }
 DISTRIBUTE_HEADERS = HEADERS | {"Idempotency-Key": "DST-20260716-0001234567890"}
@@ -41,8 +46,18 @@ DISTRIBUTE_BODY = {
     "bizSeqNo": "DST-20260716-0001234567890",
     "transType": "BANK_FUND_DISTRIBUTE",
     "currencyCode": "USD",
+    "channelId": "LEN",
     "bankAccountNo": ESCROW,
-    "recipients": [{"userId": "U2", "distributeAmount": "200.0000", "currencyCode": "USD"}],
+    "bankAccountName": "TEST PLATFORM ACCOUNT",
+    "recipients": [
+        {
+            "userId": "U2",
+            "userName": "TEST RECIPIENT",
+            "custAccountNo": "1001234567891",
+            "distributeAmount": "200.0000",
+            "currencyCode": "USD",
+        }
+    ],
 }
 REFUND_HEADERS = HEADERS | {"Idempotency-Key": "RFD-20260716-0001234567890"}
 REFUND_BODY = {
@@ -51,7 +66,12 @@ REFUND_BODY = {
     "currencyCode": "USD",
     "refundAmount": "10.0000",
     "oriBizSeqNo": "CLT-20260716-0001234567890",
+    # bankAccountNo 故意用未登记的 ESCROW（本文件测的就是 guard 拒未登记账户）；
+    # 其余三项是 wedap 退款必填集，缺了会先撞契约 400、走不到 guard
     "bankAccountNo": ESCROW,
+    "channelId": "LEN",
+    "custAccountNo": "1001234567890",
+    "subaccountSerialNo": "00000001",
 }
 
 
@@ -204,11 +224,48 @@ def test_enforce_currency_mismatch_rejected(enforce_client: TestClient) -> None:
     _assert_rejected(enforce_client, r, "currency_mismatch")
 
 
-def test_enforce_missing_account_no_rejected(enforce_client: TestClient) -> None:
+def test_contract_check_precedes_guard_when_account_no_missing(
+    enforce_client: TestClient,
+) -> None:
+    """缺 bankAccountNo → 契约 400 在前，不再是账户 403（2026-08-11 起）。
+
+    bankAccountNo 是 wedap 归集必填字段，「报文不合契约」比「这个账户不许用」更早、
+    也更准确地描述问题——403 会让上游以为要去登记白名单，其实是漏字段。
+    guard 自身的 account_missing 分支仍保留作纵深防御（它是通用函数，不假设调用方
+    一定先做过契约校验），由 test_guard_blank_account_rejected_directly 直接覆盖。
+    """
     _seed_account(enforce_client.app)
     body = {k: v for k, v in COLLECT_BODY.items() if k != "bankAccountNo"}
     r = enforce_client.post("/api/v1/bank-funds/collect-from-users", json=body, headers=HEADERS)
-    _assert_rejected(enforce_client, r, "account_missing")
+    assert r.status_code == 400
+    err = r.json()["error"]
+    assert err["code"] == "GW_400_VALIDATION"
+    assert "bankAccountNo" in err["message"]
+    # fail-fast 语义与 guard 拒绝一致：不调 wedap、不落 order
+    assert enforce_client.app.state.wedap.collect_from_users.await_count == 0  # type: ignore[union-attr]
+    assert _count(enforce_client.app, BankTxnOrder) == 0
+
+
+async def test_guard_blank_account_rejected_directly(enforce_client: TestClient) -> None:
+    """直接调 guard：空白账号 → enforce 下 403 account_missing（纵深防御分支）。"""
+    from fastapi import HTTPException
+
+    from app.services.account_guard import assert_platform_account_allowed
+
+    with pytest.raises(HTTPException) as exc:
+        await assert_platform_account_allowed(
+            enforce_client.app.state.session_factory,
+            "   ",
+            tenant_id=TENANT,
+            business_scope="bank_collect",
+            currency="USD",
+            caller="lifecycle",
+            trace_id="trc-guard-unit",
+            mode="enforce",
+        )
+    assert exc.value.status_code == 403
+    assert exc.value.detail["code"] == "GW_403_ACCOUNT_NOT_ALLOWED"
+    assert exc.value.detail["reason"] == "account_missing"
 
 
 def test_enforce_tenant_isolation(enforce_client: TestClient) -> None:

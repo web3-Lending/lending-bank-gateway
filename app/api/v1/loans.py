@@ -10,6 +10,7 @@ from sqlalchemy import select
 
 from app.api.deps import (
     assert_idempotency_key_matches,
+    assert_wedap_required,
     bank_req_date,
     parse_amount,
     require_headers,
@@ -18,6 +19,14 @@ from app.api.deps import (
 from app.api.v1.bank_funds import SubmitAck, SubmitAckEnvelope
 from app.clients.wedap import WedapError
 from app.core.envelope import ok
+from app.domain.wedap_contract import (
+    DISBURSEMENT_INFO_REQUIRED,
+    DISBURSEMENT_LENDER_REQUIRED,
+    DISBURSEMENT_REQUIRED,
+    REPAYMENT_INFO_REQUIRED,
+    REPAYMENT_LENDER_REQUIRED,
+    REPAYMENT_REQUIRED,
+)
 from app.models.txn import BankTxnOrder
 from app.services.idempotency import IdempotencyConflict
 from app.services.submit import SubmitRequest, submit_order
@@ -195,6 +204,19 @@ async def p2p_disbursement(
         amount_field="lendAmount",
         require_detail=True,  # wedap DisbursementAdapterRequest.lenders is @NotEmpty
     )
+    # wedap 必填集门禁（2026-08-11 实测，见 app/domain/wedap_contract）：这些字段原先全靠
+    # extra=allow 透传、gateway 不看，被 wedap 400 拒时台账已留一条 FAILED 垃圾单
+    # （submit_order 先落 ACCEPTED 再外呼）。
+    assert_wedap_required(payload, DISBURSEMENT_REQUIRED)
+    assert_wedap_required(
+        payload.get("disbursementInfo") or {},
+        DISBURSEMENT_INFO_REQUIRED,
+        where="disbursementInfo",
+    )
+    # lenders 项必为 dict：上面的 validate_detail_consistency(require_detail=True) 已对
+    # 非 dict 项抛 400（deps._collect_detail_amounts strict 分支），此处不再重复判型。
+    for idx, lender in enumerate(payload.get("lenders") or []):
+        assert_wedap_required(lender, DISBURSEMENT_LENDER_REQUIRED, where=f"lenders[{idx}]")
     return await _submit(
         request,
         ids=ids,
@@ -234,6 +256,15 @@ async def p2p_repayment(
         fee_amount_field="feeAmount",
         require_detail=True,  # wedap RepaymentAdapterRequest.lenders is @NotEmpty
     )
+    # wedap 必填集门禁（同放款）。principalAmount/interestAmount 是 @NotNull 的金额字段——
+    # 0 合法（无息期还款），故判据是「存在且非 None」，不是「非零」。
+    assert_wedap_required(payload, REPAYMENT_REQUIRED)
+    assert_wedap_required(
+        payload.get("repaymentInfo") or {}, REPAYMENT_INFO_REQUIRED, where="repaymentInfo"
+    )
+    # 同放款：非 dict 的 lenders 项已被 validate_detail_consistency 挡在前面。
+    for idx, lender in enumerate(payload.get("lenders") or []):
+        assert_wedap_required(lender, REPAYMENT_LENDER_REQUIRED, where=f"lenders[{idx}]")
     return await _submit(
         request,
         ids=ids,
