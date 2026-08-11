@@ -360,7 +360,21 @@ def assert_wedap_required(
     字段），逐个报会让上游「改一个再试一次」来回好几轮。
 
     ``where`` 用于 recipients[] 等嵌套位置的定位前缀。
+
+    非 dict 入参 fail-closed 成 400：``extra=allow`` 透传下明细项可能是任意 JSON 标量
+    （``"lenders": [1]``），此时 ``.get`` 会 AttributeError → 500。调用方虽已有前置的
+    明细结构校验，但那层保障依赖「非空 total + main_strict=True」这一组合（见
+    :func:`validate_detail_consistency`），不是无条件的——本函数是通用 helper，
+    不假设调用方一定组合正确（codex 复核 2026-08-11）。
     """
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            400,
+            detail={
+                "code": "GW_400_VALIDATION",
+                "message": f"{where or 'request body'} must be a JSON object",
+            },
+        )
     missing = [field for field in required if _is_blank(payload.get(field))]
     if not missing:
         return

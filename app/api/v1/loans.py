@@ -213,8 +213,10 @@ async def p2p_disbursement(
         DISBURSEMENT_INFO_REQUIRED,
         where="disbursementInfo",
     )
-    # lenders 项必为 dict：上面的 validate_detail_consistency(require_detail=True) 已对
-    # 非 dict 项抛 400（deps._collect_detail_amounts strict 分支），此处不再重复判型。
+    # 不重复判型：上面 validate_detail_consistency 传的是**非空 total + main_strict 默认 True**，
+    # 该组合下非 dict 的 lenders 项已在 _collect_detail_amounts 的 strict 分支被 400 挡掉。
+    # 注意保障条件是这个组合、不是 require_detail=True 本身（total=None 会提前 return，
+    # codex 复核 2026-08-11 纠正）；assert_wedap_required 另有非 dict fail-closed 兜底。
     for idx, lender in enumerate(payload.get("lenders") or []):
         assert_wedap_required(lender, DISBURSEMENT_LENDER_REQUIRED, where=f"lenders[{idx}]")
     return await _submit(
@@ -262,7 +264,8 @@ async def p2p_repayment(
     assert_wedap_required(
         payload.get("repaymentInfo") or {}, REPAYMENT_INFO_REQUIRED, where="repaymentInfo"
     )
-    # 同放款：非 dict 的 lenders 项已被 validate_detail_consistency 挡在前面。
+    # 同放款：非空 total + main_strict=True 的组合已让非 dict 的 lenders 项在前面 400；
+    # assert_wedap_required 的非 dict fail-closed 是第二层兜底。
     for idx, lender in enumerate(payload.get("lenders") or []):
         assert_wedap_required(lender, REPAYMENT_LENDER_REQUIRED, where=f"lenders[{idx}]")
     return await _submit(

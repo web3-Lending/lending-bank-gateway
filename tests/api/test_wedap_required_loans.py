@@ -12,6 +12,7 @@ import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.domain.wedap_contract import (
@@ -212,3 +213,20 @@ def test_repayment_field_error_leaves_no_order_row(client: TestClient) -> None:
     assert status == 400
     assert _order_count(client.app) == 0
     assert client.app.state.wedap.p2p_repayment.await_count == 0  # type: ignore[union-attr]
+
+
+def test_non_dict_detail_item_is_400_not_500(client: TestClient) -> None:
+    """明细项是标量而非对象 → 400，不得 500。
+
+    `extra=allow` 透传下 `lenders: [1]` 这类报文进得来；assert_wedap_required 若直接
+    `.get` 会 AttributeError → 500。前置的明细结构校验能挡住它，但那层保障依赖
+    「非空 total + main_strict=True」的组合而非无条件成立（codex 复核 2026-08-11 纠正
+    了原注释的归因），故本函数自身也要 fail-closed。
+    """
+    from app.api.deps import assert_wedap_required
+
+    with pytest.raises(HTTPException) as exc:
+        assert_wedap_required(1, ("principalAmount",), where="lenders[0]")  # type: ignore[arg-type]
+    assert exc.value.status_code == 400
+    assert exc.value.detail["code"] == "GW_400_VALIDATION"
+    assert "lenders[0]" in exc.value.detail["message"]
