@@ -68,6 +68,12 @@ services:
         max-file: "3"
     networks:
       - wedap-network
+      # BFF internal proxy 的回调出口。admin-backend 撤掉 7018 宿主端口映射改多副本后，
+      # 宿主网关 IP + docker-proxy 那条路会消失，只能按容器名直连 —— 而容器名解析要求
+      # gateway 与 lending-console-bff 同网，故加入 lending-network。
+      - lending-network
 networks:
   wedap-network:
+    external: true
+  lending-network:
     external: true
