@@ -389,7 +389,7 @@ def mysql_engine_recon():
     from app.models.base import Base
 
     try:
-        with MySqlContainer("mysql:8.0") as mysql:
+        with MySqlContainer("mysql:8.0").with_command("--innodb-use-native-aio=0") as mysql:
             url = (
                 f"mysql+pymysql://{mysql.username}:{mysql.password}"
                 f"@{mysql.get_container_host_ip()}:{mysql.get_exposed_port(3306)}"

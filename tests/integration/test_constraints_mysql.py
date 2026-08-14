@@ -35,7 +35,7 @@ def mysql_engine():
     from app.models.base import Base
 
     try:
-        with MySqlContainer("mysql:8.0") as mysql:
+        with MySqlContainer("mysql:8.0").with_command("--innodb-use-native-aio=0") as mysql:
             # testcontainers 返回无驱动前缀的 mysql://host:port/db；
             # 手动拼接 pymysql URL 避免依赖 MySQLdb
             url = (

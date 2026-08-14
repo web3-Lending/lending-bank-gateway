@@ -32,7 +32,7 @@ def mysql_async_url() -> str:
     from app.models.base import Base
 
     try:
-        with MySqlContainer("mysql:8.0") as mysql:
+        with MySqlContainer("mysql:8.0").with_command("--innodb-use-native-aio=0") as mysql:
             host = mysql.get_container_host_ip()
             port = mysql.get_exposed_port(3306)
             db = mysql.dbname
