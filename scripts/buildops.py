@@ -189,10 +189,47 @@ def classify_path(path: str) -> str:
     return "unknown"
 
 
+def require_distinct_release_base(
+    base_ref: str,
+    base_sha: str,
+    head_ref: str,
+    head_sha: str,
+    changed: list[str],
+) -> None:
+    """Fail closed when the impact baseline has collapsed onto the head commit.
+
+    The house release flow is "merge origin/main inside your own worktree, push
+    HEAD:main, then release". After that push origin/main *is* the head commit, so
+    an inferred baseline diffs a commit against itself: the change set is empty and
+    the classifier answers ``no-app-release`` with "runtime unchanged. Use no-op
+    evidence instead of building, transferring, or restarting app containers."
+    That sentence reads like a verdict about the code, while it only ever meant
+    "I saw no changes at all" -- and the two readings lead to opposite actions,
+    the wrong one silently skipping the entire deployment.
+
+    An empty diff against an identical baseline carries no information, so it is
+    refused rather than classified. A dirty worktree compared against its own head
+    commit still has a real change set and is left alone.
+    """
+    if base_sha != head_sha or changed:
+        return
+    raise SystemExit(
+        f"release-impact base is invalid: base ref '{base_ref}' resolves to the same commit as "
+        f"head ref '{head_ref}' ({base_sha[:12]}), so there is nothing to diff and the release "
+        "impact is UNKNOWN. This is not a finding that the runtime is unchanged. "
+        "The usual cause is a collapsed baseline: the branch was already pushed to main, so the "
+        "inferred origin/main baseline is the head commit itself. "
+        "Pass the commit the target environment is actually running -- on every command of the "
+        "release chain -- as --base-ref <deployed sha>; read that sha from the target's "
+        "/api/version or from the running container's image tag."
+    )
+
+
 def release_impact_facts(base_ref: str = "HEAD~1", head_ref: str = "HEAD") -> dict[str, Any]:
     base_sha = resolve_ref(base_ref)
     head_sha = resolve_ref(head_ref)
     paths = changed_paths(base_sha, head_sha)
+    require_distinct_release_base(base_ref, base_sha, head_ref, head_sha, paths)
     categories: dict[str, list[str]] = {
         "app-impact": [],
         "no-app-release": [],
@@ -818,6 +855,102 @@ def verify_runtime_identity(
     return version_body
 
 
+def main_worktree_root() -> Path | None:
+    """Root of this repository's main worktree, or None when already inside it."""
+    for line in git_output("worktree", "list", "--porcelain").splitlines():
+        if line.startswith("worktree "):
+            main_root = Path(line.split(" ", 1)[1]).resolve()
+            return None if main_root == ROOT.resolve() else main_root
+    return None
+
+
+def main_repo_release_sync(env_name: str, release_id_value: str) -> dict[str, Any]:
+    """Compare the main worktree's ``.buildops`` state against the release built here.
+
+    ``.buildops/`` is not tracked by git, so a release produced inside a throwaway
+    worktree exists only in that worktree -- and post-merge cleanup removes any
+    worktree that is clean and not ahead of main, which is exactly the state a
+    worktree reaches right after its release branch is pushed. What disappears with
+    it is the release bundle plus ``env-state/<env>.json``: the proof the next
+    promotion (and UAT) demands, whose absence later surfaces as an unrelated-looking
+    "manifest appVersion mismatch". Copying it back has been a step someone had to
+    remember; this turns it into an answer the release chain gives on its own.
+    """
+    main_root = main_worktree_root()
+    if main_root is None:
+        return {
+            "inLinkedWorktree": False,
+            "environment": env_name,
+            "releaseId": release_id_value,
+            "inSync": True,
+            "gaps": [],
+            "copyBackCommands": [],
+        }
+    buildops_dir = main_root / ".buildops"
+    gaps: list[str] = []
+    state_file = buildops_dir / "env-state" / f"{env_name}.json"
+    if not state_file.exists():
+        gaps.append(f"main repo has no .buildops/env-state/{env_name}.json")
+    else:
+        try:
+            recorded = (read_json(state_file) or {}).get("releaseId")
+        except (OSError, ValueError):
+            recorded = None
+        if recorded != release_id_value:
+            gaps.append(
+                f"main repo .buildops/env-state/{env_name}.json still records "
+                f"releaseId={recorded}"
+            )
+    if not (buildops_dir / "releases" / release_id_value / "manifest.json").exists():
+        gaps.append(f"main repo has no .buildops/releases/{release_id_value}/manifest.json")
+    releases_dir = buildops_dir / "releases"
+    env_state_dir = buildops_dir / "env-state"
+    release_src = shlex.quote(str(RELEASES / release_id_value))
+    state_src = shlex.quote(str(ENV_STATE / f"{env_name}.json"))
+    commands = [
+        f"mkdir -p {shlex.quote(str(releases_dir))} {shlex.quote(str(env_state_dir))}",
+        f"cp -a {release_src} {shlex.quote(str(releases_dir) + '/')}",
+        f"ln -sfn {shlex.quote(release_id_value)} {shlex.quote(str(releases_dir / 'LATEST'))}",
+        f"cp -a {state_src} {shlex.quote(str(env_state_dir) + '/')}",
+    ]
+    return {
+        "inLinkedWorktree": True,
+        "worktreeRoot": str(ROOT),
+        "mainRepoRoot": str(main_root),
+        "environment": env_name,
+        "releaseId": release_id_value,
+        "inSync": not gaps,
+        "gaps": gaps,
+        "copyBackCommands": [] if not gaps else commands,
+    }
+
+
+def report_main_repo_release_sync(env_name: str, release_id_value: str) -> dict[str, Any]:
+    """Print copy-back instructions when the main repo is behind the release just made."""
+    sync = main_repo_release_sync(env_name, release_id_value)
+    if sync["inSync"]:
+        return sync
+    banner = "=" * 78
+    lines = [
+        "",
+        banner,
+        "[buildops] main repo release state is OUT OF SYNC with this release",
+        f"  release   : {release_id_value}  (environment: {env_name})",
+        f"  worktree  : {sync['worktreeRoot']}",
+        f"  main repo : {sync['mainRepoRoot']}",
+        *[f"  gap       : {gap}" for gap in sync["gaps"]],
+        "  .buildops/ is not tracked by git and clean worktrees get pruned automatically,",
+        "  so copy this release state back into the main repo now:",
+        *[f"    {command}" for command in sync["copyBackCommands"]],
+        "  If the main repo is locked by another session, copy the state to a directory",
+        "  outside this worktree first and move it in once the lock is released.",
+        banner,
+        "",
+    ]
+    print("\n".join(lines), file=sys.stderr)
+    return sync
+
+
 def local_verify(args: argparse.Namespace) -> None:
     require_app_impact(args.base_ref, args.head_ref)
     require_clean_tree()
@@ -879,9 +1012,11 @@ def local_verify(args: argparse.Namespace) -> None:
     latest.unlink(missing_ok=True)
     latest.symlink_to(release_dir.name)
     write_env_state("local", manifest, run_id, "verified", manifest_file)
+    main_repo_sync = report_main_repo_release_sync("local", rid)
     print_json(
         {
             "ok": True,
+            "mainRepoStateSync": main_repo_sync,
             "releaseId": rid,
             "releaseRunId": run_id,
             "manifestPath": relative_to_root(manifest_file),
@@ -1399,9 +1534,11 @@ def dev_promote_confirm(manifest_file: Path, manifest: dict[str, Any]) -> None:
         dest=f"{remote_release}/",
     )
     write_env_state("dev", updated_manifest, run_id, "verified", manifest_file)
+    main_repo_sync = report_main_repo_release_sync("dev", release_id_value)
     print_json(
         {
             "ok": True,
+            "mainRepoStateSync": main_repo_sync,
             "environment": "dev",
             "releaseId": release_id_value,
             "verifyRunId": run_id,
