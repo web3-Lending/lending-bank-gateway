@@ -164,6 +164,11 @@ def full_git_sha() -> str:
     return sha
 
 
+def resolve_commit(ref: str) -> str:
+    """The commit a ref names. Peels annotated tags; a non-commit ref fails closed here."""
+    return git_output("rev-parse", f"{ref}^{{commit}}")
+
+
 def resolve_ref(ref: str) -> str:
     return git_output("rev-parse", ref)
 
@@ -189,13 +194,7 @@ def classify_path(path: str) -> str:
     return "unknown"
 
 
-def require_distinct_release_base(
-    base_ref: str,
-    base_sha: str,
-    head_ref: str,
-    head_sha: str,
-    changed: list[str],
-) -> None:
+def require_distinct_release_base(base_ref: str, head_ref: str, changed: list[str]) -> None:
     """Fail closed when the impact baseline has collapsed onto the head commit.
 
     The house release flow is "merge origin/main inside your own worktree, push
@@ -210,12 +209,21 @@ def require_distinct_release_base(
     An empty diff against an identical baseline carries no information, so it is
     refused rather than classified. A dirty worktree compared against its own head
     commit still has a real change set and is left alone.
+
+    Both refs are peeled to commits on purpose: ``git rev-parse`` on an annotated tag
+    yields the tag object, not the commit, so comparing raw object shas lets a tag
+    that points at the head commit slip through the guard with an empty diff
+    (reproduced 2026-08-21 before this was peeled).
     """
-    if base_sha != head_sha or changed:
+    if changed:
+        return
+    base_commit = resolve_commit(base_ref)
+    head_commit = resolve_commit(head_ref)
+    if base_commit != head_commit:
         return
     raise SystemExit(
         f"release-impact base is invalid: base ref '{base_ref}' resolves to the same commit as "
-        f"head ref '{head_ref}' ({base_sha[:12]}), so there is nothing to diff and the release "
+        f"head ref '{head_ref}' ({base_commit[:12]}), so there is nothing to diff and the release "
         "impact is UNKNOWN. This is not a finding that the runtime is unchanged. "
         "The usual cause is a collapsed baseline: the branch was already pushed to main, so the "
         "inferred origin/main baseline is the head commit itself. "
@@ -229,7 +237,7 @@ def release_impact_facts(base_ref: str = "HEAD~1", head_ref: str = "HEAD") -> di
     base_sha = resolve_ref(base_ref)
     head_sha = resolve_ref(head_ref)
     paths = changed_paths(base_sha, head_sha)
-    require_distinct_release_base(base_ref, base_sha, head_ref, head_sha, paths)
+    require_distinct_release_base(base_ref, head_ref, paths)
     categories: dict[str, list[str]] = {
         "app-impact": [],
         "no-app-release": [],
@@ -856,15 +864,24 @@ def verify_runtime_identity(
 
 
 def main_worktree_root() -> Path | None:
-    """Root of this repository's main worktree, or None when already inside it."""
-    for line in git_output("worktree", "list", "--porcelain").splitlines():
-        if line.startswith("worktree "):
-            main_root = Path(line.split(" ", 1)[1]).resolve()
-            return None if main_root == ROOT.resolve() else main_root
-    return None
+    """Root of this repository's main worktree, or None when already inside it.
+
+    ``git worktree list --porcelain`` puts the main worktree first. A bare main
+    "worktree" is a git directory, not a place to copy release state into, so it is
+    reported as nothing to sync rather than as a copy-back target.
+    """
+    block = git_output("worktree", "list", "--porcelain").split("\n\n", 1)[0].splitlines()
+    if not block or not block[0].startswith("worktree "):
+        return None
+    if any(line.strip() == "bare" for line in block):
+        return None
+    main_root = Path(block[0].split(" ", 1)[1]).resolve()
+    return None if main_root == ROOT.resolve() else main_root
 
 
-def main_repo_release_sync(env_name: str, release_id_value: str) -> dict[str, Any]:
+def main_repo_release_sync(
+    env_name: str, release_id_value: str, *, set_latest: bool = False
+) -> dict[str, Any]:
     """Compare the main worktree's ``.buildops`` state against the release built here.
 
     ``.buildops/`` is not tracked by git, so a release produced inside a throwaway
@@ -910,9 +927,14 @@ def main_repo_release_sync(env_name: str, release_id_value: str) -> dict[str, An
     commands = [
         f"mkdir -p {shlex.quote(str(releases_dir))} {shlex.quote(str(env_state_dir))}",
         f"cp -a {release_src} {shlex.quote(str(releases_dir) + '/')}",
-        f"ln -sfn {shlex.quote(release_id_value)} {shlex.quote(str(releases_dir / 'LATEST'))}",
-        f"cp -a {state_src} {shlex.quote(str(env_state_dir) + '/')}",
     ]
+    if set_latest:
+        # LATEST means "the newest release built here", so only a fresh build moves it.
+        # Promoting or rolling back to an older manifest must not rewind the pointer.
+        commands.append(
+            f"ln -sfn {shlex.quote(release_id_value)} {shlex.quote(str(releases_dir / 'LATEST'))}"
+        )
+    commands.append(f"cp -a {state_src} {shlex.quote(str(env_state_dir) + '/')}")
     return {
         "inLinkedWorktree": True,
         "worktreeRoot": str(ROOT),
@@ -925,9 +947,16 @@ def main_repo_release_sync(env_name: str, release_id_value: str) -> dict[str, An
     }
 
 
-def report_main_repo_release_sync(env_name: str, release_id_value: str) -> dict[str, Any]:
-    """Print copy-back instructions when the main repo is behind the release just made."""
-    sync = main_repo_release_sync(env_name, release_id_value)
+def report_main_repo_release_sync(
+    env_name: str, release_id_value: str, *, set_latest: bool = False
+) -> dict[str, Any]:
+    """Print copy-back instructions when the main repo is behind the release just made.
+
+    This reports, it does not fail: the release itself already succeeded, and exiting
+    non-zero here would read as a failed deployment. The machine-readable half is the
+    ``mainRepoStateSync`` field in each command's JSON output.
+    """
+    sync = main_repo_release_sync(env_name, release_id_value, set_latest=set_latest)
     if sync["inSync"]:
         return sync
     banner = "=" * 78
@@ -1012,7 +1041,7 @@ def local_verify(args: argparse.Namespace) -> None:
     latest.unlink(missing_ok=True)
     latest.symlink_to(release_dir.name)
     write_env_state("local", manifest, run_id, "verified", manifest_file)
-    main_repo_sync = report_main_repo_release_sync("local", rid)
+    main_repo_sync = report_main_repo_release_sync("local", rid, set_latest=True)
     print_json(
         {
             "ok": True,
@@ -1912,9 +1941,11 @@ networks:
         ),
     )
     write_env_state("uat", updated_manifest, run_id, "verified", manifest_file)
+    main_repo_sync = report_main_repo_release_sync("uat", release_id_value)
     print_json(
         {
             "ok": True,
+            "mainRepoStateSync": main_repo_sync,
             "environment": "uat",
             "releaseId": release_id_value,
             "verifyRunId": run_id,

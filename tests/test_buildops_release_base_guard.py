@@ -44,12 +44,13 @@ def _load_buildops():
     return module
 
 
-def test_collapsed_baseline_fails_closed_and_names_the_cause() -> None:
+def test_collapsed_baseline_fails_closed_and_names_the_cause(monkeypatch) -> None:
     buildops = _load_buildops()
     sha = "a" * 40
+    monkeypatch.setattr(buildops, "resolve_commit", lambda ref: sha)
 
     with pytest.raises(SystemExit) as excinfo:
-        buildops.require_distinct_release_base("origin/main", sha, "HEAD", sha, [])
+        buildops.require_distinct_release_base("origin/main", "HEAD", [])
 
     message = str(excinfo.value)
     # The reader has to walk away knowing they passed the wrong baseline...
@@ -65,6 +66,7 @@ def test_release_impact_refuses_to_classify_a_collapsed_baseline(monkeypatch) ->
     buildops = _load_buildops()
     sha = "b" * 40
     monkeypatch.setattr(buildops, "resolve_ref", lambda ref: sha)
+    monkeypatch.setattr(buildops, "resolve_commit", lambda ref: sha)
     monkeypatch.setattr(buildops, "changed_paths", lambda base, head: [])
 
     with pytest.raises(SystemExit) as excinfo:
@@ -73,12 +75,34 @@ def test_release_impact_refuses_to_classify_a_collapsed_baseline(monkeypatch) ->
     assert "no-app-release" not in str(excinfo.value)
 
 
+def test_annotated_tag_at_head_cannot_slip_past_the_guard(monkeypatch) -> None:
+    """``git rev-parse <annotated tag>`` yields the tag object, not the commit.
+
+    Comparing raw object shas therefore let a tag pointing at the head commit look
+    like a distinct baseline while the diff was empty -- exactly the case the guard
+    exists for. Reproduced against a real repository on 2026-08-21 before the refs
+    were peeled with ``^{commit}``.
+    """
+    buildops = _load_buildops()
+    tag_object = "d" * 40
+    commit = "e" * 40
+    monkeypatch.setattr(
+        buildops, "resolve_ref", lambda ref: tag_object if ref == "v1.0" else commit
+    )
+    monkeypatch.setattr(buildops, "resolve_commit", lambda ref: commit)
+    monkeypatch.setattr(buildops, "changed_paths", lambda base, head: [])
+
+    with pytest.raises(SystemExit):
+        buildops.release_impact_facts("v1.0", "HEAD")
+
+
 def test_real_changes_against_the_same_commit_still_classify(monkeypatch) -> None:
     """A dirty worktree diffed against its own HEAD has a real change set; leave it alone."""
     buildops = _load_buildops()
     sha = "c" * 40
     changed = [buildops.APP_IMPACT_PREFIXES[0] + "main.py"]
     monkeypatch.setattr(buildops, "resolve_ref", lambda ref: sha)
+    monkeypatch.setattr(buildops, "resolve_commit", lambda ref: sha)
     monkeypatch.setattr(buildops, "changed_paths", lambda base, head: changed)
 
     facts = buildops.release_impact_facts("origin/main", "HEAD")
@@ -86,19 +110,22 @@ def test_real_changes_against_the_same_commit_still_classify(monkeypatch) -> Non
     assert facts["classification"] == "app-impact"
 
 
-def _fake_worktree_list(main_root: Path, current: Path) -> str:
-    return (
-        f"worktree {main_root}\nHEAD {'0' * 40}\nbranch refs/heads/main\n\n"
-        f"worktree {current}\nHEAD {'1' * 40}\nbranch refs/heads/fix/topic\n"
-    )
+def _fake_worktree_list(main_root: Path, current: Path, *, bare: bool = False) -> str:
+    detail = "bare\n" if bare else f"HEAD {'0' * 40}\nbranch refs/heads/main\n"
+    first = f"worktree {main_root}\n" + detail
+    return first + f"\nworktree {current}\nHEAD {'1' * 40}\nbranch refs/heads/fix/topic\n"
 
 
-def _wire_worktree(monkeypatch, buildops, main_root: Path, current: Path) -> None:
+def _wire_worktree(
+    monkeypatch, buildops, main_root: Path, current: Path, *, bare: bool = False
+) -> None:
     monkeypatch.setattr(buildops, "ROOT", current)
     monkeypatch.setattr(buildops, "RELEASES", current / ".buildops" / "releases")
     monkeypatch.setattr(buildops, "ENV_STATE", current / ".buildops" / "env-state")
     monkeypatch.setattr(
-        buildops, "git_output", lambda *args: _fake_worktree_list(main_root, current)
+        buildops,
+        "git_output",
+        lambda *args: _fake_worktree_list(main_root, current, bare=bare),
     )
 
 
@@ -118,7 +145,22 @@ def test_main_repo_behind_release_reports_gaps_and_copy_back(monkeypatch, tmp_pa
     joined = "\n".join(sync["copyBackCommands"])
     assert str(main_root / ".buildops" / "releases") in joined
     assert "cp -a" in joined
-    assert "ln -sfn" in joined
+
+
+def test_latest_pointer_moves_only_for_a_fresh_build(monkeypatch, tmp_path) -> None:
+    """Promotion and rollback copy state back without rewinding LATEST."""
+    buildops = _load_buildops()
+    main_root = tmp_path / "main"
+    current = tmp_path / "wt" / "topic"
+    main_root.mkdir()
+    current.mkdir(parents=True)
+    _wire_worktree(monkeypatch, buildops, main_root, current)
+
+    promoted = buildops.main_repo_release_sync("dev", "rel-1")
+    built = buildops.main_repo_release_sync("local", "rel-1", set_latest=True)
+
+    assert not any("ln -sfn" in command for command in promoted["copyBackCommands"])
+    assert any("ln -sfn" in command for command in built["copyBackCommands"])
 
 
 def test_main_repo_holding_the_same_release_is_in_sync(monkeypatch, tmp_path) -> None:
@@ -151,6 +193,19 @@ def test_release_built_in_the_main_repo_needs_no_copy_back(monkeypatch, tmp_path
 
     assert sync["inLinkedWorktree"] is False
     assert sync["inSync"] is True
+
+
+def test_bare_main_worktree_is_not_a_copy_back_target(monkeypatch, tmp_path) -> None:
+    """A bare main "worktree" is a git directory, not a place to copy release state into."""
+    buildops = _load_buildops()
+    bare_root = tmp_path / "repo.git"
+    current = tmp_path / "wt" / "topic"
+    bare_root.mkdir()
+    current.mkdir(parents=True)
+    _wire_worktree(monkeypatch, buildops, bare_root, current, bare=True)
+
+    assert buildops.main_worktree_root() is None
+    assert buildops.main_repo_release_sync("dev", "rel-1")["inSync"] is True
 
 
 def test_out_of_sync_report_is_printed_where_an_operator_sees_it(
