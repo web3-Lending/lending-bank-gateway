@@ -1241,7 +1241,8 @@
                 "type": "null"
               }
             ],
-            "title": "Loanno"
+            "title": "Loanno",
+            "description": "借据单号。wedap 侧自 2026-07-23 起无条件必填（loan_repayment_txn.loan_no NOT NULL，灰度开关同迁移移除）；缺失时本网关返 400 GW_400_VALIDATION，不下发 wedap。schema 上标 optional 仅为统一错误形态，业务上必传。"
           },
           "repaymentInfo": {
             "$ref": "#/components/schemas/RepaymentInfo"

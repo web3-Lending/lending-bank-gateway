@@ -80,7 +80,17 @@ class P2PRepaymentRequest(BaseModel):
     #
     # 声明它而不靠 extra 静默透传：字段必须在 openapi 里可见，否则调用方无从知道要传
     # （debtSettled 至今未被上游接入正是「只靠口头传达」的成因，见 RepaymentAck 注释）。
-    loanNo: str | None = None
+    loanNo: str | None = Field(
+        default=None,
+        # schema 上是 optional（强制交给 assert_wedap_required 以统一错误形态），故必填语义
+        # 只能靠 description 向新调用方表达——否则规格读起来像"可不传"，与实际行为相反
+        # （codex 复核 2026-08-26）。
+        description=(
+            "借据单号。wedap 侧自 2026-07-23 起无条件必填（loan_repayment_txn.loan_no "
+            "NOT NULL，灰度开关同迁移移除）；缺失时本网关返 400 GW_400_VALIDATION，"
+            "不下发 wedap。schema 上标 optional 仅为统一错误形态，业务上必传。"
+        ),
+    )
     repaymentInfo: RepaymentInfo
 
 

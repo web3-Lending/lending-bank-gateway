@@ -89,8 +89,12 @@ def client() -> TestClient:
     app = create_app()
     asyncio.run(_create_tables(app.state.engine))
     wedap = AsyncMock()
-    wedap.p2p_disbursement.return_value = {"txnStatus": "PROCESSING"}
-    wedap.p2p_repayment.return_value = {"txnStatus": "PROCESSING", "status": "PROCESSING"}
+    # 方法名必须与 endpoint `getattr(app.state.wedap, wedap_method)` 取的名字一致
+    # （loans.py 的 wedap_method="submit_disbursement" / "submit_repayment"）。AsyncMock 对
+    # 任意属性都会即席生成子 mock，名字写错不会报错——只会让 return_value 配不上去、
+    # await_count 恒为 0，把「没打 wedap」的断言变成永远成立的空话（codex 复核 2026-08-26）。
+    wedap.submit_disbursement.return_value = {"txnStatus": "PROCESSING"}
+    wedap.submit_repayment.return_value = {"txnStatus": "PROCESSING", "status": "PROCESSING"}
     app.state.wedap = wedap
     return TestClient(app)
 
@@ -120,9 +124,16 @@ def _order_count(app) -> int:  # type: ignore[no-untyped-def]
 
 
 def test_real_shape_disbursement_accepted(client: TestClient) -> None:
-    """回归护栏：实测形态必须仍被放行（防校验写过严）。"""
+    """回归护栏：实测形态必须仍被放行（防校验写过严）。
+
+    连带断言 wedap 真被调用一次：本文件多处以 ``await_count == 0`` 证明「报文被挡在
+    网关、没打 wedap」，而 AsyncMock 对任意属性都即席生成子 mock——mock 名与 endpoint
+    实际取的名字一旦不一致，那些断言全部恒真、失去证明力。此处的 ``== 1`` 是它们的
+    活性守卫：名字写错这里先红（codex 复核 2026-08-26）。
+    """
     status, body = _post(client, "p2p-disbursements", REAL_DISBURSE)
     assert status == 200, body
+    assert client.app.state.wedap.submit_disbursement.await_count == 1  # type: ignore[union-attr]
 
 
 @pytest.mark.parametrize("field", DISBURSEMENT_REQUIRED)
@@ -158,15 +169,17 @@ def test_disbursement_field_error_leaves_no_order_row(client: TestClient) -> Non
     status, _ = _post(client, "p2p-disbursements", body)
     assert status == 400
     assert _order_count(client.app) == 0
-    assert client.app.state.wedap.p2p_disbursement.await_count == 0  # type: ignore[union-attr]
+    assert client.app.state.wedap.submit_disbursement.await_count == 0  # type: ignore[union-attr]
 
 
 # ── 还款 ───────────────────────────────────────────────────────────────────────
 
 
 def test_real_shape_repayment_accepted(client: TestClient) -> None:
+    """回归护栏：实测形态必须仍被放行；``await_count == 1`` 同为下方 ``== 0`` 断言的活性守卫。"""
     status, body = _post(client, "p2p-repayments", REAL_REPAY)
     assert status == 200, body
+    assert client.app.state.wedap.submit_repayment.await_count == 1  # type: ignore[union-attr]
 
 
 @pytest.mark.parametrize("field", REPAYMENT_REQUIRED)
@@ -213,7 +226,7 @@ def test_repayment_field_error_leaves_no_order_row(client: TestClient) -> None:
     status, _ = _post(client, "p2p-repayments", body)
     assert status == 400
     assert _order_count(client.app) == 0
-    assert client.app.state.wedap.p2p_repayment.await_count == 0  # type: ignore[union-attr]
+    assert client.app.state.wedap.submit_repayment.await_count == 0  # type: ignore[union-attr]
 
 
 def test_repayment_missing_loan_no_blocked_before_wedap(client: TestClient) -> None:
@@ -226,9 +239,10 @@ def test_repayment_missing_loan_no_blocked_before_wedap(client: TestClient) -> N
     body = {k: v for k, v in REAL_REPAY.items() if k != "loanNo"}
     status, resp = _post(client, "p2p-repayments", body)
     assert status == 400
+    assert resp["error"]["code"] == "GW_400_VALIDATION"
     assert "loanNo" in resp["error"]["message"]
     assert _order_count(client.app) == 0
-    assert client.app.state.wedap.p2p_repayment.await_count == 0  # type: ignore[union-attr]
+    assert client.app.state.wedap.submit_repayment.await_count == 0  # type: ignore[union-attr]
 
 
 def test_non_dict_detail_item_is_400_not_500(client: TestClient) -> None:
