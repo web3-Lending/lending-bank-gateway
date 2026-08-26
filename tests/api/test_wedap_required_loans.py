@@ -56,6 +56,7 @@ REAL_REPAY = {
     "bizSeqNo": "RPM-20260811-0000000000001",
     "transType": "REPAYMENT",
     "channelId": "LEN",
+    "loanNo": "LN20260811000001",
     "repaymentInfo": {
         "txnAmount": "1.0000",
         "currencyCode": "USD",
@@ -211,6 +212,21 @@ def test_repayment_field_error_leaves_no_order_row(client: TestClient) -> None:
     body = {k: v for k, v in REAL_REPAY.items() if k != "channelId"}
     status, _ = _post(client, "p2p-repayments", body)
     assert status == 400
+    assert _order_count(client.app) == 0
+    assert client.app.state.wedap.p2p_repayment.await_count == 0  # type: ignore[union-attr]
+
+
+def test_repayment_missing_loan_no_blocked_before_wedap(client: TestClient) -> None:
+    """缺 loanNo 挡在网关，不落单、不打 wedap。
+
+    wedap 侧 2026-07-23 起 `loan_repayment_txn.loan_no NOT NULL`（灰度开关同迁移删除），
+    缺失即受理拒、返 6605B00900209。放行则先落 ACCEPTED 单再翻 FAILED，白污染台账，
+    且上游拿到的是需翻文档的 13 位业务码而非「缺哪个字段」。
+    """
+    body = {k: v for k, v in REAL_REPAY.items() if k != "loanNo"}
+    status, resp = _post(client, "p2p-repayments", body)
+    assert status == 400
+    assert "loanNo" in resp["error"]["message"]
     assert _order_count(client.app) == 0
     assert client.app.state.wedap.p2p_repayment.await_count == 0  # type: ignore[union-attr]
 

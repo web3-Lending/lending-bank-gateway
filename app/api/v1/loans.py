@@ -74,6 +74,13 @@ class P2PRepaymentRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
     bizSeqNo: str
     transType: str = Field(min_length=1, max_length=32)
+    # loanNo 是 wedap 必填（见 wedap_contract.REPAYMENT_REQUIRED 的依据注释），但**显式声明为
+    # 可选**：强制由 assert_wedap_required 统一执行，缺失才与其它必填项一样出 GW_400_VALIDATION
+    # 并一次列全；若在此标必填，pydantic 会抢先返 422 且错误形态与同批字段不一致。
+    #
+    # 声明它而不靠 extra 静默透传：字段必须在 openapi 里可见，否则调用方无从知道要传
+    # （debtSettled 至今未被上游接入正是「只靠口头传达」的成因，见 RepaymentAck 注释）。
+    loanNo: str | None = None
     repaymentInfo: RepaymentInfo
 
 

@@ -1232,6 +1232,17 @@
             "minLength": 1,
             "title": "Transtype"
           },
+          "loanNo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Loanno"
+          },
           "repaymentInfo": {
             "$ref": "#/components/schemas/RepaymentInfo"
           }

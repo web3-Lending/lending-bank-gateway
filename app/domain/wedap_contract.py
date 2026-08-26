@@ -95,7 +95,19 @@ DISBURSEMENT_INFO_REQUIRED: tuple[str, ...] = ("userId", "userName")
 # lendAmount 由 validate_detail_consistency 单独校验（参与金额汇总），不在此列。
 DISBURSEMENT_LENDER_REQUIRED: tuple[str, ...] = ("currencyCode",)
 
-REPAYMENT_REQUIRED: tuple[str, ...] = ("channelId",)
+# loanNo：wedap 侧 2026-07-23 起**无条件必填**——迁移
+# V20260722160000__sevan_repayment_txn_table.sql 建的新主表 loan_repayment_txn 声明
+# `loan_no VARCHAR(64) NOT NULL COMMENT '借据单号；新表无灰度期，受理即必填'`，
+# 同一迁移把灰度开关 `migration.loan-no.enforce` 从 dtc_params DELETE 掉（"新主表
+# loan_no NOT NULL，受理侧改为无条件必填，开关失去意义"）。缺失时 wedap 受理即拒，
+# 返 13 位业务码 6605B00900209（见 states.WEDAP_TERMINAL_REJECT_CODES）。
+#
+# 放在网关必填集而非只靠上游自觉：缺字段本可在本层 400 挡下并直说缺哪个字段，
+# 放行则要等 wedap 回一个需翻文档才看得懂的业务码，且已先落 ACCEPTED 单再翻 FAILED，
+# 白污染 bank_txn_order 台账（与 2026-08-11 补齐 loans 域门禁同一成因）。
+# 仅撮合（agency）还款走本端点；自营（principal）还款走 collect-from-users 归集，
+# 归集契约无 loanNo 字段，不受本项影响。
+REPAYMENT_REQUIRED: tuple[str, ...] = ("channelId", "loanNo")
 # principalAmount / interestAmount 是 @NotNull 的 BigDecimal——0 是合法值（无息期还款），
 # 故判据是「键存在且非 None」而不是「非零」。
 REPAYMENT_INFO_REQUIRED: tuple[str, ...] = (
