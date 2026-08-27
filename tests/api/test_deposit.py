@@ -276,14 +276,21 @@ def test_timeout_returns_502(client: TestClient) -> None:
     assert "unreachable" in r.json()["error"]["message"]
 
 
-def test_wedap_error_returns_502(client: TestClient) -> None:
+def test_wedap_error_returns_502(client: TestClient, caplog: pytest.LogCaptureFixture) -> None:
+    """上游业务码 != 200 → 502 GW_502_UPSTREAM，受控文案不含上游 code / msg。
+
+    API-HTTP-012：`wedap code 500` 这类回显把供应商内部码带给了调用方，改为固定文案，
+    原码只进 logger.warning。
+    """
     client.app.state.wedap.get_deposit_balance_total.side_effect = WedapError("500", "internal")  # type: ignore[union-attr]
-    r = client.get("/api/v1/deposit/balances/total", params={"userId": "U1"}, headers=HEADERS)
+    with caplog.at_level("WARNING", logger="app.api.v1.deposit"):
+        r = client.get("/api/v1/deposit/balances/total", params={"userId": "U1"}, headers=HEADERS)
     assert r.status_code == 502
     assert r.json()["error"]["code"] == "GW_502_UPSTREAM"
-    # message 含 wedap code，不含 msg 细节
-    assert "wedap code 500" in r.json()["error"]["message"]
-    assert "internal" not in r.json()["error"]["message"]
+    message = r.json()["error"]["message"]
+    assert message == "upstream rejected the request"
+    assert "500" not in message and "internal" not in message
+    assert any("upstream_code=500" in rec.message for rec in caplog.records)
 
 
 # ── 5. 脏余额数据（balance="abc"）→ 200 + 快照跳过该行 + warning ──
@@ -543,7 +550,7 @@ def test_internal_account_invalid_balance_skips_snapshot(
 
 
 def test_internal_account_upstream_error_maps_502(client: TestClient) -> None:
-    """内部户不存在（wedap 404/422 业务码）→ 502 GW_502_UPSTREAM 带 wedap code。"""
+    """内部户不存在（wedap 404/422 业务码）→ 502 GW_502_UPSTREAM，不回显 wedap code。"""
     wedap = client.app.state.wedap  # type: ignore[union-attr]
     wedap.get_internal_account_info.side_effect = WedapError("404", "RESOURCE_NOT_FOUND")
     r = client.get(
@@ -553,7 +560,8 @@ def test_internal_account_upstream_error_maps_502(client: TestClient) -> None:
     )
     assert r.status_code == 502
     assert r.json()["error"]["code"] == "GW_502_UPSTREAM"
-    assert "wedap code 404" in r.json()["error"]["message"]
+    assert r.json()["error"]["message"] == "upstream rejected the request"
+    assert "404" not in r.json()["error"]["message"]
 
 
 def test_internal_account_missing_balance_skips_snapshot(
@@ -821,4 +829,5 @@ def test_internal_account_transactions_upstream_error_maps_502(client: TestClien
     )
     assert r.status_code == 502
     assert r.json()["error"]["code"] == "GW_502_UPSTREAM"
-    assert "wedap code 422" in r.json()["error"]["message"]
+    assert r.json()["error"]["message"] == "upstream rejected the request"
+    assert "422" not in r.json()["error"]["message"]

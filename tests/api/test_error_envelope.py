@@ -109,3 +109,57 @@ def test_http_exception_detail_string(app: FastAPI) -> None:
     assert body["success"] is False
     assert body["error"]["code"] == "GW_403"
     assert body["error"]["message"] == "not allowed"
+
+
+# ── API-HTTP-004/006：exception handler 必须透传 exc.headers ──────────────────
+
+
+def test_405_carries_allow_header(app: FastAPI) -> None:
+    """方法不匹配的 405 必须带 Allow。
+
+    Allow 由 Starlette 路由层放在 HTTPException.headers 上；自定义 handler 一旦
+    只取 status_code 与 detail，就在全局把这个强制响应头删掉了——而且**任何下游
+    handler 都补不回来**，因为它根本没走到 handler。
+    """
+    client = TestClient(app)
+    r = client.request("DELETE", "/api/version")
+    assert r.status_code == 405
+    assert "GET" in r.headers["allow"]
+    # 信封仍然正常
+    assert r.json()["error"]["code"] == "GW_405"
+
+
+def test_http_exception_headers_are_preserved(app: FastAPI) -> None:
+    """任意 handler 主动挂在 HTTPException 上的响应头都必须原样出现在响应里。
+
+    这是本波所有「补响应头」工作的地基：不透传 exc.headers，
+    401 的 WWW-Authenticate / 503 的 Retry-After 全会被静默吞掉。
+    """
+    from fastapi import HTTPException
+
+    @app.get("/test-exc-headers")
+    async def _raiser() -> dict[str, str]:
+        raise HTTPException(
+            status_code=418,
+            detail={"code": "GW_418_PROBE", "message": "teapot"},
+            headers={"X-Probe-Header": "kept", "Retry-After": "7"},
+        )
+
+    r = TestClient(app).get("/test-exc-headers", headers={"X-Caller-Service": "test"})
+    assert r.status_code == 418
+    assert r.headers["x-probe-header"] == "kept"
+    assert r.headers["retry-after"] == "7"
+    assert r.json()["error"]["code"] == "GW_418_PROBE"
+
+
+def test_http_exception_without_headers_still_works(app: FastAPI) -> None:
+    """exc.headers 为 None 时不得炸（HTTPException 默认就没有 headers）。"""
+    from fastapi import HTTPException
+
+    @app.get("/test-exc-no-headers")
+    async def _raiser() -> dict[str, str]:
+        raise HTTPException(status_code=418, detail={"code": "GW_418_PROBE", "message": "teapot"})
+
+    r = TestClient(app).get("/test-exc-no-headers", headers={"X-Caller-Service": "test"})
+    assert r.status_code == 418
+    assert r.json()["error"]["code"] == "GW_418_PROBE"

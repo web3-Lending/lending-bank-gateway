@@ -287,3 +287,37 @@ def test_api_version_exempt_from_s2s(monkeypatch: Any) -> None:
     r = client.get("/api/version")
     assert r.status_code == 200
     assert r.json()["data"]["releaseEnv"] == "test"
+
+
+# ── API-HTTP-006 + §7.4：503 必须带 Retry-After ───────────────────────────────
+
+
+def test_readyz_503_unwired_session_factory_has_retry_after(app: FastAPI) -> None:
+    """session_factory 未接线的 503 必须带 Retry-After，否则调用方只能空转重试。"""
+    app.state.session_factory = None
+    r = TestClient(app).get("/readyz")
+    assert r.status_code == 503
+    assert r.json()["error"]["code"] == "GW_503_READYZ"
+    assert int(r.headers["retry-after"]) > 0
+
+
+def test_readyz_503_db_probe_failure_has_retry_after(app: FastAPI) -> None:
+    """DB 探针失败的 503 同样必须带 Retry-After（两个 503 出口都要覆盖）。"""
+
+    @asynccontextmanager
+    async def _boom_session() -> Any:
+        raise RuntimeError("db down")
+        yield  # pragma: no cover
+
+    app.state.session_factory = _boom_session
+    r = TestClient(app).get("/readyz")
+    assert r.status_code == 503
+    assert r.json()["error"]["message"] == "db probe failed"
+    assert int(r.headers["retry-after"]) > 0
+
+
+def test_readyz_200_has_no_retry_after(app: FastAPI) -> None:
+    """对照：就绪时不带 Retry-After（否则调用方会误以为该退避）。"""
+    r = TestClient(app).get("/readyz")
+    assert r.status_code == 200
+    assert "retry-after" not in r.headers

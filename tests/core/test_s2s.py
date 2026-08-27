@@ -187,3 +187,121 @@ def test_per_service_does_not_leak_token_in_logs(caplog: pytest.LogCaptureFixtur
         c.post("/api/v1/x", headers={"X-Caller-Service": "svc-a", "X-S2S-Token": "super-secret"})
     assert "super-secret" not in caplog.text
     assert any("bad_per_service_token" in r.message for r in caplog.records)
+
+
+# ── API-HTTP-004：401 必须带 WWW-Authenticate（5 个 401 出口逐个钉住）────────────
+
+
+def _app_callback(api_key: str | None) -> FastAPI:
+    app = FastAPI()
+    app.add_middleware(
+        S2SMiddleware,
+        secret="sec",  # noqa: S106  # 测试用
+        exempt_paths={"/healthz"},
+        callback_paths={"/api/v1/callbacks/wedap/transactions"},
+        callback_api_key=api_key,
+    )
+    app.add_middleware(IdentifierMiddleware)
+
+    @app.post("/api/v1/callbacks/wedap/transactions")
+    async def cb() -> dict:  # type: ignore[misc]
+        return {"ok": True}
+
+    return app
+
+
+def test_401_missing_caller_has_www_authenticate() -> None:
+    """出口 1/5：缺 X-Caller-Service。"""
+    r = TestClient(_app("sec")).post("/api/v1/x")
+    assert r.status_code == 401
+    assert r.headers["www-authenticate"].startswith("S2S ")
+    assert 'realm="lending-bank-gateway"' in r.headers["www-authenticate"]
+
+
+def test_401_bad_shared_secret_has_www_authenticate() -> None:
+    """出口 2/5：共享 secret 不匹配。"""
+    r = TestClient(_app("sec")).post(
+        "/api/v1/x", headers={"X-Caller-Service": "lifecycle", "X-S2S-Token": "wrong"}
+    )
+    assert r.status_code == 401
+    assert r.headers["www-authenticate"].startswith("S2S ")
+
+
+def test_401_unknown_caller_has_www_authenticate() -> None:
+    """出口 3/5：白名单外的 caller。"""
+    r = TestClient(_app_with_callers("sec", {"lending-lifecycel"})).post(
+        "/api/v1/x", headers={"X-Caller-Service": "unknown-svc", "X-S2S-Token": "sec"}
+    )
+    assert r.status_code == 401
+    assert r.headers["www-authenticate"].startswith("S2S ")
+
+
+def test_401_bad_per_service_token_has_www_authenticate() -> None:
+    """出口 4/5：per-service 专属 token 不匹配。"""
+    r = TestClient(_app_per_service({"svc-a": "tok-a"})).post(
+        "/api/v1/x", headers={"X-Caller-Service": "svc-a", "X-S2S-Token": "WRONG"}
+    )
+    assert r.status_code == 401
+    assert r.headers["www-authenticate"].startswith("S2S ")
+
+
+def test_401_callback_bad_apikey_has_apikey_challenge() -> None:
+    """出口 5/5：wedap 入站回调 apikey 失败 → challenge 必须指向 apikey 而不是 S2S。
+
+    challenge 说错了等于告诉外部 wedap 去刷新一个它根本没有的凭证。
+    """
+    r = TestClient(_app_callback("right-key")).post(
+        "/api/v1/callbacks/wedap/transactions", headers={"apikey": "wrong-key"}
+    )
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "GW_401_CALLBACK"
+    assert r.headers["www-authenticate"].startswith("ApiKey ")
+
+
+def test_callback_valid_apikey_passes_without_challenge() -> None:
+    """对照：apikey 正确时放行，且不带 WWW-Authenticate。"""
+    r = TestClient(_app_callback("right-key")).post(
+        "/api/v1/callbacks/wedap/transactions", headers={"apikey": "right-key"}
+    )
+    assert r.status_code == 200
+    assert "www-authenticate" not in r.headers
+
+
+# ── API-HTTP-013：401 响应体 trace_id 必须与响应头同源 ─────────────────────────
+
+
+def test_401_trace_id_matches_response_header_when_caller_sends_none() -> None:
+    """调用方没带 X-Trace-Id 时，401 body 的 trace_id 不得再是固定字面量 "trc-s2s"。
+
+    此前所有这类 401 共用同一个假 trace_id，报障时无法定位到具体某次请求，
+    而日志里记的又是另一个值 —— API-HTTP-013 的关联性直接失效。
+    """
+    r = TestClient(_app("sec")).post("/api/v1/x")
+    assert r.status_code == 401
+    body_trace = r.json()["trace_id"]
+    assert body_trace == r.headers["x-trace-id"]
+    assert body_trace != "trc-s2s"
+    assert body_trace.startswith("trc-")
+
+
+def test_401_trace_id_unique_per_request() -> None:
+    """两次同样的匿名 401 必须拿到两个不同 trace_id（旧实现两次都是 "trc-s2s"）。"""
+    client = TestClient(_app("sec"))
+    first = client.post("/api/v1/x").json()["trace_id"]
+    second = client.post("/api/v1/x").json()["trace_id"]
+    assert first != second
+
+
+def test_401_trace_id_reuses_caller_supplied_value() -> None:
+    """调用方带了合规 X-Trace-Id 时仍然透传原值（链路不能被重签打断）。"""
+    r = TestClient(_app("sec")).post("/api/v1/x", headers={"X-Trace-Id": "trc-caller-001"})
+    assert r.json()["trace_id"] == "trc-caller-001"
+
+
+def test_401_hostile_trace_id_resigned_in_body() -> None:
+    """注入串不得经 401 响应体回显（s2s 也必须用过校验的 contextvar 值）。"""
+    r = TestClient(_app("sec")).post(
+        "/api/v1/x", headers={"X-Trace-Id": 'evil<script>"; DROP--'}
+    )
+    assert "script" not in r.text
+    assert r.json()["trace_id"] == r.headers["x-trace-id"]

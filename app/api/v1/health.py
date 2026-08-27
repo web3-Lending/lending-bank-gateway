@@ -19,6 +19,12 @@ router = APIRouter(tags=["health"])
 BUILD_TIME_FILE = Path("/srv/build_time.txt")
 GIT_SHA_FILE = Path("/srv/git_sha.txt")
 
+# API-HTTP-006 + §7.4「429/503 可计算等待时间时必须返回 Retry-After」。readyz 的两种
+# 失败（session_factory 未接线 / DB 探针失败）都由编排层在秒级恢复，给一个保守固定
+# 退避值，让调用方按它退避而不是空转打满重试。
+READYZ_RETRY_AFTER_SECONDS = "5"
+_READYZ_503_HEADERS = {"Retry-After": READYZ_RETRY_AFTER_SECONDS}
+
 
 def _read_stamp(path: Path) -> str:
     try:
@@ -103,6 +109,7 @@ async def readyz(request: Request) -> Any:
         return JSONResponse(
             err("GW_503_READYZ", "session_factory not wired", trace_id=trace_id),
             status_code=503,
+            headers=_READYZ_503_HEADERS,
         )
     else:
         try:
@@ -114,6 +121,7 @@ async def readyz(request: Request) -> Any:
             return JSONResponse(
                 err("GW_503_READYZ", "db probe failed", trace_id=trace_id),
                 status_code=503,
+                headers=_READYZ_503_HEADERS,
             )
     return ok(checks, trace_id=trace_id)
 

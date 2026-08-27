@@ -5,9 +5,31 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from app.core.context import current_ids
 from app.core.envelope import err
 
 logger = logging.getLogger(__name__)
+
+# API-HTTP-004 + §7.4：401 必须带适用的 `WWW-Authenticate`。本仓不用
+# `Authorization: Bearer`——凭证载体是 `X-S2S-Token`（lending 服务间）与 `apikey`
+# （wedap 入站回调），challenge 用与之对应的 scheme 名并点名 header，调用方据此
+# 知道该刷新哪一种凭证，而不是盲目重试。
+_WWW_AUTHENTICATE_S2S = 'S2S realm="lending-bank-gateway", header="X-S2S-Token"'
+_WWW_AUTHENTICATE_APIKEY = 'ApiKey realm="lending-bank-gateway", header="apikey"'
+
+
+def _unauthorized(code: str, message: str, *, trace_id: str, challenge: str) -> JSONResponse:
+    """构造 401：统一带 `WWW-Authenticate`。
+
+    收成一个出口而不是 5 处各写各的——漏一处就等于该条认证路径静默不合规，
+    而 401 分散在 callback / caller / per-service token / 共享 secret / 白名单
+    五条互不相邻的分支上。
+    """
+    return JSONResponse(
+        err(code, message, trace_id=trace_id),
+        status_code=401,
+        headers={"WWW-Authenticate": challenge},
+    )
 
 
 def parse_caller_tokens(raw: str) -> dict[str, str] | None:
@@ -63,7 +85,10 @@ class S2SMiddleware(BaseHTTPMiddleware):
         path = request.url.path.rstrip("/") or "/"
         if path in self._exempt:
             return await call_next(request)
-        trace_id = request.headers.get("X-Trace-Id", "trc-s2s")
+        # API-HTTP-013：必须与 IdentifierMiddleware（本中间件的外层）产出的、已过校验
+        # 的 trace_id 同源。此前读原始 header 并回落字面量 "trc-s2s"，导致所有未携带
+        # X-Trace-Id 的 401 响应体共用同一个假 trace_id，与响应头和日志里的真值对不上。
+        trace_id = current_ids().trace_id
 
         # wedap→gateway 入站回调：用 apikey 认证（body 解析前，middleware 层），不走 S2S token。
         if path in self._callback_paths:
@@ -85,8 +110,11 @@ class S2SMiddleware(BaseHTTPMiddleware):
                     "invalid_or_missing_apikey",
                     trace_id,
                 )
-                return JSONResponse(
-                    err("GW_401_CALLBACK", "invalid or missing apikey", trace_id=trace_id), 401
+                return _unauthorized(
+                    "GW_401_CALLBACK",
+                    "invalid or missing apikey",
+                    trace_id=trace_id,
+                    challenge=_WWW_AUTHENTICATE_APIKEY,
                 )
             return await call_next(request)
 
@@ -98,8 +126,11 @@ class S2SMiddleware(BaseHTTPMiddleware):
                 "missing_caller_service",
                 trace_id,
             )
-            return JSONResponse(
-                err("GW_401_S2S", "missing X-Caller-Service", trace_id=trace_id), 401
+            return _unauthorized(
+                "GW_401_S2S",
+                "missing X-Caller-Service",
+                trace_id=trace_id,
+                challenge=_WWW_AUTHENTICATE_S2S,
             )
         token = request.headers.get("X-S2S-Token", "")
 
@@ -121,7 +152,12 @@ class S2SMiddleware(BaseHTTPMiddleware):
                         caller,
                         trace_id,
                     )
-                    return JSONResponse(err("GW_401_S2S", "bad s2s token", trace_id=trace_id), 401)
+                    return _unauthorized(
+                        "GW_401_S2S",
+                        "bad s2s token",
+                        trace_id=trace_id,
+                        challenge=_WWW_AUTHENTICATE_S2S,
+                    )
                 # token 已绑定 caller，无需再查白名单
                 request.state.s2s_token_bound = True
                 return await call_next(request)
@@ -135,7 +171,12 @@ class S2SMiddleware(BaseHTTPMiddleware):
                     "bad_s2s_token",
                     trace_id,
                 )
-                return JSONResponse(err("GW_401_S2S", "bad s2s token", trace_id=trace_id), 401)
+                return _unauthorized(
+                    "GW_401_S2S",
+                    "bad s2s token",
+                    trace_id=trace_id,
+                    challenge=_WWW_AUTHENTICATE_S2S,
+                )
         # caller 白名单校验（secret 通过后执行；白名单为空=不启用）
         if self._allowed_callers is not None and caller not in self._allowed_callers:
             logger.warning(
@@ -145,5 +186,10 @@ class S2SMiddleware(BaseHTTPMiddleware):
                 caller,
                 trace_id,
             )
-            return JSONResponse(err("GW_401_S2S", "unknown caller", trace_id=trace_id), 401)
+            return _unauthorized(
+                "GW_401_S2S",
+                "unknown caller",
+                trace_id=trace_id,
+                challenge=_WWW_AUTHENTICATE_S2S,
+            )
         return await call_next(request)

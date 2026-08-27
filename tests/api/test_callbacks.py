@@ -133,6 +133,59 @@ def test_missing_request_id_400(client: TestClient) -> None:
     assert r.json()["error"]["code"] == "GW_400_HEADER"
 
 
+def test_empty_request_id_400(client: TestClient) -> None:
+    """`X-Request-Id: `（存在但为空）→ 仍 400，不得被中间件代签成合法请求。
+
+    HTTP 语义上「header 存在且为空」等同「未提供」，origin/main 对两者都返 400
+    （`.get()` 分别给 None 与 ""，双双 falsy）。若中间件把空值重签成 `req-<uuid>`，
+    调用方 SDK 漏填 request id 时就不再快失败，而是由网关代签一个**每次都不同**的
+    随机值写进去重列 —— 幂等彻底失效。
+    """
+    h = {**HEADERS, "X-Request-Id": ""}
+    r = client.post("/api/v1/callbacks/wedap/transactions", json=BODY, headers=h)
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "GW_400_HEADER"
+
+
+@pytest.mark.parametrize(
+    "request_id",
+    [
+        "a" * 65,
+        "b" * 100,
+        "req/2026/06/11/abc123",
+        "req+abc+1234",
+        "req=abc=1234",
+    ],
+    ids=["65-chars", "100-chars", "slashes", "plus", "equals"],
+)
+def test_dedup_survives_unusual_request_id(client: TestClient, request_id: str) -> None:
+    """去重键必须逐字用调用方原值 —— 超长/含 `/ + =` 的 id 同样只摄取一次。
+
+    回归护栏（本波实测过的真实缺陷）：中间件若把这些值判成「畸形」重签为
+    `req-<uuid4>`，每次请求拿到的键都不同 → `uq_inbox_tenant_src_req` 永不命中 →
+    **同一笔银行回调被摄取两次**（inbox 2 行、after_ingest 调 2 次）。
+    这比撞 DB 列宽的 500 严重得多：500 吵闹可见，重复摄取静默且改账。
+
+    `callback_inbox.request_id` 是 String(128)，上面这些值全在 DDL 合法区间内。
+    """
+    spy = AsyncMock()
+    client.app.state.callback_after_ingest = spy  # type: ignore[union-attr]
+    h = {**HEADERS, "X-Request-Id": request_id}
+
+    r1 = client.post("/api/v1/callbacks/wedap/transactions", json=BODY, headers=h)
+    r2 = client.post("/api/v1/callbacks/wedap/transactions", json=BODY, headers=h)
+
+    assert r1.status_code == 200 and r1.json()["data"]["deduplicated"] is False
+    assert r2.status_code == 200, "第二次请求应被去重而非报错"
+    assert r2.json()["data"]["deduplicated"] is True, "去重失效：同一笔回调被当成新事件"
+
+    rows = asyncio.run(
+        _query_inbox_rows(client.app.state.engine, "OCBC")  # type: ignore[union-attr]
+    )
+    assert len(rows) == 1, f"inbox 落了 {len(rows)} 行，同一笔回调被重复摄取"
+    assert spy.await_count == 1, "after_ingest 被重复驱动"
+
+
 def test_cross_tenant_same_request_id_no_dedup(client: TestClient) -> None:
     """不同 tenant 相同 request_id → 两行，不去重（三元组含 tenant_id）。"""
     r1 = client.post("/api/v1/callbacks/wedap/transactions", json=BODY, headers=HEADERS)

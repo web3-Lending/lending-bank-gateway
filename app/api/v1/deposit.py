@@ -11,7 +11,7 @@ deposit/users 查询透传端点：
 
 所有端点均写 QueryAudit；balances/total 与 internal-accounts/info 额外写 BalanceSnapshot。
 脏余额数据（Decimal 解析失败）→ logger.warning 跳过该账户，不让查询整体失败。
-WedapError / httpx 超时 → 502 GW_502_UPSTREAM。
+WedapError / httpx 超时 / 上游非 2xx → 502 GW_502_UPSTREAM（受控文案，不回显上游内部码）。
 """
 
 import datetime as dt
@@ -45,9 +45,14 @@ async def _audited_passthrough(
 ) -> dict[str, Any]:
     """执行上游调用并写 QueryAudit 审计行。
 
-    异常映射：
-    - httpx.TimeoutException / httpx.TransportError → 502 GW_502_UPSTREAM (unreachable)
-    - WedapError（上游业务 code != 200）→ 502 GW_502_UPSTREAM + "wedap code <code>"
+    异常映射（三类上游失败统一 502 GW_502_UPSTREAM，文案受控）：
+    - httpx.TimeoutException / httpx.TransportError → "wedap unreachable"
+    - httpx.HTTPStatusError（上游非 2xx）→ "upstream request failed"
+    - WedapError（上游业务 code != 200）→ "upstream rejected the request"
+
+    API-HTTP-012 + §2.3 GATEWAY_BFF：**上游 HTTP 状态码与供应商业务码一律不回显给调用方**
+    （曾经的 `wedap http 401` / `wedap code 404` 把银行侧内部码原样吐出）。原值只写
+    logger.warning，运维凭 trace_id 在日志里查，调用方拿不到银行内部码。
     """
     try:
         data = await call()
@@ -57,17 +62,26 @@ async def _audited_passthrough(
             detail={"code": "GW_502_UPSTREAM", "message": "wedap unreachable"},
         ) from exc
     except httpx.HTTPStatusError as exc:
+        logger.warning(
+            "wedap upstream http error: endpoint=%s upstream_status=%s trace_id=%s",
+            endpoint,
+            exc.response.status_code,
+            hdr["trace_id"],
+        )
         raise HTTPException(
             502,
-            detail={
-                "code": "GW_502_UPSTREAM",
-                "message": f"wedap http {exc.response.status_code}",
-            },
+            detail={"code": "GW_502_UPSTREAM", "message": "upstream request failed"},
         ) from exc
     except WedapError as exc:
+        logger.warning(
+            "wedap upstream business rejection: endpoint=%s upstream_code=%s trace_id=%s",
+            endpoint,
+            exc.code,
+            hdr["trace_id"],
+        )
         raise HTTPException(
             502,
-            detail={"code": "GW_502_UPSTREAM", "message": f"wedap code {exc.code}"},
+            detail={"code": "GW_502_UPSTREAM", "message": "upstream rejected the request"},
         ) from exc
 
     h = hashlib.sha256(repr(sorted(params.items())).encode()).hexdigest()

@@ -159,6 +159,28 @@ def test_bad_request_id_format_400(client: TestClient) -> None:
     assert r.json()["error"]["code"] == "GW_400_VALIDATION"
 
 
+def test_long_but_legal_request_id_still_200(client: TestClient) -> None:
+    """超过 64 字符但格式合法的 recon-result id 必须仍是 200，不得被重签成 400。
+
+    回归护栏：`recon_result_task.request_id` 是 String(128)，DDL 明确允许 65–128。
+    中间件若按 64 收窄并把超长值重签成 `req-<uuid4>`，就不再匹配
+    `^recon-result-.+-v\d+$` → `_parse_request_id` 返 None → 端点从 200 变 400。
+    当前 lending-recon 的 taskNo 约 35 字符，故这是潜伏态：taskNo 一变长就爆。
+    """
+    task_no = "RECON-OCBC-20260604-" + "X" * 40
+    long_request_id = f"recon-result-{task_no}-v2"
+    assert 64 < len(long_request_id) <= 128, "用例前提：长度落在 65–128 区间"
+
+    r = client.post(
+        "/api/v1/recon/notify",
+        json=BODY,
+        headers={**HEADERS, "X-Request-Id": long_request_id},
+    )
+    assert r.status_code == 200, f"长但合法的 request_id 被拒：{r.json()}"
+    assert r.json()["data"]["taskNo"] == task_no
+    assert r.json()["data"]["version"] == 2
+
+
 # ---------------------------------------------------------------------------
 # 4. 坏 body 参数化 → 400
 # ---------------------------------------------------------------------------

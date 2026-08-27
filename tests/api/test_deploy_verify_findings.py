@@ -87,20 +87,30 @@ def status_client() -> TestClient:
 # ── 缺陷 1：deposit 端点 HTTPStatusError → 502 ────────────────────────────────
 
 
-def test_deposit_upstream_401_returns_502(deposit_client: TestClient) -> None:
-    """上游 wedap 返回 401 → deposit 端点应返回 502 GW_502_UPSTREAM（不是 500）。"""
+def test_deposit_upstream_401_returns_502(
+    deposit_client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """上游 wedap 返回 401 → 502 GW_502_UPSTREAM，且**不回显上游状态码**。
+
+    API-HTTP-012 + §2.3：上游内部状态码只进日志，不进响应体（此前响应体是
+    `wedap http 401`，把银行侧鉴权状态直接吐给了调用方）。
+    """
     deposit_client.app.state.wedap.get_deposit_balance_total.side_effect = (  # type: ignore[union-attr]
         _make_http_status_error(401)
     )
-    r = deposit_client.get(
-        "/api/v1/deposit/balances/total",
-        params={"userId": "U1"},
-        headers=HEADERS,
-    )
+    with caplog.at_level("WARNING", logger="app.api.v1.deposit"):
+        r = deposit_client.get(
+            "/api/v1/deposit/balances/total",
+            params={"userId": "U1"},
+            headers=HEADERS,
+        )
     assert r.status_code == 502
     body = r.json()
     assert body["error"]["code"] == "GW_502_UPSTREAM"
-    assert "401" in body["error"]["message"]
+    assert body["error"]["message"] == "upstream request failed"
+    assert "401" not in body["error"]["message"]
+    # 原值仍可追查：只在服务端日志里
+    assert any("upstream_status=401" in rec.message for rec in caplog.records)
 
 
 def test_deposit_upstream_503_returns_502(deposit_client: TestClient) -> None:
@@ -116,8 +126,9 @@ def test_deposit_upstream_503_returns_502(deposit_client: TestClient) -> None:
     assert r.status_code == 502
     body = r.json()
     assert body["error"]["code"] == "GW_502_UPSTREAM"
-    # 消息中含 HTTP 状态码，不泄露 wedap 响应体
-    assert "503" in body["error"]["message"]
+    # 受控文案：既不泄露 wedap 响应体，也不泄露上游 HTTP 状态码
+    assert body["error"]["message"] == "upstream request failed"
+    assert "503" not in body["error"]["message"]
 
 
 # ── 缺陷 1：/status 端点 HTTPStatusError → 200 降级 ──────────────────────────

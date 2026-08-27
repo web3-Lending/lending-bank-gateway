@@ -1,8 +1,10 @@
 import asyncio
 import json
 import logging
+import re
 import sys
 import traceback
+import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -28,7 +30,13 @@ from app.api.v1.wedap_import_enqueue import router as wedap_import_enqueue_route
 from app.clients.s3 import S3FileClient
 from app.clients.wedap import WedapClient
 from app.core.config import Settings, get_settings
-from app.core.context import IdentifierMiddleware, current_ids
+from app.core.context import (
+    IdentifierMiddleware,
+    RequestTargetLimitMiddleware,
+    apply_no_store,
+    current_ids,
+    sanitize_correlation_id,
+)
 from app.core.db import build_engine, build_session_factory
 from app.core.envelope import err
 from app.core.s2s import S2SMiddleware, parse_caller_tokens
@@ -57,19 +65,47 @@ class _JsonLogFormatter(logging.Formatter):
         try:
             from app.core.context import current_ids
 
-            trace_id = current_ids().trace_id
+            ids = current_ids()
+            trace_id = ids.trace_id
+            # 回显给调用方的那个受控 X-Request-Id 必须同时落日志，否则调用方拿着
+            # 响应头来报障时服务端零命中，§11.1 的「响应↔日志回链」只完成 trace 一半。
+            request_id = ids.safe_request_id
         except Exception:
             trace_id = "trc-none"
+            request_id = "req-none"
         entry: dict[str, object] = {
             "time": _log_time(record.created),
             "level": record.levelname,
             "logger": record.name,
             "msg": record.getMessage(),
             "trace_id": trace_id,
+            "request_id": request_id,
         }
         if record.exc_info and record.exc_info[0] is not None:
             entry["exception"] = traceback.format_exception(*record.exc_info)
         return json.dumps(entry, ensure_ascii=False)
+
+
+# §8.5：日志同样禁止记录完整 PII 与未声明 query 原值。httpx 的 INFO 行形如
+# `HTTP Request: GET http://host/path?userId=U1 "HTTP/1.1 200 OK"`，会把上游 URL 的
+# query 原值（deposit/users 系列含 userId 等 PII）写进 stdout。
+_URL_QUERY_RE = re.compile(r'(?P<url>https?://[^\s"?]*)\?[^\s"]*')
+
+
+class _QueryRedactingFilter(logging.Filter):
+    """把日志文本里任意 http(s) URL 的 query 段整体替换为 `?<redacted>`。
+
+    保留 method / host / path / 上游状态这些排障必需信息，只抹掉参数值——比整体
+    把 httpx logger 降级到 WARNING 更可用：上游调用仍然可见，PII 不再落盘。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        redacted = _URL_QUERY_RE.sub(r"\g<url>?<redacted>", message)
+        if redacted != message:
+            record.msg = redacted
+            record.args = ()
+        return True
 
 
 def _configure_logging(level: str) -> None:
@@ -93,6 +129,7 @@ def _configure_logging(level: str) -> None:
     if not _logging_configured:
         handler = logging.StreamHandler(sys.stdout)
         handler.setFormatter(_JsonLogFormatter())
+        handler.addFilter(_QueryRedactingFilter())
         root.addHandler(handler)
         _logging_configured = True
 
@@ -106,8 +143,25 @@ def _resolve_trace_id(request: Request) -> str:
     """
     trace_id = current_ids().trace_id
     if trace_id == "trc-none":
-        trace_id = request.headers.get("X-Trace-Id") or "trc-none"
+        # 回退读的是原始 header——与 IdentifierMiddleware 走同一把校验/重签，
+        # 否则畸形值会绕过中间件从这条回退路径进响应体。
+        trace_id = sanitize_correlation_id(request.headers.get("X-Trace-Id"), prefix="trc") or (
+            "trc-none"
+        )
     return trace_id
+
+
+def _resolve_safe_request_id(request: Request) -> str:
+    """解析当前请求的受控回显 X-Request-Id（§7.4「所有响应」）。
+
+    唯一调用方 `_generic_exception_handler` 挂在 ServerErrorMiddleware 上——它在所有
+    用户中间件之外，异常冒泡出去时 IdentifierMiddleware 的 `finally` 已 reset 掉
+    contextvar，所以这里**不读 contextvar**（读到的必然是默认值），直接回退读原始
+    header 并走与中间件同一把校验/重签，仍无则新签——保证 500 也带得回关联 id。
+    """
+    return sanitize_correlation_id(request.headers.get("X-Request-Id"), prefix="req") or (
+        f"req-{uuid.uuid4().hex}"
+    )
 
 
 async def _http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
@@ -130,6 +184,10 @@ async def _http_exception_handler(request: Request, exc: StarletteHTTPException)
     return JSONResponse(
         err(code, message, trace_id=trace_id, details=extra or None),
         status_code=exc.status_code,
+        # API-HTTP-004/006：必须透传 exc.headers。Starlette 的 method-mismatch 405 自带
+        # `Allow`，认证类 HTTPException 自带 `WWW-Authenticate`——本 handler 一旦丢弃
+        # exc.headers，等于在全局把这些强制响应头删掉，且任何下游 handler 都补不回来。
+        headers=exc.headers,
     )
 
 
@@ -152,11 +210,23 @@ async def _validation_exception_handler(
 
 async def _generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     trace_id = _resolve_trace_id(request)
-    logger.exception("unhandled exception trace_id=%s", trace_id)
-    return JSONResponse(
+    safe_request_id = _resolve_safe_request_id(request)
+    # 两个 id 直接写进 message：本 handler 运行时 contextvar 已 reset，
+    # _JsonLogFormatter 的 trace_id/request_id 字段只会是默认值，对不上响应头。
+    logger.exception("unhandled exception trace_id=%s request_id=%s", trace_id, safe_request_id)
+    response = JSONResponse(
         err("GW_500_INTERNAL", "internal error", trace_id=trace_id),
         status_code=500,
     )
+    # 本 handler 挂在 ServerErrorMiddleware 上——它在所有用户中间件之外，响应不回经
+    # IdentifierMiddleware，所以 no-store 与两个关联 id 头都必须在这里自己补
+    # （API-HTTP-015 错误响应默认 no-store；§7.4「所有响应必须返回受控 X-Request-Id」
+    # + §11.1 响应↔日志回链）。未处理异常恰恰是调用方一定会来报障的那一类响应，
+    # 少了关联 id 就没法把这次响应对上服务端日志。
+    apply_no_store(response)
+    response.headers["X-Trace-Id"] = trace_id
+    response.headers["X-Request-Id"] = safe_request_id
+    return response
 
 
 async def _after_ingest(
@@ -424,6 +494,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         },
         callback_api_key=settings.wedap_callback_api_key,
     )
+    # §7.2.1 顺序表第 1 步：raw request-target 预算先于认证与路由裁决，
+    # 故装在 S2S 之外；又在 Identifier 之内，使 414 响应仍带受控 id 与 no-store。
+    app.add_middleware(RequestTargetLimitMiddleware)
     app.add_middleware(IdentifierMiddleware)
     engine = build_engine(
         settings.db_url,

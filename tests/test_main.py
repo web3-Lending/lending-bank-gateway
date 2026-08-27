@@ -325,6 +325,8 @@ class TestWorkerLogging:
         assert payload["msg"] == "probe"
         assert "trace_id" in payload
         assert "traceId" not in payload
+        assert "request_id" in payload
+        assert "requestId" not in payload
 
     def test_json_formatter_includes_exception(self) -> None:
         """record 带 exc_info 时 JSON 含 exception 栈。"""
@@ -362,6 +364,54 @@ class TestWorkerLogging:
         rec = logging.LogRecord("gw", logging.INFO, __file__, 0, "x", None, None)
         payload = json.loads(handler.format(rec))
         assert payload["trace_id"] == "trc-none"
+        assert payload["request_id"] == "req-none"
+
+    def test_log_request_id_matches_response_header(self) -> None:
+        """回给调用方的受控 X-Request-Id 必须同值出现在结构化日志里。
+
+        §11.1 要求「响应、结构化日志和审计事件必须通过受控 requestId 和 traceId 回链」。
+        若 formatter 不输出 request_id，那个回给调用方的值在服务端**零命中**——
+        调用方拿着响应头来报障时根本查不到对应日志行，回链只完成 trace 一半。
+
+        两种输入都要覆盖：调用方传了合规值（回显原值）、以及完全没传（网关新签）。
+        """
+        import io
+        import json
+
+        from fastapi.testclient import TestClient
+
+        self._reset_logging()
+        app = create_app()
+
+        probe_logger = logging.getLogger("gw.reqid.probe")
+        buf = io.StringIO()
+        handler = logging.StreamHandler(buf)
+        handler.setFormatter(self._stdout_handlers()[0].formatter)
+        probe_logger.addHandler(handler)
+        probe_logger.setLevel(logging.INFO)
+        probe_logger.propagate = False
+
+        @app.get("/test-log-reqid")
+        async def _probe() -> dict[str, str]:
+            probe_logger.info("probe line")
+            return {"ok": "1"}
+
+        client = TestClient(app)
+
+        # (a) 调用方传了合规值 → 日志与响应头同值
+        r = client.get(
+            "/test-log-reqid",
+            headers={"X-Caller-Service": "test", "X-Request-Id": "req-log-1"},
+        )
+        logged = json.loads(buf.getvalue().strip().splitlines()[-1])
+        assert r.headers["x-request-id"] == "req-log-1"
+        assert logged["request_id"] == r.headers["x-request-id"]
+
+        # (b) 没传 → 网关新签的那个值同样要落日志，否则报障查不到
+        r2 = client.get("/test-log-reqid", headers={"X-Caller-Service": "test"})
+        logged2 = json.loads(buf.getvalue().strip().splitlines()[-1])
+        assert r2.headers["x-request-id"].startswith("req-")
+        assert logged2["request_id"] == r2.headers["x-request-id"]
 
 
 def test_lifespan_wedap_delivery_worker_started(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -570,3 +620,83 @@ def test_settings_empty_env_string_normalizes_to_none(monkeypatch) -> None:
 
     monkeypatch.setenv("GW_S3_ENDPOINT_URL", "http://minio:9000")
     assert Settings(env="test").s3_endpoint_url == "http://minio:9000"
+
+
+# ── §8.5 / API-HTTP-012：日志不得记录未声明 query 原值与完整 PII ────────────────
+
+
+class TestQueryRedactingFilter:
+    """httpx 的 INFO 行会把上游 URL 连 query 原值写进 stdout。
+
+    实证（docker logs lending-bank-gateway）：
+    `HTTP Request: GET http://lending_baffle_app:8021/api/v1/users/info?userId=U1 "HTTP/1.1 401 …"`
+    —— `users/info` / `deposit/*` 的 query 带 userId、账号等 PII，§8.5 明确禁止落盘。
+    这里抹 query 而不是把 httpx logger 整体降级：method/host/path/上游状态是排障刚需，
+    降级会把它们一起弄丢。
+    """
+
+    @staticmethod
+    def _record(msg: str, *args: object) -> logging.LogRecord:
+        return logging.LogRecord("httpx", logging.INFO, __file__, 1, msg, args, None)
+
+    def test_query_value_redacted_path_and_status_kept(self) -> None:
+        from app.main import _QueryRedactingFilter
+
+        record = self._record(
+            "HTTP Request: GET http://baffle:8021/api/v1/users/info?userId=U1&idNo=A123 "
+            '"HTTP/1.1 200 OK"'
+        )
+        assert _QueryRedactingFilter().filter(record) is True
+        message = record.getMessage()
+        assert "userId=U1" not in message and "A123" not in message
+        assert "?<redacted>" in message
+        # 排障必需信息仍在
+        assert "http://baffle:8021/api/v1/users/info" in message
+        assert "200 OK" in message
+
+    def test_extra_question_marks_do_not_leak_head_of_query(self) -> None:
+        """query 里再出现 `?` 时不得只抹掉最后一段——前半段同样是原值。"""
+        from app.main import _QueryRedactingFilter
+
+        record = self._record('HTTP Request: GET http://baffle/x?userId=U1?extra=2 "HTTP/1.1 200"')
+        _QueryRedactingFilter().filter(record)
+        assert "userId=U1" not in record.getMessage()
+        assert "extra=2" not in record.getMessage()
+
+    def test_multiple_urls_all_redacted(self) -> None:
+        from app.main import _QueryRedactingFilter
+
+        record = self._record("retry http://a/p?k=1 then http://b/q?k=2")
+        _QueryRedactingFilter().filter(record)
+        message = record.getMessage()
+        assert "k=1" not in message and "k=2" not in message
+        assert message.count("?<redacted>") == 2
+
+    def test_message_without_query_is_untouched(self) -> None:
+        """无 query 的日志行原样保留（含 %-格式化参数不能被吃掉）。"""
+        from app.main import _QueryRedactingFilter
+
+        record = self._record("worker started name=%s", "outbox")
+        assert _QueryRedactingFilter().filter(record) is True
+        assert record.getMessage() == "worker started name=outbox"
+        assert record.args == ("outbox",)
+
+    def test_url_without_query_is_untouched(self) -> None:
+        from app.main import _QueryRedactingFilter
+
+        record = self._record('HTTP Request: POST http://baffle:8021/api/v1/x "HTTP/1.1 200 OK"')
+        _QueryRedactingFilter().filter(record)
+        assert record.getMessage().endswith('"HTTP/1.1 200 OK"')
+        assert "redacted" not in record.getMessage()
+
+    def test_filter_installed_on_stdout_handler(self) -> None:
+        """回归护栏：filter 必须真的挂在 create_app 装的 stdout handler 上。"""
+        from app.main import _QueryRedactingFilter
+
+        TestWorkerLogging._reset_logging()
+        create_app()
+        handlers = TestWorkerLogging._stdout_handlers()
+        assert handlers
+        assert any(isinstance(f, _QueryRedactingFilter) for h in handlers for f in h.filters), (
+            "stdout handler 上没有 query 脱敏 filter，httpx 的 PII 会直接落 docker logs"
+        )
