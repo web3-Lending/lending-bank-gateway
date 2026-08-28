@@ -19,7 +19,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.clients.wedap import WedapError
 from app.domain.biz_seq import validate_biz_seq_no
-from app.domain.states import IllegalTransition, OrderStatus, assert_transition
+from app.domain.money_write import money_write_fields
+from app.domain.states import (
+    IllegalTransition,
+    OrderStatus,
+    assert_transition,
+    is_door_reject_http_status,
+)
 from app.models.txn import BankTxnOrder
 from app.services.audit import write_audit
 from app.services.idempotency import record_response
@@ -101,13 +107,18 @@ async def submit_reversal(
             "txnStatus": raw_txn_status if isinstance(raw_txn_status, str) else "REVERSED",
             "bizSeqNo": req.biz_seq_no,
         }
+        # 同步成功路径不看证据（v2.2 合法组合表首行：outcome 省略）
+        no_effect_evidence = False
     except (httpx.TimeoutException, httpx.TransportError):
         new_status = OrderStatus.RESULT_UNKNOWN
         response = {"txnStatus": "RESULT_UNKNOWN", "bizSeqNo": req.biz_seq_no}
+        # 冲正指令可能已到达 wedap（§9.3）：零影响无从证明 → UNKNOWN 去查单
+        no_effect_evidence = False
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code >= 500:
             new_status = OrderStatus.RESULT_UNKNOWN
             response = {"txnStatus": "RESULT_UNKNOWN", "bizSeqNo": req.biz_seq_no}
+            no_effect_evidence = False
         else:
             new_status = OrderStatus.FAILED
             response = {
@@ -115,6 +126,11 @@ async def submit_reversal(
                 "bizSeqNo": req.biz_seq_no,
                 "errorCode": f"HTTP_{exc.response.status_code}",
             }
+            # 门口拒绝，冲正指令未进 wedap 业务引擎：本地原单也没翻（见下方 SUCCEEDED
+            # 才 _reverse_original）→ 确证零影响，可标 NOT_APPLIED。
+            # **仅限在册状态**（同 submit_order）：408/409/429 这类可能已部分执行的 4xx
+            # 不在册 → 退 UNKNOWN 去查单。
+            no_effect_evidence = is_door_reject_http_status(exc.response.status_code)
     except WedapError as exc:
         new_status = OrderStatus.FAILED
         response = {
@@ -123,6 +139,10 @@ async def submit_reversal(
             "errorCode": exc.code,
             "errorMsg": exc.msg[:200],
         }
+        # 通用冲正同样没有在册业务码表（2026-08-28 复核 BLOCKER-1，与 submit_order 同修）：
+        # 只有 wedap 在 HTTP 层门口拒绝才算「原单未动」的证据；HTTP 200 响应体里的业务码
+        # （含 envelope 漂移的 code="None"）不算 → 退 UNKNOWN 去查单，绝不声称零影响。
+        no_effect_evidence = is_door_reject_http_status(exc.http_status)
 
     # 事务2：CAS 推进 RVSL + 原单翻转 + record_response
     assert_transition(OrderStatus.ACCEPTED, new_status)
@@ -171,6 +191,16 @@ async def submit_reversal(
             # 同 submit_order：orderStatus = CAS 后 RVSL 单真实状态，record_response 前
             # 写入 → 随 first_response 冻结，幂等重放一致。
             response["orderStatus"] = str(rvsl.status)
+            # v2.2 §8.2 typed 字段（同 submit_order：以 CAS 后台账状态为准、写在
+            # record_response 前随 first_response 冻结）。冲正不走还款专用查单端点。
+            response.update(
+                money_write_fields(
+                    OrderStatus(rvsl.status),
+                    no_effect_evidence=no_effect_evidence,
+                    biz_seq_no=req.biz_seq_no,
+                    repayment=False,
+                )
+            )
             await record_response(
                 session,
                 tenant_id=req.tenant_id,

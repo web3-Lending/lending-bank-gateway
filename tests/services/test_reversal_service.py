@@ -400,3 +400,211 @@ def test_submit_reversal_null_txn_status_normalized(factory) -> None:  # type: i
         assert resp["orderStatus"] == "SUCCEEDED"
 
     asyncio.run(_run())
+
+
+# ── MONEY_WRITE typed 字段（API 规范 v2.2 §8.2）· 2026-08-28 纯增量 ──────────────
+
+
+def _typed(resp: dict) -> tuple:  # type: ignore[type-arg]
+    return (
+        resp.get("outcome"),
+        resp.get("operationStatus"),
+        resp.get("retryPolicy"),
+        resp.get("resubmitAllowed"),
+    )
+
+
+def test_reversal_typed_fields_sync_success(factory) -> None:  # type: ignore[no-untyped-def]
+    """冲正指令受理成功（RVSL SUCCEEDED）：outcome 省略 + SUCCEEDED/NEVER + 查单地址成对。
+
+    冲正**不是**还款，statusUrl 必须走通用查单端点。
+    """
+
+    async def _run() -> None:
+        await _seed_succeeded_collect(factory, "CLT-TYPED-OK")
+        wedap_reverse = AsyncMock(return_value={"txnStatus": "REVERSED"})
+        resp = await submit_reversal(
+            factory,
+            wedap_reverse=wedap_reverse,
+            req=_req("RVSL-TYPED-OK"),
+            ori_biz_seq_no="CLT-TYPED-OK",
+        )
+        assert "outcome" not in resp
+        assert _typed(resp)[1:] == ("SUCCEEDED", "NEVER", False)
+        assert resp["operationId"] == "RVSL-TYPED-OK"
+        assert resp["statusUrl"] == "/api/v1/bank-funds/status?bizSeqNo=RVSL-TYPED-OK"
+
+    asyncio.run(_run())
+
+
+def test_reversal_typed_fields_timeout_is_unknown(factory) -> None:  # type: ignore[no-untyped-def]
+    """冲正超时：指令可能已到 wedap → UNKNOWN 去查单，绝不 NOT_APPLIED。"""
+
+    async def _run() -> None:
+        await _seed_succeeded_collect(factory, "CLT-TYPED-TO")
+        wedap_reverse = AsyncMock(side_effect=httpx.ConnectTimeout("t"))
+        resp = await submit_reversal(
+            factory,
+            wedap_reverse=wedap_reverse,
+            req=_req("RVSL-TYPED-TO"),
+            ori_biz_seq_no="CLT-TYPED-TO",
+        )
+        assert _typed(resp) == ("UNKNOWN", "RECONCILING", "POLL_STATUS", False)
+
+    asyncio.run(_run())
+
+
+def test_reversal_typed_fields_5xx_is_unknown(factory) -> None:  # type: ignore[no-untyped-def]
+    """上游 5xx：结果未知 → UNKNOWN。"""
+
+    async def _run() -> None:
+        await _seed_succeeded_collect(factory, "CLT-TYPED-5XX")
+        wedap_reverse = AsyncMock(
+            side_effect=httpx.HTTPStatusError(
+                "boom",
+                request=httpx.Request("POST", "http://x"),
+                response=httpx.Response(502),
+            )
+        )
+        resp = await submit_reversal(
+            factory,
+            wedap_reverse=wedap_reverse,
+            req=_req("RVSL-TYPED-5XX"),
+            ori_biz_seq_no="CLT-TYPED-5XX",
+        )
+        assert _typed(resp) == ("UNKNOWN", "RECONCILING", "POLL_STATUS", False)
+
+    asyncio.run(_run())
+
+
+def test_reversal_typed_fields_business_reject_is_not_applied(factory) -> None:  # type: ignore[no-untyped-def]
+    """wedap 在 HTTP 4xx 上结构化拒绝：门口拒绝、原单也没翻 → 确证零影响。"""
+
+    async def _run() -> None:
+        await _seed_succeeded_collect(factory, "CLT-TYPED-ERR")
+        wedap_reverse = AsyncMock(
+            side_effect=WedapError("BANK-313", "原交易金额不符", http_status=422)
+        )
+        resp = await submit_reversal(
+            factory,
+            wedap_reverse=wedap_reverse,
+            req=_req("RVSL-TYPED-ERR"),
+            ori_biz_seq_no="CLT-TYPED-ERR",
+        )
+        assert _typed(resp) == ("NOT_APPLIED", "REJECTED", "CORRECT_AND_NEW_INTENT", False)
+        async with factory() as s:
+            ori = (
+                await s.execute(
+                    select(BankTxnOrder).where(BankTxnOrder.biz_seq_no == "CLT-TYPED-ERR")
+                )
+            ).scalar_one()
+        assert ori.status == OrderStatus.SUCCEEDED  # 原单未翻 = NOT_APPLIED 的事实依据
+
+    asyncio.run(_run())
+
+
+def test_reversal_typed_fields_business_code_on_200_is_unknown(factory) -> None:  # type: ignore[no-untyped-def]
+    """**BLOCKER-1 回归（冲正侧）**：HTTP 200 响应体里的业务码不是零影响证据 → UNKNOWN。
+
+    通用冲正同样没有在册业务码表；`_unwrap` 在 envelope 漂移时抛的 `code="None"` 也走这条
+    分支，判 NOT_APPLIED 会让上游据此回滚/换新键重发。
+    """
+
+    async def _run() -> None:
+        await _seed_succeeded_collect(factory, "CLT-TYPED-C200")
+        wedap_reverse = AsyncMock(side_effect=WedapError("None", "", http_status=200))
+        resp = await submit_reversal(
+            factory,
+            wedap_reverse=wedap_reverse,
+            req=_req("RVSL-TYPED-C200"),
+            ori_biz_seq_no="CLT-TYPED-C200",
+        )
+        assert resp["orderStatus"] == "FAILED"  # 台账终态不变（既有行为）
+        assert _typed(resp) == ("UNKNOWN", "RECONCILING", "POLL_STATUS", False)
+
+    asyncio.run(_run())
+
+
+def test_reversal_typed_fields_409_is_unknown(factory) -> None:  # type: ignore[no-untyped-def]
+    """未在册的 4xx（409）不是门口拒绝证据 → UNKNOWN 去查单。"""
+
+    async def _run() -> None:
+        await _seed_succeeded_collect(factory, "CLT-TYPED-409")
+        wedap_reverse = AsyncMock(
+            side_effect=httpx.HTTPStatusError(
+                "conflict",
+                request=httpx.Request("POST", "http://x"),
+                response=httpx.Response(409),
+            )
+        )
+        resp = await submit_reversal(
+            factory,
+            wedap_reverse=wedap_reverse,
+            req=_req("RVSL-TYPED-409"),
+            ori_biz_seq_no="CLT-TYPED-409",
+        )
+        assert _typed(resp) == ("UNKNOWN", "RECONCILING", "POLL_STATUS", False)
+
+    asyncio.run(_run())
+
+
+def test_reversal_typed_fields_follow_ledger_when_cas_skips(factory) -> None:  # type: ignore[no-untyped-def]
+    """CAS skip（tx1/tx2 之间 RVSL 单已被推到 REVERSED）：typed 字段跟台账，不跟本次 ack。
+
+    与 submit 侧同型（tests/services/test_sync_terminal_v2.py），钉死
+    `app/services/reversal.py` 里 `OrderStatus(rvsl.status)` 这条口径：改成跟本次外呼结果
+    就会对一笔台账已终结的单播报本次的 4xx 结论。
+    """
+
+    async def _run() -> None:
+        await _seed_succeeded_collect(factory, "CLT-TYPED-CAS")
+
+        async def _wedap_reverse(**kw):  # type: ignore[no-untyped-def]
+            # 模拟并发回调：在外呼（tx1 后 tx2 前）把 RVSL 单推到 REVERSED
+            async with factory() as s:
+                async with s.begin():
+                    rvsl = (
+                        await s.execute(
+                            select(BankTxnOrder).where(BankTxnOrder.biz_seq_no == "RVSL-TYPED-CAS")
+                        )
+                    ).scalar_one()
+                    rvsl.status = OrderStatus.REVERSED
+                    rvsl.finalized_at = dt.datetime.now(dt.UTC)
+                    rvsl.finalized_via = "CALLBACK"
+            raise WedapError("BANK-313", "原交易金额不符", http_status=422)
+
+        resp = await submit_reversal(
+            factory,
+            wedap_reverse=_wedap_reverse,
+            req=_req("RVSL-TYPED-CAS"),
+            ori_biz_seq_no="CLT-TYPED-CAS",
+        )
+        # 台账已 REVERSED（产生过资金影响再被撤回）→ 保守档 UNKNOWN；
+        # 若跟本次 ack（门口拒绝证据）会错报 NOT_APPLIED/REJECTED。
+        assert resp["orderStatus"] == "REVERSED"
+        assert _typed(resp) == ("UNKNOWN", "RECONCILING", "POLL_STATUS", False)
+
+    asyncio.run(_run())
+
+
+def test_reversal_typed_fields_4xx_is_not_applied(factory) -> None:  # type: ignore[no-untyped-def]
+    """门口拒绝的 4xx：冲正指令未进 wedap 业务引擎 → NOT_APPLIED。"""
+
+    async def _run() -> None:
+        await _seed_succeeded_collect(factory, "CLT-TYPED-4XX")
+        wedap_reverse = AsyncMock(
+            side_effect=httpx.HTTPStatusError(
+                "bad",
+                request=httpx.Request("POST", "http://x"),
+                response=httpx.Response(400),
+            )
+        )
+        resp = await submit_reversal(
+            factory,
+            wedap_reverse=wedap_reverse,
+            req=_req("RVSL-TYPED-4XX"),
+            ori_biz_seq_no="CLT-TYPED-4XX",
+        )
+        assert _typed(resp) == ("NOT_APPLIED", "REJECTED", "CORRECT_AND_NEW_INTENT", False)
+
+    asyncio.run(_run())

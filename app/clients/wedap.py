@@ -43,10 +43,20 @@ ACCEPTED_BATCH_STATUS = frozenset({"ACCEPTED", "DUPLICATE_BATCH"})
 
 
 class WedapError(Exception):
-    def __init__(self, code: str, msg: str) -> None:
+    """wedap 业务失败。
+
+    ``http_status`` 是**证据强度的唯一结构化载体**（2026-08-28 独立复核 BLOCKER-1）：
+    同样一句「业务失败」，wedap 用 HTTP 4xx 在门口拒绝（请求未进业务引擎）与用 HTTP 200
+    的响应体里带非 200 业务码（已进引擎、语义由码表定义）是两档证据，不能都当「零资金
+    变动」。构造时不传（flow-import / 401 等自造场景）一律 ``None`` = 无 HTTP 层证据，
+    按最保守档处理（见 :func:`app.domain.states.is_door_reject_http_status`）。
+    """
+
+    def __init__(self, code: str, msg: str, *, http_status: int | None = None) -> None:
         super().__init__(f"wedap {code}: {msg}")
         self.code = code
         self.msg = msg
+        self.http_status = http_status
 
 
 def _error_text(body: dict[str, Any]) -> str:
@@ -175,11 +185,14 @@ class WedapClient:
             except ValueError:
                 raw = None
             if isinstance(raw, dict) and raw.get("code") is not None:
-                raise WedapError(str(raw["code"]), _error_text(raw))
+                raise WedapError(str(raw["code"]), _error_text(raw), http_status=r.status_code)
         r.raise_for_status()
         body: dict[str, Any] = r.json()
         if str(body.get("code")) != "200":
-            raise WedapError(str(body.get("code")), _error_text(body))
+            # 2xx 响应体里的非 200 业务码：**不带 http_status 的门口拒绝语义**——
+            # 顶层 code 缺失时 str(None)=="None" 也走这里（envelope 漂移），
+            # 绝不能被下游当成「确证零资金变动」。
+            raise WedapError(str(body.get("code")), _error_text(body), http_status=r.status_code)
         return dict(body.get("data") or {})
 
     async def submit_disbursement(

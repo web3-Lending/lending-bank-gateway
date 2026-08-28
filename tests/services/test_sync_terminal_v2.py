@@ -99,6 +99,13 @@ async def test_cas_skips_when_callback_already_advanced(factory) -> None:
     resp = await submit_order(factory, wedap_call=_wedap_call, req=_req())
     # 提交响应契约：CAS skip 时 orderStatus = 回调已聚合的更强态（非本次弱结果 SUBMITTED）
     assert resp["orderStatus"] == "SUCCEEDED"
+    # v2.2 typed 字段跟的是**同一个** CAS 后台账状态，不是本次 ack（`submit.py` 的
+    # `OrderStatus(order.status)`）。这行断言是该口径的唯一钉子：改成跟 ack 就会对一笔
+    # 台账已 SUCCEEDED（钱已出）的单播报本次弱结果——外呼若拿到确证拒绝更会变成
+    # outcome=NOT_APPLIED + CORRECT_AND_NEW_INTENT，调用方据此换新 bizSeqNo = 重复出款。
+    assert "outcome" not in resp
+    assert resp["operationStatus"] == "SUCCEEDED"
+    assert resp["retryPolicy"] == "NEVER"
     async with factory() as s:
         order = (await s.execute(select(BankTxnOrder))).scalar_one()
         # CAS skip：未被本次 PROCESSING/SUBMITTED 覆盖，仍是回调置的 SUCCEEDED

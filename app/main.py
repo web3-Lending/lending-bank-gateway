@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.api.deps import money_write_error_extra
 from app.api.v1 import callbacks
 from app.api.v1.admin_ops import router as admin_ops_router
 from app.api.v1.bank_funds import router as bank_funds_router
@@ -181,6 +182,9 @@ async def _http_exception_handler(request: Request, exc: StarletteHTTPException)
     else:
         code = f"GW_{exc.status_code}"
         message = str(detail)
+    # v2.2 §8.2：MONEY_WRITE 的写错误必须带 typed 字段（raise 点自带的同名键优先，
+    # 见 app/api/deps.money_write_error_extra 的分界线说明）。
+    extra = {**money_write_error_extra(request, exc.status_code), **extra}
     return JSONResponse(
         err(code, message, trace_id=trace_id, details=extra or None),
         status_code=exc.status_code,
@@ -202,7 +206,9 @@ async def _validation_exception_handler(
             "GW_422_VALIDATION",
             "request validation failed",
             trace_id=trace_id,
-            details={"errors": errors},
+            # schema 校验失败必然发生在进服务之前 → MONEY_WRITE 端点上是确证的
+            # 「未产生影响」（§8.2），普通端点这里恒为空 dict。
+            details={"errors": errors, **money_write_error_extra(request, 422)},
         ),
         status_code=422,
     )

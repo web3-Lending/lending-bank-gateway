@@ -603,8 +603,96 @@ def test_inflight_shape_representable_by_response_model() -> None:
     """
     from app.api.v1.loans import RepaymentAck
 
-    ack = RepaymentAck.model_validate(
-        {"txnStatus": "PROCESSING", "bizSeqNo": "RPY-1", "inFlight": True}
+    inflight = {
+        "txnStatus": "PROCESSING",
+        "bizSeqNo": "RPY-1",
+        "inFlight": True,
+        # v2.2 §8.2 typed 字段：durable operation 已在 dispatch 前落库，故 in-flight
+        # 一样给得出；outcome=PENDING（本路径不读 order 行，不知上游是否已受理）
+        "outcome": "PENDING",
+        "operationStatus": "PENDING",
+        "retryPolicy": "POLL_STATUS",
+        "resubmitAllowed": False,
+        "operationId": "RPY-1",
+        "statusUrl": "/api/v1/loans/p2p-repayments/RPY-1/status",
+    }
+    ack = RepaymentAck.model_validate(inflight)
+    dumped = ack.model_dump(exclude_unset=True, mode="json")
+    assert dumped == inflight
+
+
+# ── MONEY_WRITE typed 字段经 response_model 的线格式（v2.2 §8.2）──────────────────
+
+
+def test_repayment_typed_fields_survive_response_model(client: TestClient) -> None:
+    """typed 字段必须真的出现在**线格式**里。
+
+    模型漏声明任一字段时 FastAPI 会静默丢弃（response_model 过滤），服务层测试全绿而
+    调用方什么也拿不到——这正是 debtSettled 当年「只靠口头传达」的同一个坑。
+    还款的 statusUrl 必须指向专用查单端点。
+    """
+    r = client.post("/api/v1/loans/p2p-repayments", json=REPAY_BODY, headers=REPAY_HEADERS)
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["outcome"] == "ACCEPTED"  # 上游已受理，未入账
+    assert data["operationStatus"] == "PENDING"
+    assert data["retryPolicy"] == "POLL_STATUS"
+    assert data["resubmitAllowed"] is False
+    assert data["operationId"] == REPAY_BODY["bizSeqNo"]
+    assert data["statusUrl"] == (f"/api/v1/loans/p2p-repayments/{REPAY_BODY['bizSeqNo']}/status")
+
+
+def test_disbursement_wedap_5xx_typed_fields_say_unknown(client: TestClient) -> None:
+    """上游 5xx：线格式给 UNKNOWN/RECONCILING/POLL_STATUS —— 本仓「不判 FAILED」的资金
+    安全设计，第一次用 v2.2 词汇对调用方讲清楚。HTTP 状态码仍是 200（翻转是后续批次）。"""
+    client.app.state.wedap.submit_disbursement.side_effect = httpx.HTTPStatusError(  # type: ignore[union-attr]
+        "boom", request=httpx.Request("POST", "http://x"), response=httpx.Response(503)
     )
-    dumped = ack.model_dump(exclude_unset=True)
-    assert dumped == {"txnStatus": "PROCESSING", "bizSeqNo": "RPY-1", "inFlight": True}
+    r = client.post("/api/v1/loans/p2p-disbursements", json=BODY, headers=HEADERS)
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["txnStatus"] == "RESULT_UNKNOWN"
+    assert data["outcome"] == "UNKNOWN"
+    assert data["operationStatus"] == "RECONCILING"
+    assert data["retryPolicy"] == "POLL_STATUS"
+    assert data["resubmitAllowed"] is False
+    assert data["statusUrl"] == f"/api/v1/bank-funds/status?bizSeqNo={BODY['bizSeqNo']}"
+
+
+def test_disbursement_wedap_business_reject_typed_fields_say_not_applied(
+    client: TestClient,
+) -> None:
+    """wedap 在 HTTP 4xx 上结构化拒绝：NOT_APPLIED + CORRECT_AND_NEW_INTENT，不许同键重提。"""
+    client.app.state.wedap.submit_disbursement.side_effect = WedapError(  # type: ignore[union-attr]
+        "422", "可用余额不足", http_status=422
+    )
+    r = client.post("/api/v1/loans/p2p-disbursements", json=BODY, headers=HEADERS)
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["outcome"] == "NOT_APPLIED"
+    assert data["operationStatus"] == "REJECTED"
+    assert data["retryPolicy"] == "CORRECT_AND_NEW_INTENT"
+    assert data["resubmitAllowed"] is False
+
+
+def test_disbursement_envelope_drift_never_says_not_applied(client: TestClient) -> None:
+    """线格式回归（BLOCKER-1）：wedap 200 + 顶层缺 code → UNKNOWN，绝不 NOT_APPLIED。"""
+    client.app.state.wedap.submit_disbursement.side_effect = WedapError(  # type: ignore[union-attr]
+        "None", "<no error message>", http_status=200
+    )
+    r = client.post("/api/v1/loans/p2p-disbursements", json=BODY, headers=HEADERS)
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["outcome"] == "UNKNOWN"
+    assert data["operationStatus"] == "RECONCILING"
+    assert data["retryPolicy"] == "POLL_STATUS"
+
+
+def test_disbursement_sync_success_omits_outcome_on_the_wire(client: TestClient) -> None:
+    """同步完成：线格式**不出现** outcome（v2.2 禁止为字段齐全填无意义默认值）。"""
+    client.app.state.wedap.submit_disbursement.return_value = {"txnStatus": "SUCCESS"}  # type: ignore[union-attr]
+    r = client.post("/api/v1/loans/p2p-disbursements", json=BODY, headers=HEADERS)
+    data = r.json()["data"]
+    assert "outcome" not in data
+    assert data["operationStatus"] == "SUCCEEDED"
+    assert data["retryPolicy"] == "NEVER"

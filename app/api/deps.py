@@ -1,4 +1,4 @@
-"""FastAPI 依赖：header 校验 + 金额解析 + 明细一致性前置校验。"""
+"""FastAPI 依赖：header 校验 + 金额解析 + 明细一致性前置校验 + MONEY_WRITE 错误标注。"""
 
 import datetime as dt
 from decimal import Decimal
@@ -9,6 +9,49 @@ from fastapi import HTTPException, Request
 
 from app.core.amounts import MAX_INTEGER_DIGITS, AmountGuardError, parse_guarded_decimal
 from app.core.context import current_ids
+from app.domain.money_write import money_write_reject_fields, money_write_unresolved_fields
+
+
+def mark_money_write(request: Request) -> None:
+    """路由级依赖：声明本 operation 属 v2.2 §2.3 的 ``MONEY_WRITE`` profile。
+
+    只做标记，不做校验。为什么要标：§8.2 规定写错误必须带 ``resubmitAllowed`` 等 typed
+    字段，而这些端点的 4xx 散落在 header 校验、金额护栏、wedap 必填集、幂等键比对等
+    十余处共享 helper 里——逐处手写既容易漏（漏一处消费方就得回去解析文案），也会把
+    「本端点是不是资金写」这个判断复制十几份。改为在路由上声明一次、由统一异常处理器
+    （``app/main.py`` 的 ``_http_exception_handler`` / ``_validation_exception_handler``）
+    按标记补齐。
+
+    **只标这 6 个写原语端点**：普通查询 / CRUD / 认证错误按 §8.2 明文不得为「字段齐全」
+    填默认值，没有本标记就一个字段都不加。
+    """
+    request.state.money_write = True
+
+
+def mark_money_write_dispatch(request: Request, *, biz_seq_no: str, repayment: bool) -> None:
+    """标记「即将进入 submit/reversal 服务」——此后的 4xx 不得再声称零影响。
+
+    分界线取得很死：调用点必须紧贴服务调用之前。之后抛出的 4xx（409 幂等冲突，或上游返
+    2xx 但响应体非 JSON 导致 ``ValueError`` 冒泡成 400）都可能已经外呼过，只能给
+    ``UNKNOWN`` + 查单地址；之前抛出的一律是网关侧校验拒绝，可给 ``NOT_APPLIED``。
+    """
+    request.state.money_write_operation = (biz_seq_no, repayment)
+
+
+def money_write_error_extra(request: Request, status_code: int) -> dict[str, Any]:
+    """MONEY_WRITE 端点的 4xx 应补的 v2.2 §8.2 typed 字段（非该类端点返回空 dict）。
+
+    401/403 按 §8.2「认证错误不得为字段齐全填无意义默认值」显式排除。
+    """
+    if not getattr(request.state, "money_write", False):
+        return {}
+    if status_code in (401, 403) or not 400 <= status_code < 500:
+        return {}
+    operation = getattr(request.state, "money_write_operation", None)
+    if operation is None:
+        return dict(money_write_reject_fields())
+    biz_seq_no, repayment = operation
+    return dict(money_write_unresolved_fields(biz_seq_no, repayment=repayment))
 
 
 def bank_req_date(request: Request) -> str:

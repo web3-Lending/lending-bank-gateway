@@ -12,6 +12,8 @@ from app.api.deps import (
     assert_idempotency_key_matches,
     assert_wedap_required,
     bank_req_date,
+    mark_money_write,
+    mark_money_write_dispatch,
     parse_amount,
     require_headers,
     validate_detail_consistency,
@@ -19,6 +21,7 @@ from app.api.deps import (
 from app.api.v1.bank_funds import SubmitAck, SubmitAckEnvelope
 from app.clients.wedap import WedapError
 from app.core.envelope import ok
+from app.domain.biz_seq import validate_biz_seq_no
 from app.domain.wedap_contract import (
     DISBURSEMENT_INFO_REQUIRED,
     DISBURSEMENT_LENDER_REQUIRED,
@@ -167,6 +170,14 @@ async def _submit(
     repayment_contract: bool = False,
 ) -> dict[str, Any]:
     """validate biz_seq_no → submit_order → catch IdempotencyConflict → ok envelope。"""
+    # 格式校验提到服务调用之前（submit_order 内仍保留同一校验，那是服务层不变量）：
+    # 只有这样才分得清「非法 bizSeqNo，从未建单」与「已进服务后出错」——前者给
+    # NOT_APPLIED，后者只能给 UNKNOWN + 查单地址（见 deps.mark_money_write_dispatch）。
+    try:
+        validate_biz_seq_no(biz_seq_no)
+    except ValueError as exc:
+        raise HTTPException(400, detail={"code": "GW_400_VALIDATION", "message": str(exc)}) from exc
+    mark_money_write_dispatch(request, biz_seq_no=biz_seq_no, repayment=repayment_contract)
     try:
         result = await submit_order(
             request.app.state.session_factory,
@@ -203,7 +214,10 @@ async def _submit(
 
 
 @router.post(
-    "/p2p-disbursements", response_model=SubmitAckEnvelope, response_model_exclude_unset=True
+    "/p2p-disbursements",
+    response_model=SubmitAckEnvelope,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(mark_money_write)],
 )
 async def p2p_disbursement(
     body: P2PDisbursementRequest,
@@ -251,7 +265,10 @@ async def p2p_disbursement(
 
 
 @router.post(
-    "/p2p-repayments", response_model=RepaymentAckEnvelope, response_model_exclude_unset=True
+    "/p2p-repayments",
+    response_model=RepaymentAckEnvelope,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(mark_money_write)],
 )
 async def p2p_repayment(
     body: P2PRepaymentRequest,

@@ -66,6 +66,31 @@ WEDAP_TERMINAL_REJECT_CODES: frozenset[str] = frozenset(
 )
 
 
+# 通用交易（放款/归集/分发/退款/冲正）的「零资金变动」证据白名单——**按 HTTP 状态，不按
+# 业务码**（2026-08-28 独立复核 BLOCKER-1 定案）。
+#
+# 为什么通用侧不能像还款那样列业务码：还款的 13 位码表在对接文档 v0.6.1 §4.2 有在册枚举，
+# 通用侧**没有任何在册码表**。没有码表就无法区分「余额不足（分文未扣）」与「已扣款待人工」，
+# 而 `WedapClient._unwrap` 在 HTTP 200 + 顶层 code 缺失时会抛 `WedapError(code="None")`
+# （envelope 漂移实测可复现）——旧口径「通用分支恒 True」会把这种解析不出的响应断言成
+# 「确认未产生影响，请换新 bizSeqNo 重发」= 重复放款。
+#
+# 唯一可信的结构化证据是 **wedap 在 HTTP 层把请求挡在门口**：这些状态下请求根本没进业务
+# 引擎。逐值在册（而非「4xx 一律算」）：新出现的 4xx 默认不算证据，与白名单制同一逻辑。
+# 明确排除：408（请求超时，可能已部分到达）、409（冲突，可能已存在同键交易）、
+# 423/425/429（锁定/过早/限流，语义不保证未执行）。
+WEDAP_DOOR_REJECT_HTTP_STATUSES: frozenset[int] = frozenset({400, 401, 403, 404, 405, 415, 422})
+
+
+def is_door_reject_http_status(http_status: int | None) -> bool:
+    """该 HTTP 状态是否构成「请求被门口拒绝、零资金变动」的证据。
+
+    ``None``（无 HTTP 层证据，如 2xx 响应体里的业务码）与白名单外一律 False →
+    调用方退 UNKNOWN 去查单，绝不假定零资金变动。
+    """
+    return http_status in WEDAP_DOOR_REJECT_HTTP_STATUSES
+
+
 def is_repayment_terminal_reject(code: str) -> bool:
     """还款业务码是否为「确证拒绝」终态（零资金变动，可安全回滚）。
 

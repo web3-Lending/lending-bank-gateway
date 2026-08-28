@@ -1175,6 +1175,40 @@
         "type": "object",
         "title": "HTTPValidationError"
       },
+      "MoneyWriteOperationStatus": {
+        "type": "string",
+        "enum": [
+          "PENDING",
+          "RECONCILING",
+          "SUCCEEDED",
+          "REJECTED"
+        ],
+        "title": "MoneyWriteOperationStatus",
+        "description": "v2.2 §8.2 ``operationStatus`` 受控枚举；终态 SUCCEEDED/REJECTED 后不得回处理中。"
+      },
+      "MoneyWriteOutcome": {
+        "type": "string",
+        "enum": [
+          "NOT_APPLIED",
+          "PENDING",
+          "UNKNOWN",
+          "ACCEPTED"
+        ],
+        "title": "MoneyWriteOutcome",
+        "description": "v2.2 §8.2 ``outcome`` 封闭枚举：同步成功之外的业务意图事实。"
+      },
+      "MoneyWriteRetryPolicy": {
+        "type": "string",
+        "enum": [
+          "NEVER",
+          "RETRY_SAME_KEY_AFTER",
+          "POLL_STATUS",
+          "REAUTH_AND_REPLAY",
+          "CORRECT_AND_NEW_INTENT"
+        ],
+        "title": "MoneyWriteRetryPolicy",
+        "description": "v2.2 §8.2 ``retryPolicy``：写客户端唯一可执行的重试策略词表。"
+      },
       "P2PDisbursementRequest": {
         "properties": {
           "bizSeqNo": {
@@ -1481,6 +1515,74 @@
             ],
             "title": "Inflight"
           },
+          "outcome": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MoneyWriteOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "业务意图事实；**同步完成的成功响应省略本字段**（由成功模型表达）。PENDING/UNKNOWN/ACCEPTED 一律不得重提，须查 statusUrl 或进对账。"
+          },
+          "operationStatus": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MoneyWriteOperationStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "retryPolicy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MoneyWriteRetryPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "写客户端唯一可执行的重试策略。POLL_STATUS=查 statusUrl；CORRECT_AND_NEW_INTENT=修正请求并换新 bizSeqNo（bizSeqNo 即幂等键，同键重发只会拿回同一条冻结响应）；NEVER=不得重试。"
+          },
+          "resubmitAllowed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resubmitallowed",
+            "description": "是否允许用**同一幂等键**重提。本网关无 9000 在册的权威放行策略，故恒为 false（fail-closed）。"
+          },
+          "operationId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operationid",
+            "description": "durable operation 标识（= bizSeqNo）。与 statusUrl 成对出现。"
+          },
+          "statusUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Statusurl",
+            "description": "本 operation 的查单地址，受同 tenant/principal 的对象级授权。"
+          },
           "debtSettled": {
             "anyOf": [
               {
@@ -1728,6 +1830,74 @@
               }
             ],
             "title": "Inflight"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MoneyWriteOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "业务意图事实；**同步完成的成功响应省略本字段**（由成功模型表达）。PENDING/UNKNOWN/ACCEPTED 一律不得重提，须查 statusUrl 或进对账。"
+          },
+          "operationStatus": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MoneyWriteOperationStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "retryPolicy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MoneyWriteRetryPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "写客户端唯一可执行的重试策略。POLL_STATUS=查 statusUrl；CORRECT_AND_NEW_INTENT=修正请求并换新 bizSeqNo（bizSeqNo 即幂等键，同键重发只会拿回同一条冻结响应）；NEVER=不得重试。"
+          },
+          "resubmitAllowed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resubmitallowed",
+            "description": "是否允许用**同一幂等键**重提。本网关无 9000 在册的权威放行策略，故恒为 false（fail-closed）。"
+          },
+          "operationId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operationid",
+            "description": "durable operation 标识（= bizSeqNo）。与 statusUrl 成对出现。"
+          },
+          "statusUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Statusurl",
+            "description": "本 operation 的查单地址，受同 tenant/principal 的对象级授权。"
           }
         },
         "type": "object",

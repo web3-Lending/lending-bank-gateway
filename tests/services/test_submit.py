@@ -277,7 +277,12 @@ async def test_order_status_reflects_terminal_and_unknown(factory) -> None:
 @pytest.mark.asyncio
 async def test_in_flight_replay_has_no_order_status(factory) -> None:
     """in-flight 重放（幂等行存在但无 first_response）：零查询路径不读 order 行，
-    不带 orderStatus——inFlight=true 即「去查单」信号。"""
+    不带 orderStatus——inFlight=true 即「去查单」信号。
+
+    v2.2 §9.1「已建立 durable operation 且仍未终态」：typed 字段照给（幂等行 + order
+    行在 dispatch 前已原子提交，operationId/statusUrl 真实可查），outcome=PENDING 而非
+    ACCEPTED——本路径不读 order 行，不知道上游是否已受理，不许声称「上游已确认」。
+    """
     from app.services.idempotency import check_or_register
 
     req = _req(biz_seq_no="DSB-20260611-0001234567892")
@@ -294,7 +299,17 @@ async def test_in_flight_replay_has_no_order_status(factory) -> None:
             )
     wedap = AsyncMock()
     result = await submit_order(factory, wedap_call=wedap.submit_disbursement, req=req)
-    assert result == {"txnStatus": "PROCESSING", "bizSeqNo": req.biz_seq_no, "inFlight": True}
+    assert result == {
+        "txnStatus": "PROCESSING",
+        "bizSeqNo": req.biz_seq_no,
+        "inFlight": True,
+        "outcome": "PENDING",
+        "operationStatus": "PENDING",
+        "retryPolicy": "POLL_STATUS",
+        "resubmitAllowed": False,
+        "operationId": req.biz_seq_no,
+        "statusUrl": f"/api/v1/bank-funds/status?bizSeqNo={req.biz_seq_no}",
+    }
     assert "orderStatus" not in result
     wedap.submit_disbursement.assert_not_awaited()
 
@@ -538,3 +553,301 @@ def test_repayment_terminal_reject_whitelist_matches_contract() -> None:
     assert not is_repayment_terminal_reject("6605T00900206")
     for confirmed in ("6605B00900201", "6605B00900205", "6605B00900208", "6605B00900216"):
         assert is_repayment_terminal_reject(confirmed)
+
+
+# ── MONEY_WRITE typed 字段（API 规范 v2.2 §8.2）· 2026-08-28 纯增量 ──────────────
+#
+# 这一组用例锁的不是「字段有没有」，而是**哪条上游路径配拿到哪个 outcome**。
+# 最要命的一条：NOT_APPLIED（= 确认零资金变动）只允许出现在有权威证据的分支上——
+# 误标会让上游回滚或换新 bizSeqNo 重发，钱可能已经出去了。
+
+
+def _typed(result: dict) -> tuple:
+    return (
+        result.get("outcome"),
+        result.get("operationStatus"),
+        result.get("retryPolicy"),
+        result.get("resubmitAllowed"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_typed_fields_sync_success_omits_outcome(factory) -> None:
+    """同步 SUCCESS：outcome 省略（由成功模型表达）+ SUCCEEDED/NEVER，且成对给出查单地址。"""
+    wedap = AsyncMock()
+    wedap.submit_disbursement.return_value = {"txnStatus": "SUCCESS"}
+    req = _req(biz_seq_no="DSB-20260828-0000000000001")
+    result = await submit_order(factory, wedap_call=wedap.submit_disbursement, req=req)
+    assert "outcome" not in result
+    assert _typed(result)[1:] == ("SUCCEEDED", "NEVER", False)
+    assert result["operationId"] == req.biz_seq_no
+    assert result["statusUrl"] == f"/api/v1/bank-funds/status?bizSeqNo={req.biz_seq_no}"
+
+
+@pytest.mark.asyncio
+async def test_typed_fields_upstream_accepted_is_not_completed(factory) -> None:
+    """PROCESSING：上游已确认受理但**绝不表示已入账** → ACCEPTED/PENDING/POLL_STATUS。"""
+    wedap = AsyncMock()
+    wedap.submit_disbursement.return_value = {"txnStatus": "PROCESSING"}
+    result = await submit_order(
+        factory,
+        wedap_call=wedap.submit_disbursement,
+        req=_req(biz_seq_no="DSB-20260828-0000000000002"),
+    )
+    assert _typed(result) == ("ACCEPTED", "PENDING", "POLL_STATUS", False)
+
+
+@pytest.mark.asyncio
+async def test_typed_fields_timeout_is_unknown_never_not_applied(factory) -> None:
+    """超时（§9.3 资金结果不确定）：UNKNOWN/RECONCILING/POLL_STATUS，禁止 NOT_APPLIED。"""
+    wedap = AsyncMock()
+    wedap.submit_disbursement.side_effect = httpx.ConnectTimeout("t")
+    result = await submit_order(
+        factory,
+        wedap_call=wedap.submit_disbursement,
+        req=_req(biz_seq_no="DSB-20260828-0000000000003"),
+    )
+    assert _typed(result) == ("UNKNOWN", "RECONCILING", "POLL_STATUS", False)
+
+
+@pytest.mark.asyncio
+async def test_typed_fields_http_5xx_is_unknown(factory) -> None:
+    """上游 5xx：结果未知 → UNKNOWN（本仓资金安全红线的既有语义，换成规范词汇）。"""
+    wedap = AsyncMock()
+    wedap.submit_disbursement.side_effect = _make_http_status_error(503)
+    result = await submit_order(
+        factory,
+        wedap_call=wedap.submit_disbursement,
+        req=_req(biz_seq_no="DSB-20260828-0000000000004"),
+    )
+    assert _typed(result) == ("UNKNOWN", "RECONCILING", "POLL_STATUS", False)
+
+
+@pytest.mark.asyncio
+async def test_typed_fields_generic_http_4xx_is_not_applied(factory) -> None:
+    """通用交易的门口拒绝（4xx，envelope 都解析不出=未进业务引擎）：NOT_APPLIED/REJECTED。
+
+    retryPolicy 是 CORRECT_AND_NEW_INTENT 而非 RETRY_SAME_KEY_AFTER——bizSeqNo 就是幂等
+    键，同键重发只会拿回这条冻结的失败响应。
+    """
+    wedap = AsyncMock()
+    wedap.submit_disbursement.side_effect = _make_http_status_error(400)
+    result = await submit_order(
+        factory,
+        wedap_call=wedap.submit_disbursement,
+        req=_req(biz_seq_no="DSB-20260828-0000000000005"),
+    )
+    assert _typed(result) == ("NOT_APPLIED", "REJECTED", "CORRECT_AND_NEW_INTENT", False)
+
+
+@pytest.mark.asyncio
+async def test_typed_fields_generic_wedap_http_4xx_reject_is_not_applied(factory) -> None:
+    """通用交易：wedap 在 **HTTP 4xx** 上带业务码拒绝 = 门口拒绝，未进业务引擎 → NOT_APPLIED。"""
+    from app.clients.wedap import WedapError
+
+    wedap = AsyncMock()
+    wedap.submit_disbursement.side_effect = WedapError("422", "可用余额不足", http_status=422)
+    result = await submit_order(
+        factory,
+        wedap_call=wedap.submit_disbursement,
+        req=_req(biz_seq_no="DSB-20260828-0000000000006"),
+    )
+    assert _typed(result) == ("NOT_APPLIED", "REJECTED", "CORRECT_AND_NEW_INTENT", False)
+
+
+@pytest.mark.asyncio
+async def test_typed_fields_generic_wedap_business_code_on_200_is_unknown(factory) -> None:
+    """**BLOCKER-1 回归**：HTTP 200 响应体里的业务码不是零影响证据 → UNKNOWN。
+
+    通用侧没有任何在册业务码表，分不清「余额不足（分文未扣）」与「已扣款待人工」；而同一
+    笔交易 wedap 用 200 body 的 txnStatus=FAILED 说失败时本仓判 UNKNOWN，用 200 body 的
+    业务码说失败没有理由更强。台账仍落终态 FAILED（既有行为不动）。
+    """
+    from app.clients.wedap import WedapError
+
+    wedap = AsyncMock()
+    wedap.submit_disbursement.side_effect = WedapError("BANK-777", "未知业务码", http_status=200)
+    result = await submit_order(
+        factory,
+        wedap_call=wedap.submit_disbursement,
+        req=_req(biz_seq_no="DSB-20260828-0000000000016"),
+    )
+    assert result["orderStatus"] == "FAILED"
+    assert _typed(result) == ("UNKNOWN", "RECONCILING", "POLL_STATUS", False)
+
+
+@pytest.mark.asyncio
+async def test_typed_fields_envelope_drift_is_never_not_applied(factory) -> None:
+    """**BLOCKER-1 的实测反例**：wedap 200 + 顶层缺 code（envelope 漂移）绝不许 NOT_APPLIED。
+
+    `WedapClient._unwrap` 对 `{"data":{...}}` 这类漂移响应抛 `WedapError(code="None")`。
+    旧口径（通用分支恒判确证拒绝）会把一笔**实际可能已成功的放款**断言成「确认未产生影响，
+    请修正后换新意图重发」→ 换新 bizSeqNo 重放 = 重复放款。wedap 改过一次受理响应体
+    （v0.5.0 还款契约重写）是在册事实，不是假想场景。
+    """
+    from app.clients.wedap import WedapClient, WedapError
+
+    with pytest.raises(WedapError) as excinfo:
+        WedapClient._unwrap(
+            httpx.Response(
+                200,
+                json={"data": {"txnStatus": "SUCCESS"}},
+                request=httpx.Request("POST", "http://wedap/x"),
+            )
+        )
+    drift = excinfo.value
+    assert drift.code == "None"  # 这就是漂移响应真实抛出的 code
+
+    wedap = AsyncMock()
+    wedap.submit_disbursement.side_effect = drift
+    result = await submit_order(
+        factory,
+        wedap_call=wedap.submit_disbursement,
+        req=_req(biz_seq_no="DSB-20260828-0000000000017"),
+    )
+    assert _typed(result) == ("UNKNOWN", "RECONCILING", "POLL_STATUS", False)
+
+
+@pytest.mark.asyncio
+async def test_typed_fields_generic_http_409_is_unknown_not_not_applied(factory) -> None:
+    """未在册的 4xx（409 冲突：可能已存在同键交易）不是门口拒绝证据 → UNKNOWN。"""
+    wedap = AsyncMock()
+    wedap.submit_disbursement.side_effect = _make_http_status_error(409)
+    result = await submit_order(
+        factory,
+        wedap_call=wedap.submit_disbursement,
+        req=_req(biz_seq_no="DSB-20260828-0000000000018"),
+    )
+    assert result["orderStatus"] == "FAILED"  # 台账终态不变（既有行为）
+    assert _typed(result) == ("UNKNOWN", "RECONCILING", "POLL_STATUS", False)
+
+
+@pytest.mark.asyncio
+async def test_typed_fields_poison_ack_is_unknown_not_accepted(factory) -> None:
+    """**MAJOR-2 回归**：毒值/缺失 ack 落台账 SUBMITTED，但不得对外说 ACCEPTED。
+
+    网关在同一个响应里已经把北向 txnStatus 归一化成 RESULT_UNKNOWN（「我不信这个状态」），
+    outcome 再说 ACCEPTED（上游已确认受理）就是自相矛盾，且会让消费方只轮询、不进对账。
+    """
+    for idx, ack in enumerate(({}, {"txnStatus": "ACCEPTED_BY_BANK"})):
+        wedap = AsyncMock()
+        wedap.submit_disbursement.return_value = ack
+        result = await submit_order(
+            factory,
+            wedap_call=wedap.submit_disbursement,
+            req=_req(biz_seq_no=f"DSB-20260828-000000000002{idx}"),
+        )
+        assert result["txnStatus"] == "RESULT_UNKNOWN"
+        assert result["orderStatus"] == "SUBMITTED"  # 台账保守态不变（既有行为）
+        assert _typed(result) == ("UNKNOWN", "RECONCILING", "POLL_STATUS", False)
+
+
+@pytest.mark.asyncio
+async def test_typed_fields_trusted_processing_ack_is_accepted(factory) -> None:
+    """对照组：ack 落在封闭值域内（PROCESSING）才配 outcome=ACCEPTED。"""
+    wedap = AsyncMock()
+    wedap.submit_disbursement.return_value = {"txnStatus": "PROCESSING"}
+    result = await submit_order(
+        factory,
+        wedap_call=wedap.submit_disbursement,
+        req=_req(biz_seq_no="DSB-20260828-0000000000022"),
+    )
+    assert result["orderStatus"] == "SUBMITTED"
+    assert _typed(result) == ("ACCEPTED", "PENDING", "POLL_STATUS", False)
+
+
+@pytest.mark.asyncio
+async def test_typed_fields_generic_ack_failed_is_unknown_not_not_applied(factory) -> None:
+    """**本波最关键的一条**：通用受理响应 txnStatus=FAILED 只 UNKNOWN，不许 NOT_APPLIED。
+
+    依据是本仓自己的口径（app/domain/states.map_wedap_repayment_status docstring）：
+    「通用表的 FAILED 仅表示终态」，不含零资金变动保证——与还款 DTC 契约的 FAILED
+    （已确证借款人分文未扣）不是一档。台账仍落终态 FAILED（既有行为不动），
+    typed 字段只是告诉调用方「回滚前先查单」。
+    """
+    wedap = AsyncMock()
+    wedap.submit_disbursement.return_value = {"txnStatus": "FAILED"}
+    result = await submit_order(
+        factory,
+        wedap_call=wedap.submit_disbursement,
+        req=_req(biz_seq_no="DSB-20260828-0000000000007"),
+    )
+    assert result["txnStatus"] == "FAILED" and result["orderStatus"] == "FAILED"
+    assert _typed(result) == ("UNKNOWN", "RECONCILING", "POLL_STATUS", False)
+
+
+@pytest.mark.asyncio
+async def test_typed_fields_repayment_ack_failed_is_not_applied(factory) -> None:
+    """还款 DTC 契约的 FAILED = wedap 已确证零资金变动 → 够格 NOT_APPLIED。"""
+    wedap = AsyncMock()
+    wedap.submit_repayment.return_value = {"status": "FAILED", "debtSettled": False}
+    result = await submit_order(
+        factory,
+        wedap_call=wedap.submit_repayment,
+        req=_repay_req(biz_seq_no="RPMT-20260828-0000000001"),
+    )
+    assert _typed(result) == ("NOT_APPLIED", "REJECTED", "CORRECT_AND_NEW_INTENT", False)
+    # 还款查单必须指向专用端点（通用 5.5 查询不返回 debtSettled / steps[]）
+    assert result["statusUrl"] == "/api/v1/loans/p2p-repayments/RPMT-20260828-0000000001/status"
+
+
+@pytest.mark.asyncio
+async def test_typed_fields_repayment_whitelisted_reject_is_not_applied(factory) -> None:
+    """还款白名单码（余额不足 205）= 受理即拒、零资金变动 → NOT_APPLIED。"""
+    from app.clients.wedap import WedapError
+
+    wedap = AsyncMock()
+    wedap.submit_repayment.side_effect = WedapError("6605B00900205", "余额不足")
+    result = await submit_order(
+        factory,
+        wedap_call=wedap.submit_repayment,
+        req=_repay_req(biz_seq_no="RPMT-20260828-0000000002"),
+    )
+    assert _typed(result) == ("NOT_APPLIED", "REJECTED", "CORRECT_AND_NEW_INTENT", False)
+
+
+@pytest.mark.asyncio
+async def test_typed_fields_repayment_non_whitelisted_code_is_unknown(factory) -> None:
+    """还款待轮询码（211 结果待确认）：白名单外一律挂起 → UNKNOWN，绝不 NOT_APPLIED。"""
+    from app.clients.wedap import WedapError
+
+    wedap = AsyncMock()
+    wedap.submit_repayment.side_effect = WedapError("6605U00900211", "结果待确认")
+    result = await submit_order(
+        factory,
+        wedap_call=wedap.submit_repayment,
+        req=_repay_req(biz_seq_no="RPMT-20260828-0000000003"),
+    )
+    assert _typed(result) == ("UNKNOWN", "RECONCILING", "POLL_STATUS", False)
+
+
+@pytest.mark.asyncio
+async def test_typed_fields_repayment_http_4xx_is_unknown(factory) -> None:
+    """还款的解析不出 4xx：DTC 组合交易有分步执行态，不足以断言分文未扣 → UNKNOWN。
+
+    与通用交易同分支不同判（见 test_typed_fields_generic_http_4xx_is_not_applied），
+    保守方向与白名单制一致：未知一律挂起，不假定零资金变动。
+    """
+    wedap = AsyncMock()
+    wedap.submit_repayment.side_effect = _make_http_status_error(400)
+    result = await submit_order(
+        factory,
+        wedap_call=wedap.submit_repayment,
+        req=_repay_req(biz_seq_no="RPMT-20260828-0000000004"),
+    )
+    assert result["orderStatus"] == "FAILED"
+    assert _typed(result) == ("UNKNOWN", "RECONCILING", "POLL_STATUS", False)
+
+
+@pytest.mark.asyncio
+async def test_typed_fields_frozen_into_first_response(factory) -> None:
+    """typed 字段写在 record_response 前 → 随 first_response 冻结，重放逐字段一致、零外呼。"""
+    wedap = AsyncMock()
+    wedap.submit_disbursement.side_effect = _make_http_status_error(400)
+    req = _req(biz_seq_no="DSB-20260828-0000000000008")
+    first = await submit_order(factory, wedap_call=wedap.submit_disbursement, req=req)
+    wedap2 = AsyncMock()
+    replay = await submit_order(factory, wedap_call=wedap2.submit_disbursement, req=req)
+    assert replay == first
+    assert replay["outcome"] == "NOT_APPLIED"
+    wedap2.submit_disbursement.assert_not_awaited()

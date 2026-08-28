@@ -13,12 +13,20 @@ from app.api.deps import (
     assert_wedap_not_rejected,
     assert_wedap_required,
     bank_req_date,
+    mark_money_write,
+    mark_money_write_dispatch,
     parse_amount,
     require_headers,
     validate_detail_consistency,
 )
 from app.clients.wedap import WedapError
 from app.core.envelope import ok
+from app.domain.biz_seq import validate_biz_seq_no
+from app.domain.money_write import (
+    MoneyWriteOperationStatus,
+    MoneyWriteOutcome,
+    MoneyWriteRetryPolicy,
+)
 from app.domain.wedap_contract import (
     COLLECT_REJECTED,
     COLLECT_REQUIRED,
@@ -126,6 +134,40 @@ class SubmitAck(BaseModel):
     errorMsg: str | None = None
     inFlight: bool | None = None
 
+    # ── MONEY_WRITE typed 字段（API 规范 v2.2 §8.2）· 2026-08-28 纯增量 ──────────
+    # 语义与取值口径的唯一权威源是 app/domain/money_write；此处只做契约暴露。
+    # 为什么必须进 openapi：调用方按 openapi 推契约，只在代码里塞字段等于「靠口头传达」
+    # （debtSettled 至今未被上游接入正是此成因）。批次 4 要把「200 包装失败」翻成真实
+    # 4xx/5xx，消费方得先能按这几个字段分支，才不用继续按 txnStatus 字面量硬扛。
+    #
+    # 缺失的两种情形（与 orderStatus 同）：本契约上线前受理单的幂等重放
+    # （first_response 冻结不回填）；此外无。in-flight 重放同样带全字段。
+    outcome: MoneyWriteOutcome | None = Field(
+        default=None,
+        description="业务意图事实；**同步完成的成功响应省略本字段**（由成功模型表达）。"
+        "PENDING/UNKNOWN/ACCEPTED 一律不得重提，须查 statusUrl 或进对账。",
+    )
+    operationStatus: MoneyWriteOperationStatus | None = None
+    retryPolicy: MoneyWriteRetryPolicy | None = Field(
+        default=None,
+        description="写客户端唯一可执行的重试策略。POLL_STATUS=查 statusUrl；"
+        "CORRECT_AND_NEW_INTENT=修正请求并换新 bizSeqNo（bizSeqNo 即幂等键，同键重发"
+        "只会拿回同一条冻结响应）；NEVER=不得重试。",
+    )
+    resubmitAllowed: bool | None = Field(
+        default=None,
+        description="是否允许用**同一幂等键**重提。本网关无 9000 在册的权威放行策略，"
+        "故恒为 false（fail-closed）。",
+    )
+    operationId: str | None = Field(
+        default=None,
+        description="durable operation 标识（= bizSeqNo）。与 statusUrl 成对出现。",
+    )
+    statusUrl: str | None = Field(
+        default=None,
+        description="本 operation 的查单地址，受同 tenant/principal 的对象级授权。",
+    )
+
 
 class SubmitAckEnvelope(BaseModel):
     """写原语提交 200 响应统一 envelope（:func:`app.core.envelope.ok` 的类型化形态）。"""
@@ -166,6 +208,14 @@ async def _submit(
         trace_id=ids["trace_id"],
         mode=request.app.state.settings.account_guard_mode,
     )
+    # 格式校验提到服务调用之前（submit_order 内仍保留同一校验，那是服务层不变量）：
+    # 只有这样才分得清「非法 bizSeqNo，从未建单」与「已进服务后出错」——前者给
+    # NOT_APPLIED，后者只能给 UNKNOWN + 查单地址（见 deps.mark_money_write_dispatch）。
+    try:
+        validate_biz_seq_no(biz_seq_no)
+    except ValueError as exc:
+        raise HTTPException(400, detail={"code": "GW_400_VALIDATION", "message": str(exc)}) from exc
+    mark_money_write_dispatch(request, biz_seq_no=biz_seq_no, repayment=False)
     try:
         result = await submit_order(
             request.app.state.session_factory,
@@ -201,7 +251,10 @@ async def _submit(
 
 
 @router.post(
-    "/collect-from-users", response_model=SubmitAckEnvelope, response_model_exclude_unset=True
+    "/collect-from-users",
+    response_model=SubmitAckEnvelope,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(mark_money_write)],
 )
 async def collect_from_users(
     body: CollectRequest,
@@ -244,7 +297,10 @@ async def collect_from_users(
 
 
 @router.post(
-    "/distribute-to-users", response_model=SubmitAckEnvelope, response_model_exclude_unset=True
+    "/distribute-to-users",
+    response_model=SubmitAckEnvelope,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(mark_money_write)],
 )
 async def distribute_to_users(
     body: DistributeRequest,
@@ -308,7 +364,12 @@ async def distribute_to_users(
     )
 
 
-@router.post("/refunds", response_model=SubmitAckEnvelope, response_model_exclude_unset=True)
+@router.post(
+    "/refunds",
+    response_model=SubmitAckEnvelope,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(mark_money_write)],
+)
 async def refund_to_user(
     body: RefundRequest,
     request: Request,
@@ -357,7 +418,12 @@ async def refund_to_user(
     )
 
 
-@router.post("/reversals", response_model=SubmitAckEnvelope, response_model_exclude_unset=True)
+@router.post(
+    "/reversals",
+    response_model=SubmitAckEnvelope,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(mark_money_write)],
+)
 async def reverse_transaction(
     body: ReversalRequest,
     request: Request,
@@ -372,6 +438,13 @@ async def reverse_transaction(
     assert_idempotency_key_matches(request, body.bizSeqNo)
     amount = parse_amount(body.oriTxnAmount, body.currencyCode)
     payload = body.model_dump(mode="json", exclude_none=True)
+    # 同 _submit：先校验格式（服务层仍保留同一校验），再标记「即将进入服务」——
+    # 分界线之后的 4xx 一律不得声称零影响。
+    try:
+        validate_biz_seq_no(body.bizSeqNo)
+    except ValueError as exc:
+        raise HTTPException(400, detail={"code": "GW_400_VALIDATION", "message": str(exc)}) from exc
+    mark_money_write_dispatch(request, biz_seq_no=body.bizSeqNo, repayment=False)
     try:
         result = await submit_reversal(
             request.app.state.session_factory,
