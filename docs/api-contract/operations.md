@@ -75,3 +75,28 @@ their handler instead, so `422` is excluded:
 | `ApiKey realm="lending-bank-gateway", header="apikey"` | 2: `POST /api/v1/callbacks/wedap/transactions`, `POST /api/v1/recon/notify` |
 | `S2S realm="lending-bank-gateway", header="X-S2S-Token"` | 22: `POST /api/v1/admin/outbox/{outbox_id}/replay`, `GET /api/v1/admin/platform-accounts`, `POST /api/v1/admin/platform-accounts`, `PATCH /api/v1/admin/platform-accounts/{row_id}`, `GET /api/v1/admin/stuck-orders`, `GET /api/v1/admin/wedap-import/delivery-report`, `POST /api/v1/bank-funds/collect-from-users`, `POST /api/v1/bank-funds/distribute-to-users`, `POST /api/v1/bank-funds/refunds`, `POST /api/v1/bank-funds/reversals`, `GET /api/v1/bank-funds/status`, `GET /api/v1/deposit/account/detail`, `GET /api/v1/deposit/accounts`, `GET /api/v1/deposit/balances/total`, `GET /api/v1/deposit/internal-accounts/info`, `GET /api/v1/deposit/internal-accounts/transactions`, `GET /api/v1/deposit/transactions`, `POST /api/v1/loans/p2p-disbursements`, `POST /api/v1/loans/p2p-repayments`, `GET /api/v1/loans/p2p-repayments/{biz_seq_no}/status`, `GET /api/v1/users/info`, `POST /api/v1/wedap/import/enqueue` |
 | `— (exempt path, no 401)` | 4: `GET /api/version`, `GET /build-info`, `GET /healthz`, `GET /readyz` |
+
+## How this table is kept honest
+
+The declaration snapshot is not trusted on its word. `tests/test_openapi_contract_gate.py`
+holds ten gates over it, every one of them mutation-verified (break one thing, watch
+that gate go red, put it back):
+
+| Gate | What it refuses to let through |
+|---|---|
+| G1 | A served route with no declaration, or a declaration with no route. |
+| G2 | More than one 2xx on an operation. |
+| G3 | `default` / `1XX` / `2XX` / `3XX` / `4XX` / `5XX` anywhere in the document. |
+| G4 | A status the code can raise but the snapshot does not declare (AST scan). |
+| G5 | An `x-lending-unknown-query-parameters` value the route does not back up. |
+| G6 | A required response header that no real response was shown to carry. |
+| G7 | An error media type other than the one really served. |
+| G8 | Validation answering before authentication, or authentication answering before the request-target budget. |
+| G9 | An injected 502/503/500 that lands off-contract, loses a header, or leaves a row behind. |
+| G10 | A document that is not valid OpenAPI 3.1, or that has drifted from `openapi.json` / `openapi.sha256`. |
+
+Regenerate `openapi.json` and `openapi.sha256` after any contract or route change:
+
+```bash
+.venv/bin/python scripts/gen_openapi_contract.py
+```
