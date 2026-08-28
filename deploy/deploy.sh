@@ -140,6 +140,75 @@ ensure_networks_local() {
     docker network create wedap-network 2>/dev/null || true
 }
 
+# ── 部署后镜像回收 ───────────────────────────────────────────
+# 每次部署打一个新 tag，此前没有任何回收逻辑，tag 只增不减（2026-08-28 实测
+# dev-hw 四仓共 44 个 tag / 7.3GB，最老的 6 周前）。清理只碰本服务自己的
+# 仓库，且删不掉就跳过（详见 deploy/prune-images.sh 的安全边界注释）。
+DEFAULT_IMAGE_REPO="lending-bank-gateway"
+IMAGE_RETENTION_KEEP="${IMAGE_RETENTION_KEEP:-3}"
+
+resolve_image_repo() {
+    local ref="${APP_IMAGE:-}"
+    if [ -z "$ref" ]; then
+        printf '%s' "$DEFAULT_IMAGE_REPO"
+        return
+    fi
+    # 剥 tag 要从**最后**一个冒号剥，而且只有当它后面不含 `/` 时那才是 tag。
+    # `${ref%%:*}` 会把 registry:5000/repo:tag 截成 `registry` —— 那是另一个
+    # 仓库名，清理就清到别人头上去了（codex 复核 2026-08-28 指出）。
+    local last="${ref##*:}"
+    if [ "$last" = "$ref" ] || [ "$last" != "${last%%/*}" ]; then
+        printf '%s' "$ref"          # 没有 tag（或冒号属于 registry 端口）
+    else
+        printf '%s' "${ref%:*}"
+    fi
+}
+
+prune_local_images() {
+    print_info "清理本机历史镜像 tag（保留最近 ${IMAGE_RETENTION_KEEP} 个）..."
+    bash "$DEPLOY_DIR/prune-images.sh" "$(resolve_image_repo)" "$IMAGE_RETENTION_KEEP" \
+        || print_warning "镜像清理跳过（不影响部署）；可手动跑 deploy/prune-images.sh"
+}
+
+ssh_probe_healthy() {
+    ssh_cmd "curl -sf http://localhost:${APP_PORT}${HEALTH_ENDPOINT} > /dev/null 2>&1"
+}
+
+prune_remote_images() {
+    # 不把脚本落到远端磁盘（remote 段明确「不上传源码」），改用 base64 内联执行：
+    # 远端跑的和仓库里这份永远是同一份逻辑，不会两处实现各自漂移。
+    local payload repo
+    repo="$(resolve_image_repo)"
+    # repo 与 keep 会被拼进一条交给远端 shell 执行的命令串。二者都来自 env
+    # （APP_IMAGE / IMAGE_RETENTION_KEEP），受控但不等于可信——一个带分号的
+    # 镜像名就是远端任意命令执行。这里做字符集闸门，与本脚本对 GIT_SHA 的
+    # 处理同一口径。
+    if ! [[ "$repo" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
+        print_warning "Image prune skipped (unsafe repository name: ${repo})"
+        return 0
+    fi
+    if ! [[ "$IMAGE_RETENTION_KEEP" =~ ^[0-9]+$ ]]; then
+        print_warning "Image prune skipped (unsafe retention value: ${IMAGE_RETENTION_KEEP})"
+        return 0
+    fi
+    if ! payload="$(base64 -w0 < "$DEPLOY_DIR/prune-images.sh" 2>/dev/null)"; then
+        payload="$(base64 < "$DEPLOY_DIR/prune-images.sh" | tr -d '\n')" || {
+            print_warning "镜像清理跳过（prune-images.sh 编码失败）"
+            return 0
+        }
+    fi
+    # 真机没起来就别回收：旧 tag 是此刻唯一的回滚素材。compose up 返回 ≠ 服务
+    # 就绪（core 的 readiness 由 buildops 在 deploy.sh 返回之后才等），所以这里
+    # 自己探一次，不借别人的结论（codex 复核 2026-08-28 指出）。
+    if ! ssh_probe_healthy; then
+        print_warning "Image prune skipped (service not healthy yet; old tags kept for rollback)"
+        return 0
+    fi
+    print_info "清理 dev-hw 历史镜像 tag（保留最近 ${IMAGE_RETENTION_KEEP} 个）..."
+    ssh_cmd "echo ${payload} | base64 -d | bash -s -- ${repo} ${IMAGE_RETENTION_KEEP}" \
+        || print_warning "远端镜像清理跳过（不影响部署）"
+}
+
 # ── Banner ───────────────────────────────────────────────────
 echo "=========================================="
 echo "  ${DISPLAY_SERVICE_NAME} - Deployment"
@@ -288,6 +357,8 @@ if [ "$DEPLOY_MODE" = "remote" ]; then
     echo ""
     if [ "$backend_up" = true ]; then
         print_success "dev-hw 部署完成，backend 健康！"
+        # 健康之后才回收：新版本没起来时，旧 tag 是唯一的回滚素材。
+        prune_remote_images
         echo "  Health:     http://${REMOTE_SERVER}:${APP_PORT}${HEALTH_ENDPOINT}"
         echo "  Build-info: http://${REMOTE_SERVER}:${APP_PORT}/build-info"
         echo "  Logs:       ssh ${REMOTE_USER}@${REMOTE_SERVER} 'docker logs -f ${CONTAINER_NAME}'"
@@ -357,6 +428,8 @@ done
 
 if [ "$backend_up" = true ]; then
     print_success "Backend is up!"
+    # 健康之后才回收：新版本没起来时，旧 tag 是唯一的回滚素材。
+    prune_local_images
     echo "  Health:     http://localhost:${APP_PORT}${HEALTH_ENDPOINT}"
     echo "  Build-info: http://localhost:${APP_PORT}/build-info"
     exit 0
