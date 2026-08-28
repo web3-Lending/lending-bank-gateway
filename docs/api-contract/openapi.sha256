@@ -1,1 +1,6 @@
 3960a8858b6cfdc473fffa9c18ee886a193b2a703a2320cd4e42682235824f06  openapi.json
+#
+# 口径：本文件第一个 token 是 openapi.json 的**文件字节** sha256。
+# 因此 `sha256sum -c openapi.sha256` 在本仓可以直接用来校验产物完整性。
+# （注意：同批四仓口径不统一——baffle 与 lending-recon 用的是「规范化序列化」digest，
+#  它们的 .sha256 无法用 sha256sum -c 校验，各自文件内有说明。）
