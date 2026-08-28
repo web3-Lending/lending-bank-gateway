@@ -40,6 +40,7 @@ from app.core.context import (
 )
 from app.core.db import build_engine, build_session_factory
 from app.core.envelope import err
+from app.core.openapi_contract import build_openapi
 from app.core.s2s import S2SMiddleware, parse_caller_tokens
 from app.workers.supervisor import supervised
 
@@ -573,6 +574,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(recon_notify_router)
     app.include_router(deposit_router)
     app.include_router(wedap_import_enqueue_router)
+    # Serve per-operation response declarations (app/core/openapi_contract) instead of
+    # FastAPI's default "200 + 422". This changes the CONTENT OF /openapi.json ONLY --
+    # no handler status code, no response body and no middleware behaviour is touched.
+    # Mounted after include_router so all 28 operations are already registered; the
+    # generator fails closed on any route that has no declaration.
+    app.openapi = lambda: build_openapi(app)  # type: ignore[method-assign]
     return app
 
 
