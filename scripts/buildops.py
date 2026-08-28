@@ -97,6 +97,10 @@ APP_IMPACT_PREFIXES = (
     "deploy/Dockerfile",
     "deploy/docker-compose.yml",
     "deploy/deploy.sh",
+    # 2026-08-28：随镜像回收功能新增（deploy/prune-images.sh），此前四仓均未分类，
+    # 导致 release-impact fail-closed 卡住任何发布。与 deploy.sh 同档：它由 deploy.sh
+    # 在部署后调用，改它会改变部署行为。
+    "deploy/prune-images.sh",
     "deploy/entrypoint.sh",
     "deploy/env.",
 )
