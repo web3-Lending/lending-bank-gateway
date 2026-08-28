@@ -675,11 +675,71 @@ def test_g10_checked_in_document_and_digest_match_the_live_spec(spec: dict[str, 
     )
 
 
-def test_g10_operations_table_lists_every_operation() -> None:
-    """The human-readable table is generated from the same registry, so it cannot lag."""
-    table = (DOCS_DIR / "operations.md").read_text(encoding="utf-8")
-    for method, path in OPERATION_CONTRACTS:
-        assert f"| `{method}` | `{path}` |" in table, f"operations.md is missing {method} {path}"
+def _render_operations_row(method: str, path: str, contract: OperationContract) -> tuple[str, ...]:
+    """The nine cells ``operations.md`` must carry for one operation, from the registry."""
+    failures = ", ".join(f"`{status}`" for status in contract.failure_statuses)
+    specific = "; ".join(
+        f"{status}: " + ", ".join(f"`{header}`" for header in contract.required_headers[status])
+        for status in sorted(contract.required_headers)
+    )
+    return (
+        f"`{method}`",
+        f"`{path}`",
+        f"`{contract.success_status}`",
+        failures,
+        f"`{contract.profile}`",
+        f"`{contract.unknown_query}`",
+        f"`{contract.error_media_type}`",
+        "yes" if contract.problem_compliant else "no",
+        specific or "\u2014",
+    )
+
+
+def _parse_operations_table() -> dict[tuple[str, str], tuple[str, ...]]:
+    """Every nine-column data row of the operation table, keyed by (method, path).
+
+    The file also holds an authentication-surface table and a gate table; those are
+    skipped by requiring nine cells whose first is a back-ticked HTTP method.
+    """
+    methods = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
+    rows: dict[tuple[str, str], tuple[str, ...]] = {}
+    for line in (DOCS_DIR / "operations.md").read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|") or not stripped.endswith("|"):
+            continue
+        cells = tuple(cell.strip() for cell in stripped.strip("|").split("|"))
+        if len(cells) != 9 or cells[0].strip("`") not in methods:
+            continue
+        key = (cells[0].strip("`"), cells[1].strip("`"))
+        assert key not in rows, f"operations.md lists {key} twice"
+        rows[key] = cells
+    return rows
+
+
+def test_g10_operations_table_matches_the_registry_column_for_column() -> None:
+    """The table handed to external teams must not be able to lie.
+
+    It is hand-maintained prose around machine-checked rows: asserting only that a
+    row exists would let every other column (failure codes, profile, unknown_query,
+    media type, compliance flag, headers) drift silently while this gate stayed
+    green -- and a stale contract table is worse than none, because a consumer
+    writes parsing code against it.
+    """
+    actual = _parse_operations_table()
+    expected = {
+        (method, path): _render_operations_row(method, path, contract)
+        for (method, path), contract in OPERATION_CONTRACTS.items()
+    }
+    assert actual.keys() == expected.keys(), (
+        "operations.md rows and the registry disagree on which operations exist: "
+        f"only in the table {sorted(actual.keys() - expected.keys())}, "
+        f"only in the registry {sorted(expected.keys() - actual.keys())}"
+    )
+    for key in sorted(expected):
+        assert actual[key] == expected[key], (
+            f"operations.md row for {key[0]} {key[1]} has drifted from the registry:\n"
+            f"  table:    {actual[key]}\n  registry: {expected[key]}"
+        )
 
 
 def test_g10_registry_entries_are_frozen_dataclasses() -> None:
