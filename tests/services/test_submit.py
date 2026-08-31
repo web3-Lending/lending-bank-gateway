@@ -134,13 +134,14 @@ async def test_inflight_replay_returns_processing_without_business_execution(fac
 
 
 @pytest.mark.asyncio
-async def test_conflict_propagates(factory) -> None:
-    from app.services.idempotency import IdempotencyConflict
+async def test_payload_mismatch_propagates(factory) -> None:
+    """同键异载荷：服务层抛 IdempotencyPayloadMismatch（API 层据其 http_status 转 422）。"""
+    from app.services.idempotency import IdempotencyPayloadMismatch
 
     wedap = AsyncMock()
     wedap.submit_disbursement.return_value = {"txnStatus": "PROCESSING"}
     await submit_order(factory, wedap_call=wedap.submit_disbursement, req=_req())
-    with pytest.raises(IdempotencyConflict):
+    with pytest.raises(IdempotencyPayloadMismatch):
         await submit_order(
             factory,
             wedap_call=wedap.submit_disbursement,
@@ -161,10 +162,14 @@ async def test_invalid_biz_seq_no_rejected(factory) -> None:
 
 @pytest.mark.asyncio
 async def test_order_exists_without_idempotency_raises_conflict(factory, caplog) -> None:
-    """order 已存在但幂等行缺失（人工补数/迁移脏状态）→ IdempotencyConflict + error 日志。"""
+    """order 已存在但幂等行缺失（人工补数/迁移脏状态）→ IdempotencyKeyStateConflict + error 日志。
+
+    与「同键不同 payload」是两回事：这里读不到指纹，无从断言调用方换没换报文，能确定的
+    只是 bizSeqNo 已被一张单占了 → 409 Conflict，不是 v2.2 §9.1 的 422。
+    """
     import logging
 
-    from app.services.idempotency import IdempotencyConflict
+    from app.services.idempotency import IdempotencyKeyStateConflict
 
     # 预插 order 但不插幂等行（模拟脏状态）
     req = _req()
@@ -186,7 +191,7 @@ async def test_order_exists_without_idempotency_raises_conflict(factory, caplog)
 
     wedap = AsyncMock()
     with caplog.at_level(logging.ERROR, logger="app.services.submit"):
-        with pytest.raises(IdempotencyConflict):
+        with pytest.raises(IdempotencyKeyStateConflict):
             await submit_order(factory, wedap_call=wedap.submit_disbursement, req=req)
 
     assert any("order exists without idempotency record" in r.message for r in caplog.records)

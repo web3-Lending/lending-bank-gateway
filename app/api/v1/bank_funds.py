@@ -37,7 +37,7 @@ from app.domain.wedap_contract import (
 )
 from app.models.txn import BankTxnOrder
 from app.services.account_guard import assert_platform_account_allowed
-from app.services.idempotency import IdempotencyConflict
+from app.services.idempotency import IdempotencyRejection
 from app.services.reversal import submit_reversal
 from app.services.submit import SubmitRequest, submit_order
 
@@ -194,7 +194,7 @@ async def _submit(
     currency: str,
     wedap_payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """validate biz_seq_no → submit_order → catch IdempotencyConflict → ok envelope。"""
+    """validate biz_seq_no → submit_order → catch IdempotencyRejection → ok envelope。"""
     # 账户守门人（钱能去哪，与 S2S 的「谁能调」正交）：三个资金端点
     # （collect/distribute/refund）都经本 helper，一处收口全覆盖；enforce 拒绝
     # 发生在 submit_order 之前——不写 order、不占幂等、不调 wedap（fail-closed）。
@@ -239,10 +239,13 @@ async def _submit(
             400,
             detail={"code": "GW_400_VALIDATION", "message": str(exc)},
         ) from exc
-    except IdempotencyConflict as exc:
+    except IdempotencyRejection as exc:
+        # v2.2 §9.1 / API-HTTP-019：payload 不符 → 422（且不得 dispatch，拒绝发生在
+        # 事务1、任何外呼之前）；幂等键状态冲突 → 409。码与文案由异常自带，避免
+        # 在三个 API helper 里各写一份 isinstance 分派（漏一处就掉进错误的码）。
         raise HTTPException(
-            409,
-            detail={"code": "GW_409_IDEMPOTENCY", "message": f"idempotency conflict: {exc}"},
+            exc.http_status,
+            detail={"code": exc.code, "message": f"{exc.reason}: {exc}"},
         ) from exc
     return ok(result, trace_id=ids["trace_id"])
 
@@ -466,9 +469,11 @@ async def reverse_transaction(
         )
     except ValueError as exc:
         raise HTTPException(400, detail={"code": "GW_400_VALIDATION", "message": str(exc)}) from exc
-    except IdempotencyConflict as exc:
+    except IdempotencyRejection as exc:
+        # 同 _submit：payload 不符 422（§9.1），幂等键状态冲突 409。
         raise HTTPException(
-            409, detail={"code": "GW_409_IDEMPOTENCY", "message": f"idempotency conflict: {exc}"}
+            exc.http_status,
+            detail={"code": exc.code, "message": f"{exc.reason}: {exc}"},
         ) from exc
     return ok(result, trace_id=ids["trace_id"])
 

@@ -31,7 +31,7 @@ from app.domain.wedap_contract import (
     REPAYMENT_REQUIRED,
 )
 from app.models.txn import BankTxnOrder
-from app.services.idempotency import IdempotencyConflict
+from app.services.idempotency import IdempotencyRejection
 from app.services.submit import SubmitRequest, submit_order
 
 router = APIRouter(prefix="/api/v1/loans", tags=["loans"])
@@ -169,7 +169,7 @@ async def _submit(
     wedap_payload: dict[str, Any],
     repayment_contract: bool = False,
 ) -> dict[str, Any]:
-    """validate biz_seq_no → submit_order → catch IdempotencyConflict → ok envelope。"""
+    """validate biz_seq_no → submit_order → catch IdempotencyRejection → ok envelope。"""
     # 格式校验提到服务调用之前（submit_order 内仍保留同一校验，那是服务层不变量）：
     # 只有这样才分得清「非法 bizSeqNo，从未建单」与「已进服务后出错」——前者给
     # NOT_APPLIED，后者只能给 UNKNOWN + 查单地址（见 deps.mark_money_write_dispatch）。
@@ -202,10 +202,13 @@ async def _submit(
             400,
             detail={"code": "GW_400_VALIDATION", "message": str(exc)},
         ) from exc
-    except IdempotencyConflict as exc:
+    except IdempotencyRejection as exc:
+        # v2.2 §9.1 / API-HTTP-019：payload 不符 → 422（且不得 dispatch，拒绝发生在
+        # 事务1、任何外呼之前）；幂等键状态冲突 → 409。码与文案由异常自带，避免
+        # 在三个 API helper 里各写一份 isinstance 分派（漏一处就掉进错误的码）。
         raise HTTPException(
-            409,
-            detail={"code": "GW_409_IDEMPOTENCY", "message": f"idempotency conflict: {exc}"},
+            exc.http_status,
+            detail={"code": exc.code, "message": f"{exc.reason}: {exc}"},
         ) from exc
     return ok(result, trace_id=ids["trace_id"])
 

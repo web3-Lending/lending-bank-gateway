@@ -42,7 +42,7 @@ Global base set --- ``{414, 500}``:
     mounted outside the auth middleware and therefore fires on exempt paths too.
     ``500`` from ``add_exception_handler(Exception, ...)``: this service registers
     **no** domain-exception-to-status mapping, so every ``WedapError`` /
-    ``IdempotencyConflict`` / ``ValueError`` that escapes a handler's own
+    ``IdempotencyRejection`` / ``ValueError`` that escapes a handler's own
     ``try/except`` lands on the catch-all.
 
 ``401`` --- read off the live middleware stack, not hardcoded:
@@ -282,7 +282,16 @@ OPERATION_CONTRACTS: dict[tuple[str, str], OperationContract] = {
     # ── MONEY_WRITE primitives ────────────────────────────────────────────────
     # All six: 400 (require_headers, Idempotency-Key mismatch, amount guards, wedap
     # required/rejected field gates, invalid bizSeqNo, ValueError out of the submit
-    # service), 409 GW_409_IDEMPOTENCY, 422 (request-body model).
+    # service), 422 (request-body model, plus GW_422_IDEMPOTENCY_PAYLOAD_MISMATCH),
+    # 409 GW_409_IDEMPOTENCY.
+    #
+    # The same-key-different-payload rejection moved 409 -> 422 on 2026-08-31 to obey
+    # v2.2 §9.1 / API-HTTP-019, whose §6 row has no exception column to apply for.
+    # 409 stays declared on all six because it is still genuinely reachable, by a
+    # *different* cause: ``IdempotencyKeyStateConflict`` -- the order row exists while
+    # its idempotency row does not (hand-patched data / dirty migration), where the
+    # fingerprint cannot be read at all. Folding that into the 422 would tell callers
+    # "you changed the payload" when nobody knows whether they did.
     # 403 only on the three that route through `bank_funds._submit` ->
     # assert_platform_account_allowed. That 403 is gated on
     # GW_ACCOUNT_GUARD_MODE=enforce (default `off`), so it is reachable by
@@ -382,7 +391,8 @@ _ERROR_SCHEMAS: Mapping[str, dict[str, Any]] = {
                 "description": (
                     "Stable machine code, e.g. GW_400_VALIDATION, GW_401_S2S, "
                     "GW_403_ACCOUNT_NOT_ALLOWED, GW_404_ORDER, GW_409_IDEMPOTENCY, "
-                    "GW_414_URI_TOO_LONG, GW_422_VALIDATION, GW_500_INTERNAL, "
+                    "GW_414_URI_TOO_LONG, GW_422_VALIDATION, "
+                    "GW_422_IDEMPOTENCY_PAYLOAD_MISMATCH, GW_500_INTERNAL, "
                     "GW_502_UPSTREAM, GW_503_READYZ. Falls back to `GW_<status>` when "
                     "the raise site supplies a plain-string detail."
                 ),

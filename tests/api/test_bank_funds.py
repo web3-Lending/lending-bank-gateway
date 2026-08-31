@@ -139,8 +139,12 @@ def test_distribute_idempotent_replay_no_extra_call(client: TestClient) -> None:
     )
 
 
-def test_collect_same_key_different_payload_409(client: TestClient) -> None:
-    """同 Idempotency-Key 不同 payload（金额变化）→ payload hash 变化 → 409 GW_409_IDEMPOTENCY。"""
+def test_collect_same_key_different_payload_422(client: TestClient) -> None:
+    """同 Idempotency-Key 不同 payload（金额变化）→ payload hash 变化 → 422（v2.2 §9.1）。
+
+    §9.1 全 6 个写原语的横向一致性由 tests/api/test_idempotency_payload_mismatch.py 守；
+    本条是端点局部回归。
+    """
     client.post("/api/v1/bank-funds/collect-from-users", json=COLLECT_BODY, headers=HEADERS)
     mutated = {
         **COLLECT_BODY,
@@ -148,8 +152,8 @@ def test_collect_same_key_different_payload_409(client: TestClient) -> None:
         "userList": [{"userId": "U1", "amount": "999.0000"}],
     }
     r = client.post("/api/v1/bank-funds/collect-from-users", json=mutated, headers=HEADERS)
-    assert r.status_code == 409
-    assert r.json()["error"]["code"] == "GW_409_IDEMPOTENCY"
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "GW_422_IDEMPOTENCY_PAYLOAD_MISMATCH"
 
 
 def test_collect_idempotency_key_mismatch_400(client: TestClient) -> None:
@@ -167,9 +171,9 @@ def test_collect_no_idempotency_key_header_passes(client: TestClient) -> None:
     assert r.status_code == 200
 
 
-def test_distribute_same_key_different_payload_409(client: TestClient) -> None:
-    """distribute 同 Idempotency-Key 不同 payload → 409 GW_409_IDEMPOTENCY。
-    覆盖 bank_funds._submit 内的 IdempotencyConflict 分支。
+def test_distribute_same_key_different_payload_422(client: TestClient) -> None:
+    """distribute 同 Idempotency-Key 不同 payload → 422（v2.2 §9.1）。
+    覆盖 bank_funds._submit 内的 IdempotencyRejection 分支。
     """
     h = {**HEADERS, "Idempotency-Key": DISTRIBUTE_BODY["bizSeqNo"], "X-Request-Id": "req-dst2"}
     client.post("/api/v1/bank-funds/distribute-to-users", json=DISTRIBUTE_BODY, headers=h)
@@ -178,8 +182,8 @@ def test_distribute_same_key_different_payload_409(client: TestClient) -> None:
         "recipients": [{**DISTRIBUTE_BODY["recipients"][0], "distributeAmount": "999.0000"}],
     }
     r = client.post("/api/v1/bank-funds/distribute-to-users", json=mutated, headers=h)
-    assert r.status_code == 409
-    assert r.json()["error"]["code"] == "GW_409_IDEMPOTENCY"
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "GW_422_IDEMPOTENCY_PAYLOAD_MISMATCH"
 
 
 # ── 缺省 userList（wedap 真形态 body）修复验证 ───────────────────────────────────

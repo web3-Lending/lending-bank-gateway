@@ -7273,7 +7273,7 @@
         "properties": {
           "code": {
             "type": "string",
-            "description": "Stable machine code, e.g. GW_400_VALIDATION, GW_401_S2S, GW_403_ACCOUNT_NOT_ALLOWED, GW_404_ORDER, GW_409_IDEMPOTENCY, GW_414_URI_TOO_LONG, GW_422_VALIDATION, GW_500_INTERNAL, GW_502_UPSTREAM, GW_503_READYZ. Falls back to `GW_<status>` when the raise site supplies a plain-string detail."
+            "description": "Stable machine code, e.g. GW_400_VALIDATION, GW_401_S2S, GW_403_ACCOUNT_NOT_ALLOWED, GW_404_ORDER, GW_409_IDEMPOTENCY, GW_414_URI_TOO_LONG, GW_422_VALIDATION, GW_422_IDEMPOTENCY_PAYLOAD_MISMATCH, GW_500_INTERNAL, GW_502_UPSTREAM, GW_503_READYZ. Falls back to `GW_<status>` when the raise site supplies a plain-string detail."
           },
           "message": {
             "type": "string"

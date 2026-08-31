@@ -92,16 +92,16 @@ def test_refund_idempotent_replay_returns_first_response(client: TestClient) -> 
     assert client.app.state.wedap.refund.await_count == 1  # type: ignore[union-attr]
 
 
-def test_refund_conflict_same_biz_seq_no_different_amount_409(client: TestClient) -> None:
-    """同 bizSeqNo 改金额 → 409 GW_409_IDEMPOTENCY，拒绝不覆盖首单。"""
+def test_refund_conflict_same_biz_seq_no_different_amount_422(client: TestClient) -> None:
+    """同 bizSeqNo 改金额 → 422（v2.2 §9.1），拒绝不覆盖首单。"""
     client.post("/api/v1/bank-funds/refunds", json=REFUND_BODY, headers=HEADERS)
     r = client.post(
         "/api/v1/bank-funds/refunds",
         json={**REFUND_BODY, "refundAmount": "0.40"},
         headers=HEADERS,
     )
-    assert r.status_code == 409
-    assert r.json()["error"]["code"] == "GW_409_IDEMPOTENCY"
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "GW_422_IDEMPOTENCY_PAYLOAD_MISMATCH"
 
 
 def test_refund_missing_ori_biz_seq_no_422(client: TestClient) -> None:

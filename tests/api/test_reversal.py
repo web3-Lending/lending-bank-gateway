@@ -117,13 +117,13 @@ def test_reversal_bad_biz_seq_no_400(client: TestClient) -> None:
     assert r.json()["error"]["code"] == "GW_400_VALIDATION"
 
 
-def test_reversal_same_key_different_payload_409(client: TestClient) -> None:
-    """同 Idempotency-Key 不同 payload（金额变化）→ payload hash 变化 → 409 GW_409_IDEMPOTENCY。"""
+def test_reversal_same_key_different_payload_422(client: TestClient) -> None:
+    """同 Idempotency-Key 不同 payload（金额变化）→ payload hash 变化 → 422（v2.2 §9.1）。"""
     client.post("/api/v1/bank-funds/reversals", json=REVERSAL_BODY, headers=HEADERS)
     mutated = {**REVERSAL_BODY, "oriTxnAmount": "999.0000"}
     r = client.post("/api/v1/bank-funds/reversals", json=mutated, headers=HEADERS)
-    assert r.status_code == 409
-    assert r.json()["error"]["code"] == "GW_409_IDEMPOTENCY"
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "GW_422_IDEMPOTENCY_PAYLOAD_MISMATCH"
 
 
 def test_reversal_not_blocked_by_account_guard_enforce_mode(client: TestClient) -> None:

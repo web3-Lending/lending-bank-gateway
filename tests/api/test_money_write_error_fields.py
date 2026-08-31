@@ -1,8 +1,8 @@
 """MONEY_WRITE 写错误的 v2.2 §8.2 typed 字段（`error.details`）。
 
-§8.2 字段表 `resubmitAllowed` 一栏明写「**写错误必须**」，409 幂等冲突尤甚：§9.1 要求
-调用方「停止重放并先查询原 operation」——那正是 `outcome/retryPolicy/operationId` 要
-表达的。只给一个 `GW_409_IDEMPOTENCY` 字符串，消费方只能回去解析人类文案分支，与本波
+§8.2 字段表 `resubmitAllowed` 一栏明写「**写错误必须**」，同键异载荷（§9.1 的 422）尤甚：
+§9.1 要求调用方「停止重放并先查询原 operation」——那正是 `outcome/retryPolicy/operationId`
+要表达的。只给一个错误码字符串，消费方只能回去解析人类文案分支，与本波
 「让消费方能按 typed 字段分支」的目的正相反（2026-08-28 独立复核 MAJOR-3）。
 
 三条分界线，本模块逐条钉死：
@@ -112,13 +112,15 @@ def test_bad_biz_seq_no_400_says_not_applied(client: TestClient) -> None:
     assert "statusUrl" not in details
 
 
-def test_idempotency_conflict_409_says_unknown_with_status_url(client: TestClient) -> None:
+def test_idempotency_payload_mismatch_422_says_unknown_with_status_url(
+    client: TestClient,
+) -> None:
     """§9.1：同键不同 payload → 停止重放、先查原 operation。查单地址必须真给。"""
     first = client.post("/api/v1/bank-funds/collect-from-users", json=BODY, headers=HEADERS)
     assert first.status_code == 200
     mutated = {**BODY, "txnAmount": "999.0000", "userList": [{"userId": "U1", "amount": "999"}]}
     r = client.post("/api/v1/bank-funds/collect-from-users", json=mutated, headers=HEADERS)
-    assert r.status_code == 409
+    assert r.status_code == 422
     details = _details(r)
     assert details["outcome"] == "UNKNOWN"
     assert details["operationStatus"] == "RECONCILING"
@@ -126,14 +128,14 @@ def test_idempotency_conflict_409_says_unknown_with_status_url(client: TestClien
     assert details["resubmitAllowed"] is False
     assert details["operationId"] == BODY["bizSeqNo"]
     assert details["statusUrl"] == f"/api/v1/bank-funds/status?bizSeqNo={BODY['bizSeqNo']}"
-    # 查单地址不是死链：原单确实存在（409 的前提就是首单已落库）
+    # 查单地址不是死链：原单确实存在（422 的前提就是首单已落库）
     q = client.get(details["statusUrl"], headers=HEADERS)
     assert q.status_code == 200
     assert q.json()["data"]["bizSeqNo"] == BODY["bizSeqNo"]
 
 
-def test_repayment_409_points_at_dedicated_status_endpoint() -> None:
-    """还款的 409 必须指向还款专用查单端点（通用 5.5 查询不返回 debtSettled/steps[]）。"""
+def test_repayment_payload_mismatch_points_at_dedicated_status_endpoint() -> None:
+    """还款的 422 必须指向还款专用查单端点（通用 5.5 查询不返回 debtSettled/steps[]）。"""
     app = create_app()
     asyncio.run(_create_tables(app.state.engine))
     wedap = AsyncMock()
@@ -171,7 +173,7 @@ def test_repayment_409_points_at_dedicated_status_endpoint() -> None:
         "lenders": [{**body["lenders"][0], "txnAmount": "999.0000"}],
     }
     r = c.post("/api/v1/loans/p2p-repayments", json=mutated, headers=HEADERS)
-    assert r.status_code == 409
+    assert r.status_code == 422
     assert _details(r)["statusUrl"] == (f"/api/v1/loans/p2p-repayments/{body['bizSeqNo']}/status")
 
 

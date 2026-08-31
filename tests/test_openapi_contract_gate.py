@@ -669,9 +669,19 @@ def test_g10_checked_in_document_and_digest_match_the_live_spec(spec: dict[str, 
     assert OPENAPI_JSON.read_bytes() == live, (
         "docs/api-contract/openapi.json is stale -- regenerate it and review the diff"
     )
-    recorded = OPENAPI_SHA256.read_text(encoding="utf-8").split()[0]
+    recorded_text = OPENAPI_SHA256.read_text(encoding="utf-8")
+    recorded = recorded_text.split()[0]
     assert recorded == hashlib.sha256(live).hexdigest(), (
         "docs/api-contract/openapi.sha256 does not match the document"
+    )
+    # The digest line alone does not say *what* was hashed, and the four repos in this
+    # batch disagree (two hash the file bytes, two hash a canonical re-serialization).
+    # A consumer who guesses wrong concludes the artefact was tampered with. The
+    # self-description was hand-added once and silently wiped by the next generator run
+    # (2026-08-31), which is why it is asserted here rather than left to discipline.
+    assert "sha256sum -c openapi.sha256" in recorded_text, (
+        "openapi.sha256 lost its self-description -- regenerate with "
+        "scripts/gen_openapi_contract.py, which writes it"
     )
 
 

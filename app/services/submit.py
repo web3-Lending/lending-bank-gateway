@@ -24,8 +24,8 @@ from app.domain.states import (
 from app.models.txn import BankTxnOrder
 from app.services.audit import write_audit
 from app.services.idempotency import (
-    IdempotencyConflict,
     IdempotencyInFlight,
+    IdempotencyKeyStateConflict,
     check_or_register,
     record_response,
 )
@@ -128,7 +128,7 @@ async def register_and_accept_order(
       - dict → 直接作为响应 return（已完成重放的 first_response，或 in-flight 的
         PROCESSING 响应），调用方不外呼
       - None → 全新受理，order 已落 ACCEPTED，调用方继续外呼 + tx2
-    IntegrityError（order 存在但幂等行缺失）→ IdempotencyConflict（上抛由 API 层转 409）。
+    IntegrityError（order 存在但幂等行缺失）→ IdempotencyKeyStateConflict（API 层转 409）。
     """
     try:
         async with factory() as session:
@@ -166,7 +166,7 @@ async def register_and_accept_order(
                     req.tenant_id,
                     req.biz_seq_no,
                 )
-                raise IdempotencyConflict(req.biz_seq_no) from None
+                raise IdempotencyKeyStateConflict(req.biz_seq_no) from None
     except IdempotencyInFlight:
         # v2.2 §9.1「同键同 payload、已建立 durable operation 且仍未终态」：本仓的
         # durable operation（幂等行 + order 行）在 dispatch 前就已原子提交，故此处给得出
@@ -196,7 +196,8 @@ async def submit_order(
     """受理：事务1 幂等+order(ACCEPTED) 落库（禁外呼）→ wedap 外呼 → 事务2 状态推进+回写。
 
     幂等三态：已完成→重放 first_response；in-flight（含崩溃重放）→ PROCESSING 响应零外呼；
-    全新→执行。IdempotencyConflict 上抛由 API 层转 409。
+    全新→执行。幂等拒绝（IdempotencyRejection 两子类）上抛由 API 层按各自 http_status 转
+    422（payload 不符，v2.2 §9.1）/ 409（幂等键状态冲突）。
 
     外呼成功但事务2失败 → order 滞留 ACCEPTED：v1 运营收敛 SOP=对照 wedap 状态查询人工/worker
     推进（见 spec §7 在途单宽限）。

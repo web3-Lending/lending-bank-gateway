@@ -108,17 +108,19 @@ def test_invalid_amount_zero_400(client: TestClient) -> None:
     assert r.json()["error"]["code"] == "GW_400_VALIDATION"
 
 
-def test_same_key_different_payload_409(client: TestClient) -> None:
+def test_same_key_different_payload_422(client: TestClient) -> None:
+    """同键异载荷 → v2.2 §9.1 的 422（不是本仓旧口径的 409）。"""
     client.post("/api/v1/loans/p2p-disbursements", json=BODY, headers=HEADERS)
     # The variant must itself be valid (else it hits the sum guard 400 before reaching the
-    # idempotency 409): bump both total and lenders to 999.
+    # idempotency 422): bump both total and lenders to 999.
     mutated = {
         **BODY,
         "disbursementInfo": {**BODY["disbursementInfo"], "txnAmount": "999.0000"},
         "lenders": [{"userId": "L1", "lendAmount": "999.0000", "currencyCode": "USD"}],
     }
     r = client.post("/api/v1/loans/p2p-disbursements", json=mutated, headers=HEADERS)
-    assert r.status_code == 409 and r.json()["error"]["code"] == "GW_409_IDEMPOTENCY"
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "GW_422_IDEMPOTENCY_PAYLOAD_MISMATCH"
 
 
 def test_idempotent_replay_no_extra_call(client: TestClient) -> None:

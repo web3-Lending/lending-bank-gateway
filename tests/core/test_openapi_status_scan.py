@@ -153,7 +153,8 @@ def test_codes_from_raise_maps_known_exception_classes() -> None:
 
 def test_codes_from_raise_falls_back_to_the_catch_all_status() -> None:
     assert list(scan._codes_from_raise(parse_raise("raise WedapError('E', 'm')"))) == [500]
-    assert list(scan._codes_from_raise(parse_raise("raise errors.IdempotencyConflict"))) == [500]
+    unmapped = parse_raise("raise errors.IdempotencyPayloadMismatch")
+    assert list(scan._codes_from_raise(unmapped)) == [500]
 
 
 def test_codes_from_raise_ignores_unattributable_shapes() -> None:

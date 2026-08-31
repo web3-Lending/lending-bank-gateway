@@ -7,8 +7,8 @@ from sqlalchemy.exc import IntegrityError
 from app.core.db import build_engine, build_session_factory
 from app.models.base import Base
 from app.services.idempotency import (
-    IdempotencyConflict,
     IdempotencyInFlight,
+    IdempotencyPayloadMismatch,
     check_or_register,
     payload_hash,
     record_response,
@@ -113,7 +113,7 @@ async def test_same_key_different_payload_conflicts(session) -> None:
         path="/p",
         payload=PAYLOAD,
     )
-    with pytest.raises(IdempotencyConflict):
+    with pytest.raises(IdempotencyPayloadMismatch):
         await check_or_register(
             session,
             tenant_id="t1",
@@ -137,7 +137,7 @@ async def test_different_tenant_same_key_no_conflict(session) -> None:
         path="/p",
         payload=PAYLOAD,
     )
-    # t2 用同一 key + 不同 payload，不应抛 IdempotencyConflict
+    # t2 用同一 key + 不同 payload，不应抛 IdempotencyPayloadMismatch
     hit = await check_or_register(
         session,
         tenant_id="t2",
@@ -323,9 +323,10 @@ async def test_concurrent_insert_fallback_opponent_inflight_raises() -> None:
 
 @pytest.mark.asyncio
 async def test_concurrent_conflict_on_different_payload_raises() -> None:
-    """并发兜底路径：对手行 payload_hash 不同 → 仍抛 IdempotencyConflict。
+    """并发兜底路径：对手行 payload_hash 不同 → 仍抛 IdempotencyPayloadMismatch。
 
-    FOR UPDATE 查到的对手行持有不同 payload_hash，应抛 IdempotencyConflict（409）。
+    FOR UPDATE 查到的对手行持有不同 payload_hash，应抛 IdempotencyPayloadMismatch
+    （422，v2.2 §9.1）。
     """
     from app.models.idempotency import IdempotencyRecord
     from app.services.idempotency import payload_hash as _hash
@@ -371,7 +372,7 @@ async def test_concurrent_conflict_on_different_payload_raises() -> None:
     nested_cm.__aexit__ = nested_aexit
     session.begin_nested = MagicMock(return_value=nested_cm)
 
-    with pytest.raises(IdempotencyConflict):
+    with pytest.raises(IdempotencyPayloadMismatch):
         await check_or_register(
             session,
             tenant_id="t1",
@@ -379,7 +380,7 @@ async def test_concurrent_conflict_on_different_payload_raises() -> None:
             idempotency_key="concurrent_conflict_key",
             method="POST",
             path="/p",
-            payload=PAYLOAD,  # 与对手行 hash 不同 → 409
+            payload=PAYLOAD,  # 与对手行 hash 不同 → 422
         )
 
 
