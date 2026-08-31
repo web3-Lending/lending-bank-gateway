@@ -18,30 +18,30 @@ each set was derived and what is deliberately excluded.
 | `GET` | `/api/v1/admin/platform-accounts` | `200` | `401`, `403`, `414`, `422`, `500` | `ADMIN_CONFIG` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
 | `POST` | `/api/v1/admin/platform-accounts` | `200` | `400`, `401`, `403`, `409`, `414`, `422`, `500` | `ADMIN_CONFIG` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
 | `PATCH` | `/api/v1/admin/platform-accounts/{row_id}` | `200` | `400`, `401`, `403`, `404`, `414`, `422`, `500` | `ADMIN_CONFIG` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `GET` | `/api/v1/admin/stuck-orders` | `200` | `401`, `414`, `500` | `ADMIN_OPS` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `GET` | `/api/v1/admin/wedap-import/delivery-report` | `200` | `401`, `414`, `500` | `ADMIN_OPS` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
+| `GET` | `/api/v1/admin/stuck-orders` | `200` | `401`, `414`, `422`, `500` | `ADMIN_OPS` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
+| `GET` | `/api/v1/admin/wedap-import/delivery-report` | `200` | `401`, `414`, `422`, `500` | `ADMIN_OPS` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
 | `POST` | `/api/v1/bank-funds/collect-from-users` | `200` | `400`, `401`, `403`, `409`, `414`, `422`, `500` | `MONEY_WRITE` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
 | `POST` | `/api/v1/bank-funds/distribute-to-users` | `200` | `400`, `401`, `403`, `409`, `414`, `422`, `500` | `MONEY_WRITE` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
 | `POST` | `/api/v1/bank-funds/refunds` | `200` | `400`, `401`, `403`, `409`, `414`, `422`, `500` | `MONEY_WRITE` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
 | `POST` | `/api/v1/bank-funds/reversals` | `200` | `400`, `401`, `409`, `414`, `422`, `500` | `MONEY_WRITE` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
 | `GET` | `/api/v1/bank-funds/status` | `200` | `400`, `401`, `404`, `414`, `422`, `500` | `LEDGER_QUERY` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
 | `POST` | `/api/v1/callbacks/wedap/transactions` | `200` | `400`, `401`, `414`, `422`, `500` | `INBOUND_CALLBACK` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `GET` | `/api/v1/deposit/account/detail` | `200` | `400`, `401`, `414`, `500`, `502` | `GATEWAY_BFF` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `GET` | `/api/v1/deposit/accounts` | `200` | `400`, `401`, `414`, `500`, `502` | `GATEWAY_BFF` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `GET` | `/api/v1/deposit/balances/total` | `200` | `400`, `401`, `414`, `500`, `502` | `GATEWAY_BFF` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `GET` | `/api/v1/deposit/internal-accounts/info` | `200` | `400`, `401`, `414`, `500`, `502` | `GATEWAY_BFF` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `GET` | `/api/v1/deposit/internal-accounts/transactions` | `200` | `400`, `401`, `414`, `500`, `502` | `GATEWAY_BFF` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `GET` | `/api/v1/deposit/transactions` | `200` | `400`, `401`, `414`, `500`, `502` | `GATEWAY_BFF` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
+| `GET` | `/api/v1/deposit/account/detail` | `200` | `400`, `401`, `414`, `422`, `500`, `502` | `GATEWAY_BFF` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
+| `GET` | `/api/v1/deposit/accounts` | `200` | `400`, `401`, `414`, `422`, `500`, `502` | `GATEWAY_BFF` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
+| `GET` | `/api/v1/deposit/balances/total` | `200` | `400`, `401`, `414`, `422`, `500`, `502` | `GATEWAY_BFF` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
+| `GET` | `/api/v1/deposit/internal-accounts/info` | `200` | `400`, `401`, `414`, `422`, `500`, `502` | `GATEWAY_BFF` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
+| `GET` | `/api/v1/deposit/internal-accounts/transactions` | `200` | `400`, `401`, `414`, `422`, `500`, `502` | `GATEWAY_BFF` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
+| `GET` | `/api/v1/deposit/transactions` | `200` | `400`, `401`, `414`, `422`, `500`, `502` | `GATEWAY_BFF` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
 | `POST` | `/api/v1/loans/p2p-disbursements` | `200` | `400`, `401`, `409`, `414`, `422`, `500` | `MONEY_WRITE` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
 | `POST` | `/api/v1/loans/p2p-repayments` | `200` | `400`, `401`, `409`, `414`, `422`, `500` | `MONEY_WRITE` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `GET` | `/api/v1/loans/p2p-repayments/{biz_seq_no}/status` | `200` | `400`, `401`, `404`, `414`, `500` | `LEDGER_QUERY` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
+| `GET` | `/api/v1/loans/p2p-repayments/{biz_seq_no}/status` | `200` | `400`, `401`, `404`, `414`, `422`, `500` | `LEDGER_QUERY` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
 | `POST` | `/api/v1/recon/notify` | `200` | `400`, `401`, `414`, `422`, `500` | `INBOUND_CALLBACK` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `GET` | `/api/v1/users/info` | `200` | `400`, `401`, `414`, `500`, `502` | `GATEWAY_BFF` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
+| `GET` | `/api/v1/users/info` | `200` | `400`, `401`, `414`, `422`, `500`, `502` | `GATEWAY_BFF` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
 | `POST` | `/api/v1/wedap/import/enqueue` | `200` | `400`, `401`, `414`, `422`, `500` | `INTERNAL_WRITE` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `GET` | `/api/version` | `200` | `414`, `500` | `PUBLIC_PROBE` | `passthrough` | `application/json` | no | — |
-| `GET` | `/build-info` | `200` | `414`, `500` | `PUBLIC_PROBE` | `passthrough` | `application/json` | no | — |
-| `GET` | `/healthz` | `200` | `414`, `500` | `PUBLIC_PROBE` | `passthrough` | `application/json` | no | — |
-| `GET` | `/readyz` | `200` | `414`, `500`, `503` | `PUBLIC_PROBE` | `passthrough` | `application/json` | no | 503: `Retry-After` |
+| `GET` | `/api/version` | `200` | `414`, `422`, `500` | `PUBLIC_PROBE` | `passthrough` | `application/json` | no | — |
+| `GET` | `/build-info` | `200` | `414`, `422`, `500` | `PUBLIC_PROBE` | `passthrough` | `application/json` | no | — |
+| `GET` | `/healthz` | `200` | `414`, `422`, `500` | `PUBLIC_PROBE` | `passthrough` | `application/json` | no | — |
+| `GET` | `/readyz` | `200` | `414`, `422`, `500`, `503` | `PUBLIC_PROBE` | `passthrough` | `application/json` | no | 503: `Retry-After` |
 
 ## Route-level notes (statuses this service really returns but no operation declares)
 
@@ -59,14 +59,21 @@ The four `404`s that *are* declared are raised by handlers (`GW_404_OUTBOX`,
 
 **`429`** is absent because this repository contains no rate limiter at all.
 
-## Operations whose parameters cannot actually produce a `422`
+## Where each operation's `422` comes from
 
-A mechanical "`route.dependant` has parameters ⇒ `422` is reachable" rule would
-declare `422` on these two. Both were probed against a live `TestClient` and reach
-their handler instead, so `422` is excluded:
+Since 2026-08-31 every operation declares `422`, because the query-location guard
+(`app/core/query_location.py`, mounted as an application-level dependency) can
+reject any request at the boundary: a repeated query name, or a query name this
+service reads from the header location (API-HTTP-022). That guard reaches the four
+exempt public probes too — authentication does not gate it, and it does not gate
+authentication, because authentication here is middleware and middleware runs first.
 
-- `GET /api/v1/admin/wedap-import/delivery-report` — the only parameter is `import_date: str | None = None` -- an unconstrained optional string query. Every input is a valid `str`, and a repeated query key binds the last value rather than failing. Probed: `?import_date=a&import_date=b` reaches the handler.
-- `GET /api/v1/loans/p2p-repayments/{biz_seq_no}/status` — the only parameter is an unconstrained `str` path segment. A segment that fails to bind cannot exist -- an empty segment does not match the route at all (404 on a different request-target). Probed with a whitespace segment: reaches the handler.
+Two operations have **no `422` of their own** — their declared `422` is the boundary
+guard's alone, and a consumer must not read it as "this operation validates the
+parameter it declares":
+
+- `GET /api/v1/admin/wedap-import/delivery-report` — the only parameter is `import_date: str | None = None`, an unconstrained optional string query. Every input is a valid `str`.
+- `GET /api/v1/loans/p2p-repayments/{biz_seq_no}/status` — the only parameter is an unconstrained `str` path segment. A segment that fails to bind cannot exist — an empty segment does not match the route at all (404 on a different request-target).
 
 ## Authentication surface (derived from the mounted `S2SMiddleware`)
 
@@ -79,7 +86,7 @@ their handler instead, so `422` is excluded:
 ## How this table is kept honest
 
 The declaration snapshot is not trusted on its word. `tests/test_openapi_contract_gate.py`
-holds ten gates over it, every one of them mutation-verified (break one thing, watch
+holds eleven gates over it, every one of them mutation-verified (break one thing, watch
 that gate go red, put it back):
 
 | Gate | What it refuses to let through |
@@ -94,6 +101,7 @@ that gate go red, put it back):
 | G8 | Validation answering before authentication, or authentication answering before the request-target budget. |
 | G9 | An injected 502/503/500 that lands off-contract, loses a header, or leaves a row behind. |
 | G10 | A document that is not valid OpenAPI 3.1, or that has drifted from `openapi.json` / `openapi.sha256`. |
+| G11 | An operation that does not isolate the query location — probes every served operation with a repeated name and with a header-located name, so a route added later is covered the day it is added. |
 
 Regenerate `openapi.json` and `openapi.sha256` after any contract or route change:
 

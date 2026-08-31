@@ -64,7 +64,8 @@ UAT_CONTRACT = ROOT / "deploy" / "uat" / "uat-contract.json"
 SECRETS = Path.home() / ".lending-deploy" / "secrets.env"
 
 NO_APP_RELEASE_EXACT = {
-    "scripts/gen_openapi_contract.py",  # 生成 docs/api-contract/ 产物的 CLI，不在 Dockerfile COPY 名单内、不在运行时路径
+    # 生成 docs/api-contract/ 产物的 CLI，不在 Dockerfile COPY 名单内、不在运行时路径
+    "scripts/gen_openapi_contract.py",
     ".gitignore",
     "CLAUDE.md",
     "AGENTS.md",

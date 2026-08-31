@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -41,6 +41,7 @@ from app.core.context import (
 from app.core.db import build_engine, build_session_factory
 from app.core.envelope import err
 from app.core.openapi_contract import build_openapi
+from app.core.query_location import enforce_query_location
 from app.core.s2s import S2SMiddleware, parse_caller_tokens
 from app.workers.supervisor import supervised
 
@@ -465,7 +466,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "（GW_S2S_CALLER_TOKENS）绑定身份"
                 )
 
-    app = FastAPI(title="lending-bank-gateway", version="0.1.0", lifespan=_lifespan)
+    app = FastAPI(
+        title="lending-bank-gateway",
+        version="0.1.0",
+        lifespan=_lifespan,
+        # API-HTTP-022 / §7.2.1 第 3、6、7 条：query 是独立 location，重复标量与
+        # 混入的 header 名在**任何 handler、任何 DB 访问、任何上游调用之前**拒掉。
+        # 挂在 app 级而不是逐路由挂：新增路由自动被覆盖，漏挂不可能发生
+        # （tests/test_openapi_contract_gate.py::test_g11_* 对全部在服的 operation
+        # 逐条实测，新增一条没被覆盖就红）。
+        # 与鉴权的先后：本仓鉴权是 S2SMiddleware，中间件恒先于路由与依赖求解，
+        # 所以「先认证、后拒未声明输入」的顺序在这里不可能被这个依赖打乱。
+        dependencies=[Depends(enforce_query_location)],
+    )
     # 全进程统一从 app.state.settings 取配置（lifespan/worker 不再各自调 get_settings）
     app.state.settings = settings
 

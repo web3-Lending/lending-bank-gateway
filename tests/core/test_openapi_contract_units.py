@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 from app.core.config import Settings
 from app.core.openapi_contract import (
@@ -92,3 +92,41 @@ def test_generator_runs_against_an_app_built_from_explicit_settings() -> None:
     """A configured app serves the same 28 operations as the default one."""
     app = create_app(Settings(wedap_callback_api_key="unit-key"))
     assert len(build_openapi(app)["paths"]) == len({path for _method, path in OPERATION_CONTRACTS})
+
+
+# ── query-location guard, unit level ─────────────────────────────────────────
+
+
+def test_query_location_params_validates_when_state_is_unset() -> None:
+    """A handler exercised outside the application still gets a validated mapping.
+
+    The application-level dependency normally fills ``request.state.query_location``
+    before any handler runs. A direct unit call has no such dependency, and the
+    fallback must validate rather than hand back raw, unchecked query parameters --
+    otherwise the one path that skips the guard is the one a unit test exercises.
+    """
+    from starlette.requests import Request
+
+    from app.core.query_location import query_location_params
+
+    def _request(query: str) -> Request:
+        return Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/probe",
+                "headers": [],
+                "query_string": query.encode(),
+            }
+        )
+
+    assert query_location_params(_request("a=1&b=2")) == {"a": "1", "b": "2"}
+
+    with pytest.raises(HTTPException) as duplicated:
+        query_location_params(_request("a=1&a=2"))
+    assert duplicated.value.detail["code"] == "GW_422_DUPLICATE_QUERY_PARAMETER"
+
+    # And once the state slot is filled, the stored mapping is returned as-is.
+    request = _request("a=1")
+    assert query_location_params(request) == {"a": "1"}
+    assert query_location_params(request) == {"a": "1"}

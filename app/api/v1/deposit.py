@@ -28,6 +28,7 @@ from app.api.deps import require_headers
 from app.clients.wedap import WedapError
 from app.core.amounts import AmountGuardError, parse_guarded_decimal
 from app.core.envelope import ok
+from app.core.query_location import query_location_params
 from app.models.query_audit import BalanceSnapshot, QueryAudit
 
 logger = logging.getLogger(__name__)
@@ -109,7 +110,7 @@ async def deposit_balance_total(
     契约 C 薄透传：不再只挑 userId，按 users/info 同款全透传，wedap 必填的
     bizSeqNo/channelId 及四标识由调用方携带即原样转发，gateway 不剪裁。
     """
-    params = dict(request.query_params)
+    params = query_location_params(request)
     wedap = request.app.state.wedap
     data = await _audited_passthrough(
         request,
@@ -181,7 +182,7 @@ async def deposit_accounts(
     hdr: dict[str, str] = Depends(require_headers),
 ) -> dict[str, Any]:
     """账户列表查询：原样透传所有 query params（含 wedap 必填 bizSeqNo/channelId）+ 审计。"""
-    params = dict(request.query_params)
+    params = query_location_params(request)
     wedap = request.app.state.wedap
     data = await _audited_passthrough(
         request,
@@ -203,7 +204,7 @@ async def deposit_account_detail(
     hdr: dict[str, str] = Depends(require_headers),
 ) -> dict[str, Any]:
     """账户详情查询（§5.3）：原样透传所有 query params（custAccountNo 等）+ 审计。"""
-    params = dict(request.query_params)
+    params = query_location_params(request)
     wedap = request.app.state.wedap
     data = await _audited_passthrough(
         request,
@@ -228,7 +229,7 @@ async def users_info(
 
     params 原样透传 wedap（契约 C）；参数白名单收紧候选项见 spec §11 协调清单。
     """
-    params = dict(request.query_params)
+    params = query_location_params(request)
     wedap = request.app.state.wedap
     data = await _audited_passthrough(
         request,
@@ -255,7 +256,7 @@ async def deposit_transactions(
     由调用方带，gateway 不剪裁（契约 C）；对账/账单展示的证据面查询统一走本端点，
     上游不再直调 wedap。
     """
-    params = dict(request.query_params)
+    params = query_location_params(request)
     wedap = request.app.state.wedap
     data = await _audited_passthrough(
         request,
@@ -283,7 +284,7 @@ async def internal_account_info(
     accountBalance），与 balances/total 的 accounts[] 不同，故快照单独落一行；
     accountNo 缺失 / 余额不可解析时跳过快照并 warning，不让查询整体失败。
     """
-    params = dict(request.query_params)
+    params = query_location_params(request)
     wedap = request.app.state.wedap
     data = await _audited_passthrough(
         request,
@@ -361,7 +362,7 @@ async def internal_account_transactions(
     gateway 不剪裁（契约 C）。流水明细不落快照——与 §5.4 deposit/transactions
     同口径，快照只锚余额。
     """
-    params = dict(request.query_params)
+    params = query_location_params(request)
     wedap = request.app.state.wedap
     data = await _audited_passthrough(
         request,

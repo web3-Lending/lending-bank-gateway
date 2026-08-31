@@ -2174,6 +2174,39 @@
               }
             }
           },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content",
+            "headers": {
+              "Cache-Control": {
+                "description": "Always `no-store`; this service has no cacheable GET.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Request-Id": {
+                "description": "Controlled echo of the caller's X-Request-Id, or a freshly minted `req-<uuid4hex>` when absent or malformed.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Trace-Id": {
+                "description": "Correlation id, mirrored into the response body's `trace_id`.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
           "500": {
             "content": {
               "application/json": {
@@ -2324,6 +2357,39 @@
               }
             },
             "description": "URI Too Long",
+            "headers": {
+              "Cache-Control": {
+                "description": "Always `no-store`; this service has no cacheable GET.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Request-Id": {
+                "description": "Controlled echo of the caller's X-Request-Id, or a freshly minted `req-<uuid4hex>` when absent or malformed.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Trace-Id": {
+                "description": "Correlation id, mirrored into the response body's `trace_id`.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content",
             "headers": {
               "Cache-Control": {
                 "description": "Always `no-store`; this service has no cacheable GET.",
@@ -4185,6 +4251,39 @@
               }
             }
           },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content",
+            "headers": {
+              "Cache-Control": {
+                "description": "Always `no-store`; this service has no cacheable GET.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Request-Id": {
+                "description": "Controlled echo of the caller's X-Request-Id, or a freshly minted `req-<uuid4hex>` when absent or malformed.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Trace-Id": {
+                "description": "Correlation id, mirrored into the response body's `trace_id`.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
           "500": {
             "content": {
               "application/json": {
@@ -4383,6 +4482,39 @@
               }
             },
             "description": "URI Too Long",
+            "headers": {
+              "Cache-Control": {
+                "description": "Always `no-store`; this service has no cacheable GET.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Request-Id": {
+                "description": "Controlled echo of the caller's X-Request-Id, or a freshly minted `req-<uuid4hex>` when absent or malformed.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Trace-Id": {
+                "description": "Correlation id, mirrored into the response body's `trace_id`.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content",
             "headers": {
               "Cache-Control": {
                 "description": "Always `no-store`; this service has no cacheable GET.",
@@ -4629,6 +4761,39 @@
               }
             }
           },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content",
+            "headers": {
+              "Cache-Control": {
+                "description": "Always `no-store`; this service has no cacheable GET.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Request-Id": {
+                "description": "Controlled echo of the caller's X-Request-Id, or a freshly minted `req-<uuid4hex>` when absent or malformed.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Trace-Id": {
+                "description": "Correlation id, mirrored into the response body's `trace_id`.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
           "500": {
             "content": {
               "application/json": {
@@ -4827,6 +4992,39 @@
               }
             },
             "description": "URI Too Long",
+            "headers": {
+              "Cache-Control": {
+                "description": "Always `no-store`; this service has no cacheable GET.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Request-Id": {
+                "description": "Controlled echo of the caller's X-Request-Id, or a freshly minted `req-<uuid4hex>` when absent or malformed.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Trace-Id": {
+                "description": "Correlation id, mirrored into the response body's `trace_id`.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content",
             "headers": {
               "Cache-Control": {
                 "description": "Always `no-store`; this service has no cacheable GET.",
@@ -5073,6 +5271,39 @@
               }
             }
           },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content",
+            "headers": {
+              "Cache-Control": {
+                "description": "Always `no-store`; this service has no cacheable GET.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Request-Id": {
+                "description": "Controlled echo of the caller's X-Request-Id, or a freshly minted `req-<uuid4hex>` when absent or malformed.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Trace-Id": {
+                "description": "Correlation id, mirrored into the response body's `trace_id`.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
           "500": {
             "content": {
               "application/json": {
@@ -5271,6 +5502,39 @@
               }
             },
             "description": "URI Too Long",
+            "headers": {
+              "Cache-Control": {
+                "description": "Always `no-store`; this service has no cacheable GET.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Request-Id": {
+                "description": "Controlled echo of the caller's X-Request-Id, or a freshly minted `req-<uuid4hex>` when absent or malformed.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Trace-Id": {
+                "description": "Correlation id, mirrored into the response body's `trace_id`.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content",
             "headers": {
               "Cache-Control": {
                 "description": "Always `no-store`; this service has no cacheable GET.",
@@ -6083,6 +6347,39 @@
               }
             }
           },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content",
+            "headers": {
+              "Cache-Control": {
+                "description": "Always `no-store`; this service has no cacheable GET.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Request-Id": {
+                "description": "Controlled echo of the caller's X-Request-Id, or a freshly minted `req-<uuid4hex>` when absent or malformed.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Trace-Id": {
+                "description": "Correlation id, mirrored into the response body's `trace_id`.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
           "500": {
             "content": {
               "application/json": {
@@ -6505,6 +6802,39 @@
               }
             }
           },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content",
+            "headers": {
+              "Cache-Control": {
+                "description": "Always `no-store`; this service has no cacheable GET.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Request-Id": {
+                "description": "Controlled echo of the caller's X-Request-Id, or a freshly minted `req-<uuid4hex>` when absent or malformed.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Trace-Id": {
+                "description": "Correlation id, mirrored into the response body's `trace_id`.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
           "500": {
             "content": {
               "application/json": {
@@ -6886,6 +7216,39 @@
               }
             }
           },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content",
+            "headers": {
+              "Cache-Control": {
+                "description": "Always `no-store`; this service has no cacheable GET.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Request-Id": {
+                "description": "Controlled echo of the caller's X-Request-Id, or a freshly minted `req-<uuid4hex>` when absent or malformed.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Trace-Id": {
+                "description": "Correlation id, mirrored into the response body's `trace_id`.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
           "500": {
             "content": {
               "application/json": {
@@ -6978,6 +7341,39 @@
               }
             },
             "description": "URI Too Long",
+            "headers": {
+              "Cache-Control": {
+                "description": "Always `no-store`; this service has no cacheable GET.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Request-Id": {
+                "description": "Controlled echo of the caller's X-Request-Id, or a freshly minted `req-<uuid4hex>` when absent or malformed.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Trace-Id": {
+                "description": "Correlation id, mirrored into the response body's `trace_id`.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content",
             "headers": {
               "Cache-Control": {
                 "description": "Always `no-store`; this service has no cacheable GET.",
@@ -7117,6 +7513,39 @@
               }
             }
           },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content",
+            "headers": {
+              "Cache-Control": {
+                "description": "Always `no-store`; this service has no cacheable GET.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Request-Id": {
+                "description": "Controlled echo of the caller's X-Request-Id, or a freshly minted `req-<uuid4hex>` when absent or malformed.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Trace-Id": {
+                "description": "Correlation id, mirrored into the response body's `trace_id`.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
           "500": {
             "content": {
               "application/json": {
@@ -7206,6 +7635,39 @@
               }
             },
             "description": "URI Too Long",
+            "headers": {
+              "Cache-Control": {
+                "description": "Always `no-store`; this service has no cacheable GET.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Request-Id": {
+                "description": "Controlled echo of the caller's X-Request-Id, or a freshly minted `req-<uuid4hex>` when absent or malformed.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Trace-Id": {
+                "description": "Correlation id, mirrored into the response body's `trace_id`.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content",
             "headers": {
               "Cache-Control": {
                 "description": "Always `no-store`; this service has no cacheable GET.",

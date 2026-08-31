@@ -37,9 +37,16 @@ Truthfulness rules this snapshot obeys
 
 How the failure sets were derived
 ---------------------------------
-Global base set --- ``{414, 500}``:
+Global base set --- ``{414, 422, 500}``:
     ``414`` from :class:`~app.core.context.RequestTargetLimitMiddleware`, which is
     mounted outside the auth middleware and therefore fires on exempt paths too.
+    ``422`` from :func:`~app.core.query_location.enforce_query_location`, mounted as
+    an **application-level** dependency in ``create_app`` and therefore reachable on
+    every operation, exempt public probes included: a repeated query name or a query
+    name belonging to the header location is rejected before the handler runs
+    (API-HTTP-022). Operations that can *also* produce a 422 from their own body
+    model or a declared query parameter still list it explicitly below, so the
+    per-operation reason survives; the set folds the duplicates.
     ``500`` from ``add_exception_handler(Exception, ...)``: this service registers
     **no** domain-exception-to-status mapping, so every ``WedapError`` /
     ``IdempotencyRejection`` / ``ValueError`` that escapes a handler's own
@@ -70,10 +77,12 @@ Global base set --- ``{414, 500}``:
     through the guard (``loans._submit`` is a separate helper and ``submit_reversal``
     is called directly), so they do not declare ``403``.
 
-``422`` --- only where a parameter can actually fail validation. See
-    :data:`NO_422_JUSTIFICATION` for the two operations whose ``route.dependant``
-    is non-empty and yet cannot produce a ``422``; both were probed against a live
-    ``TestClient`` before being excluded.
+``422`` --- universal since the query-location guard became an app-level
+    dependency (2026-08-31); see the global base set above. Two operations whose own
+    parameters cannot fail validation are recorded in
+    :data:`NO_OWN_422_JUSTIFICATION`: they still declare ``422``, but only the
+    boundary guard can produce it, which is a different promise to a consumer than
+    "this operation validates its parameters".
 
 ``502`` --- the seven wedap passthrough queries in ``app/api/v1/deposit.py``, which
     map every upstream failure onto ``502 GW_502_UPSTREAM``.
@@ -118,13 +127,13 @@ CHALLENGE_APIKEY = 'ApiKey realm="lending-bank-gateway", header="apikey"'
 _AUTH_HEADERS: Mapping[int, tuple[str, ...]] = {401: ("WWW-Authenticate",)}
 
 #: Failure statuses every operation can produce -- see the module docstring.
-GLOBAL_BASE_FAILURES: tuple[int, ...] = (414, 500)
+GLOBAL_BASE_FAILURES: tuple[int, ...] = (414, 422, 500)
 
-#: Operations whose ``route.dependant`` carries a parameter and that nonetheless
-#: cannot emit a ``422``, with the reason. Recorded here rather than silently
-#: omitted, because a mechanical "has parameters => 422 is reachable" rule would
-#: include them and a reader deserves to see why this snapshot disagrees.
-NO_422_JUSTIFICATION: Mapping[tuple[str, str], str] = {
+#: Operations whose own parameters cannot fail validation. They still declare
+#: ``422`` -- the app-level query-location guard reaches every operation -- but the
+#: distinction is worth recording: a consumer reading "422" here must not conclude
+#: that these operations validate the parameter they declare.
+NO_OWN_422_JUSTIFICATION: Mapping[tuple[str, str], str] = {
     ("GET", "/api/v1/admin/wedap-import/delivery-report"): (
         "the only parameter is `import_date: str | None = None` -- an unconstrained "
         "optional string query. Every input is a valid `str`, and a repeated query key "
@@ -202,10 +211,12 @@ def _contract(
         success_status=200,
         failure_statuses=tuple(sorted(statuses)),
         profile=profile,
-        # No route in this repository mounts a dependency that rejects undeclared
-        # query parameters, and the seven deposit passthroughs forward
-        # `dict(request.query_params)` upstream verbatim. Declaring "reject" here
-        # would be a lie the G5 gate catches.
+        # Still `passthrough`, and deliberately so: the app-level query-location
+        # guard rejects *repeated* names and names belonging to the header location
+        # (API-HTTP-022), but a name this operation simply does not declare is still
+        # accepted -- closing that (API-HTTP-021) needs a per-operation allow-list
+        # the bank contract does not yet pin down for the seven passthroughs.
+        # Declaring "reject" here would be a lie the G5 gate catches.
         unknown_query="passthrough",
         error_media_type="application/json",
         problem_compliant=False,
@@ -255,7 +266,7 @@ OPERATION_CONTRACTS: dict[tuple[str, str], OperationContract] = {
         profile="ADMIN_OPS",
     ),
     ("GET", "/api/v1/admin/wedap-import/delivery-report"): _contract(
-        # 422 deliberately absent -- see NO_422_JUSTIFICATION.
+        # No own 422 -- see NO_OWN_422_JUSTIFICATION; the boundary guard still has one.
         failures=(),
         profile="ADMIN_OPS",
     ),
@@ -333,7 +344,7 @@ OPERATION_CONTRACTS: dict[tuple[str, str], OperationContract] = {
         profile="LEDGER_QUERY",
     ),
     ("GET", "/api/v1/loans/p2p-repayments/{biz_seq_no}/status"): _contract(
-        # 422 deliberately absent -- see NO_422_JUSTIFICATION. Same wedap
+        # No own 422 -- see NO_OWN_422_JUSTIFICATION. Same wedap
         # degrade-to-body behaviour as above, hence no 502.
         failures=(400, 404),
         profile="LEDGER_QUERY",
@@ -341,9 +352,11 @@ OPERATION_CONTRACTS: dict[tuple[str, str], OperationContract] = {
     # ── wedap passthrough queries (GATEWAY_BFF) ───────────────────────────────
     # Uniform shape: 400 require_headers, 502 GW_502_UPSTREAM for all three upstream
     # failure classes (timeout/transport, non-2xx, wedap business rejection).
-    # No 422 -- none of the seven declares a single validated parameter; each forwards
-    # `dict(request.query_params)` upstream verbatim, which is also why
-    # unknown_query is `passthrough` rather than `reject`.
+    # No *own* 422 -- none of the seven declares a validated parameter; the 422 they
+    # carry is the boundary query-location guard's. Each forwards only the validated
+    # query-location mapping (`query_location_params`) upstream, never headers, which
+    # is what API-HTTP-022 asks for; unknown *names* within that mapping are still
+    # passed through, hence unknown_query is `passthrough` rather than `reject`.
     ("GET", "/api/v1/deposit/balances/total"): _contract(
         failures=(400, 502), profile="GATEWAY_BFF"
     ),

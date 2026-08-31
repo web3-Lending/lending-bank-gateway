@@ -758,3 +758,123 @@ def test_g10_registry_entries_are_frozen_dataclasses() -> None:
     assert isinstance(contract, OperationContract)
     with pytest.raises(FrozenInstanceError):
         contract.success_status = 201  # type: ignore[misc]
+
+
+# ── G11 · every operation isolates the query location, new routes included ───
+
+
+def test_g11_every_operation_rejects_a_duplicated_query_parameter() -> None:
+    """API-HTTP-022 on the served surface, one real request per operation.
+
+    Written as a loop over ``served_routes`` rather than a list of paths on purpose:
+    the guard is mounted once, at application level, and this gate is what makes that
+    mounting provable. A route added tomorrow is probed by this test the day it is
+    added -- if somebody ever replaces the app-level dependency with per-router
+    mounting and forgets one router, the new operation answers 200 here and the gate
+    goes red. It reads only the response, never the mounting, so it stays correct
+    across FastAPI versions that represent ``include_router`` differently.
+    """
+    app = create_app()
+    asyncio.run(create_tables(app.state.engine))
+    client = TestClient(app, raise_server_exceptions=False)
+
+    for method, path, _route in served_routes(app):
+        response = client.request(
+            method,
+            f"{concrete(path)}?dup=1&dup=2",
+            headers={"X-Caller-Service": "gate-probe"},
+        )
+        assert response.status_code == 422, (
+            f"{method} {path}: duplicated query parameter answered "
+            f"{response.status_code}, not 422 -- is the query-location guard mounted?"
+        )
+        assert response.json()["error"]["code"] == "GW_422_DUPLICATE_QUERY_PARAMETER"
+        assert 422 in OPERATION_CONTRACTS[(method, path)].declared_statuses(), (
+            f"{method} {path}: the guard's 422 is reachable but undeclared"
+        )
+
+
+def test_g11_every_operation_rejects_a_header_named_query_parameter() -> None:
+    """The other half of the location rule: a header-located name sent as query."""
+    app = create_app()
+    asyncio.run(create_tables(app.state.engine))
+    client = TestClient(app, raise_server_exceptions=False)
+
+    for method, path, _route in served_routes(app):
+        response = client.request(
+            method,
+            f"{concrete(path)}?X-Tenant-Id=smuggled",
+            headers={"X-Caller-Service": "gate-probe"},
+        )
+        assert response.status_code == 422, f"{method} {path}: {response.status_code}"
+        assert response.json()["error"]["code"] == "GW_422_QUERY_LOCATION_CONFLICT"
+
+
+def test_g11_control_a_well_formed_query_is_not_rejected() -> None:
+    """Without this, G11 would also pass on a service that 422s every request."""
+    app = create_app()
+    asyncio.run(create_tables(app.state.engine))
+    client = TestClient(app, raise_server_exceptions=False)
+
+    guard_codes = {"GW_422_DUPLICATE_QUERY_PARAMETER", "GW_422_QUERY_LOCATION_CONFLICT"}
+    rejected: list[tuple[str, str, str]] = []
+    for method, path, _route in served_routes(app):
+        response = client.request(
+            method,
+            f"{concrete(path)}?single=1",
+            headers={"X-Caller-Service": "gate-probe"},
+        )
+        # A 422 is allowed here -- `GET /api/v1/admin/platform-accounts` has a
+        # required `tenantId` query and legitimately rejects a request without it.
+        # What must never happen is the *guard* firing on a single well-formed name.
+        code = (response.json().get("error") or {}).get("code")
+        if code in guard_codes:
+            rejected.append((method, path, code))
+    assert rejected == [], (
+        "the query-location guard rejected a single, well-formed, non-repeated query "
+        f"parameter: {rejected}"
+    )
+
+
+def test_g11_header_location_names_are_the_ones_this_service_really_reads() -> None:
+    """The reserved list is a claim about the code; check it against the code.
+
+    A header this service reads that is *missing* from the list is a smuggling route
+    left open. Grepping the application package for the literal is how the list was
+    built in the first place, so this is the check that keeps it from rotting when a
+    new header is introduced.
+    """
+    from app.core.query_location import HEADER_LOCATION_NAMES
+
+    app_dir = Path(__file__).resolve().parent.parent / "app"
+    sources = "\n".join(path.read_text(encoding="utf-8") for path in sorted(app_dir.rglob("*.py")))
+    header_reads = set(re.findall(r'request\.headers\.get\(\s*"([^"]+)"', sources))
+
+    missing = sorted(name for name in header_reads if name.lower() not in HEADER_LOCATION_NAMES)
+    assert missing == [], (
+        f"header fields read by this service but absent from HEADER_LOCATION_NAMES: {missing}"
+    )
+
+
+def test_g11_no_handler_reads_the_raw_query_multidict() -> None:
+    """Handlers consume the validated mapping, never ``request.query_params``.
+
+    Defence in depth rather than a duplicate of the behavioural gates above: with the
+    boundary guard mounted, ``dict(request.query_params)`` happens to be equivalent
+    today, because the only inputs on which the two differ are exactly the ones the
+    guard rejects. That equivalence is a property of the current guard, not of the
+    handler -- narrow the guard tomorrow and a handler still holding the raw
+    multidict silently goes back to last-wins. Keeping the last-wins primitive out of
+    handler code is what makes that impossible rather than merely unlikely.
+    """
+    api_dir = Path(__file__).resolve().parent.parent / "app" / "api"
+    offenders = [
+        f"{path.relative_to(api_dir.parent.parent)}:{number}"
+        for path in sorted(api_dir.rglob("*.py"))
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if "request.query_params" in line
+    ]
+    assert offenders == [], (
+        "handlers must call app.core.query_location.query_location_params instead of "
+        f"reading the raw query multidict: {offenders}"
+    )
