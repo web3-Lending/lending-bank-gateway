@@ -60,6 +60,8 @@ from app.core.openapi_contract import (
     OpenApiContractError,
     OperationContract,
     apply_contracts,
+    CHALLENGE_APIKEY,
+    CHALLENGE_S2S,
     authentication_challenge,
     build_openapi,
     iter_operations,
@@ -878,3 +880,108 @@ def test_g11_no_handler_reads_the_raw_query_multidict() -> None:
         "handlers must call app.core.query_location.query_location_params instead of "
         f"reading the raw query multidict: {offenders}"
     )
+
+
+# ---------------------------------------------------------------------------
+# G12 --- "you will get 401" is only half a contract
+# ---------------------------------------------------------------------------
+#
+# Declaring 401 without declaring ``security`` tells a consumer "this will reject
+# you" and nothing about how not to be rejected. An SDK generated from such a spec
+# has no credential parameter on those calls at all, so the caller finds out at
+# runtime by getting a 401.
+#
+# Both sides are derived from the same mounted ``S2SMiddleware`` instance that
+# ``authentication_challenge`` reads: the challenge decides whether an operation
+# can answer 401, and the same challenge decides which credential avoids it.
+# Deriving them apart is how they drift; deriving them together makes any drift a
+# contradiction these gates can see.
+#
+# Sister gates: lending-core's ``test_openapi_security_declared.py``, baffle's
+# equivalent and lending-recon's G11. Measured 2026-08-31, this service declared
+# 401 on 24 operations and a credential on none of them.
+
+
+def test_g12_security_set_equals_the_401_set(spec: dict[str, Any]) -> None:
+    with_security = {
+        (method, path)
+        for path, item in spec["paths"].items()
+        for method, operation in item.items()
+        if method in {"get", "post", "put", "patch", "delete"} and operation.get("security")
+    }
+    with_401 = {
+        (method, path)
+        for path, item in spec["paths"].items()
+        for method, operation in item.items()
+        if method in {"get", "post", "put", "patch", "delete"}
+        and "401" in (operation.get("responses") or {})
+    }
+    assert with_security == with_401, (
+        "The 'needs a credential' set and the 'answers 401' set disagree. Both come from "
+        "the mounted S2SMiddleware, so a disagreement means one derivation is wrong -- and "
+        "neither is checkable by looking at it alone.\n"
+        f"  declares 401 but no credential: {sorted(with_401 - with_security)[:5]}\n"
+        f"  declares a credential but no 401: {sorted(with_security - with_401)[:5]}"
+    )
+
+
+def test_g12_the_set_is_not_empty(spec: dict[str, Any]) -> None:
+    """Anti-vacuity guard: two empty sets are also equal."""
+    count = sum(
+        1
+        for _path, item in spec["paths"].items()
+        for method, operation in item.items()
+        if method in {"get", "post", "put", "patch", "delete"} and operation.get("security")
+    )
+    assert count >= 20, (
+        f"Only {count} operations carry security. All but four of this service's operations "
+        "sit behind S2SMiddleware, so a small number means the route walk lost them rather "
+        "than that the surface is public."
+    )
+
+
+def test_g12_each_operation_declares_the_credential_its_challenge_names(
+    contract_app: FastAPI, spec: dict[str, Any]
+) -> None:
+    """The declared scheme must match the challenge that path really answers with.
+
+    An S2S path that advertised the callback's ``apikey`` (or the reverse) would
+    send integrators to collect the wrong header -- a failure the set comparison
+    above cannot see, because both sets would still be the same size.
+    """
+    expected_by_challenge = {
+        CHALLENGE_S2S: {"S2SToken", "CallerService"},
+        CHALLENGE_APIKEY: {"BankApiKey"},
+    }
+    for method, path, _route in served_routes(contract_app):
+        operation = spec["paths"][path][method.lower()]
+        challenge = authentication_challenge(contract_app, path)
+        declared = {name for requirement in operation.get("security") or [] for name in requirement}
+        if challenge is None:
+            assert not declared, f"{method} {path} is exempt from S2S but declares {declared}"
+        else:
+            assert declared == expected_by_challenge[challenge], (
+                f"{method} {path} answers 401 with {challenge!r} but declares {declared or 'nothing'}"
+            )
+
+
+def test_g12_every_referenced_scheme_is_defined(spec: dict[str, Any]) -> None:
+    defined = set((spec.get("components") or {}).get("securitySchemes") or {})
+    for path, item in spec["paths"].items():
+        for method, operation in item.items():
+            if method not in {"get", "post", "put", "patch", "delete"}:
+                continue
+            for requirement in operation.get("security") or []:
+                for name in requirement:
+                    assert name in defined, f"{method.upper()} {path} references undefined scheme {name!r}"
+
+
+def test_g12_scheme_definitions_carry_no_credential_material(spec: dict[str, Any]) -> None:
+    """A securityScheme declares the shape of a credential, never a credential."""
+    blob = json.dumps((spec.get("components") or {}).get("securitySchemes") or {}, ensure_ascii=False)
+    for pattern, what in [
+        (r"eyJ[A-Za-z0-9_-]{10,}", "a JWT literal"),
+        (r"BEGIN [A-Z ]*PRIVATE KEY", "a private key"),
+        (r"(?i)\b(secret|token|apikey)\s*[:=]\s*\S{8,}", "a credential assignment"),
+    ]:
+        assert not re.search(pattern, blob), f"securitySchemes contains {what}"
