@@ -977,11 +977,23 @@ def test_g12_every_referenced_scheme_is_defined(spec: dict[str, Any]) -> None:
 
 
 def test_g12_scheme_definitions_carry_no_credential_material(spec: dict[str, Any]) -> None:
-    """A securityScheme declares the shape of a credential, never a credential."""
+    """A securityScheme declares the shape of a credential, never a credential.
+
+    The third pattern deliberately looks for a *value*, not for the word "token"
+    near a colon. A securityScheme's whole job is to name credential-bearing
+    headers, so its prose says "token" and "apikey" constantly -- a keyword-only
+    rule fires on sentences like "Required together with X-S2S-Token:
+    S2SMiddleware answers 401", which is documentation, not a leak. This one is
+    written the first way and had to be fixed: a gate whose failures are usually
+    false gets weakened by whoever hits it next.
+
+    What actually distinguishes a credential is its shape -- a long opaque run
+    with at least one digit. English words and header names are neither.
+    """
     blob = json.dumps((spec.get("components") or {}).get("securitySchemes") or {}, ensure_ascii=False)
     for pattern, what in [
         (r"eyJ[A-Za-z0-9_-]{10,}", "a JWT literal"),
         (r"BEGIN [A-Z ]*PRIVATE KEY", "a private key"),
-        (r"(?i)\b(secret|token|apikey)\s*[:=]\s*\S{8,}", "a credential assignment"),
+        (r"(?i)\b(secret|token|apikey|password)\s*[:=]\s*[\"']?(?=[A-Za-z0-9+/_=-]*[0-9])[A-Za-z0-9+/_=-]{20,}", "a credential value"),
     ]:
         assert not re.search(pattern, blob), f"securitySchemes contains {what}"

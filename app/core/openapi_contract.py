@@ -122,6 +122,51 @@ UNIVERSAL_RESPONSE_HEADERS: tuple[str, ...] = (
 CHALLENGE_S2S = 'S2S realm="lending-bank-gateway", header="X-S2S-Token"'
 CHALLENGE_APIKEY = 'ApiKey realm="lending-bank-gateway", header="apikey"'
 
+#: The credential each challenge names, as OpenAPI security schemes. Keyed by the
+#: challenge string so this table and ``authentication_challenge`` cannot disagree
+#: about which surface is which: both read the same mounted middleware.
+#:
+#: ``S2SMiddleware.dispatch`` requires ``X-Caller-Service`` *and* ``X-S2S-Token`` on
+#: the S2S surface (app/core/s2s.py:121,135 -- either one missing is a 401), hence
+#: two schemes ANDed rather than one.
+SECURITY_SCHEMES: Mapping[str, Mapping[str, Any]] = {
+    "S2SToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-S2S-Token",
+        "description": (
+            "Shared service-to-service token. Verified by S2SMiddleware before "
+            "routing, so it beats every other rejection on these paths."
+        ),
+    },
+    "CallerService": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Caller-Service",
+        "description": (
+            "Identifies the calling service. Required together with X-S2S-Token: "
+            "S2SMiddleware answers 401 when either is absent."
+        ),
+    },
+    "BankApiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "apikey",
+        "description": (
+            "Bank-issued key on the inbound callback surface. Note the header is "
+            "spelled all-lowercase, as the bank sends it."
+        ),
+    },
+}
+
+#: challenge -> the schemes that avoid it. Absent challenge (exempt path) -> no
+#: ``security`` key at all: ``security: [{}]`` would mean "optional", which is a
+#: different and wrong claim.
+_SCHEMES_BY_CHALLENGE: Mapping[str, tuple[str, ...]] = {
+    CHALLENGE_S2S: ("S2SToken", "CallerService"),
+    CHALLENGE_APIKEY: ("BankApiKey",),
+}
+
 #: Statuses whose ``WWW-Authenticate`` requirement is universal on authenticated
 #: operations (API-HTTP-004): every 401 in this service leaves via ``_unauthorized``.
 _AUTH_HEADERS: Mapping[int, tuple[str, ...]] = {401: ("WWW-Authenticate",)}
@@ -587,6 +632,11 @@ def apply_contracts(app: FastAPI, schema: dict[str, Any]) -> dict[str, Any]:
                 )
                 for status in contract.declared_statuses()
             }
+            challenge = authentication_challenge(app, path)
+            if challenge is not None:
+                operation["security"] = [
+                    {scheme: [] for scheme in _SCHEMES_BY_CHALLENGE[challenge]}
+                ]
             operation["x-lending-unknown-query-parameters"] = contract.unknown_query
             operation["x-lending-problem-compliance"] = contract.problem_compliant
             operation["x-lending-exception-ref"] = PROBLEM_COMPLIANCE_EXCEPTION_REF
@@ -596,6 +646,7 @@ def apply_contracts(app: FastAPI, schema: dict[str, Any]) -> dict[str, Any]:
             f"OPERATION_CONTRACTS declares operations the app no longer serves: {stale}"
         )
     components: dict[str, Any] = schema.setdefault("components", {})
+    components["securitySchemes"] = copy.deepcopy(dict(SECURITY_SCHEMES))
     schemas: dict[str, Any] = components.setdefault("schemas", {})
     for name, definition in _ERROR_SCHEMAS.items():
         schemas[name] = copy.deepcopy(definition)

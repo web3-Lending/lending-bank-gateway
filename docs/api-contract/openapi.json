@@ -984,6 +984,26 @@
         "title": "SubmitAckEnvelope",
         "type": "object"
       }
+    },
+    "securitySchemes": {
+      "BankApiKey": {
+        "description": "Bank-issued key on the inbound callback surface. Note the header is spelled all-lowercase, as the bank sends it.",
+        "in": "header",
+        "name": "apikey",
+        "type": "apiKey"
+      },
+      "CallerService": {
+        "description": "Identifies the calling service. Required together with X-S2S-Token: S2SMiddleware answers 401 when either is absent.",
+        "in": "header",
+        "name": "X-Caller-Service",
+        "type": "apiKey"
+      },
+      "S2SToken": {
+        "description": "Shared service-to-service token. Verified by S2SMiddleware before routing, so it beats every other rejection on these paths.",
+        "in": "header",
+        "name": "X-S2S-Token",
+        "type": "apiKey"
+      }
     }
   },
   "info": {
@@ -1216,6 +1236,12 @@
             }
           }
         },
+        "security": [
+          {
+            "CallerService": [],
+            "S2SToken": []
+          }
+        ],
         "summary": "Replay Outbox",
         "tags": [
           "admin"
@@ -1449,6 +1475,12 @@
             }
           }
         },
+        "security": [
+          {
+            "CallerService": [],
+            "S2SToken": []
+          }
+        ],
         "summary": "List Platform Accounts",
         "tags": [
           "admin"
@@ -1744,6 +1776,12 @@
             }
           }
         },
+        "security": [
+          {
+            "CallerService": [],
+            "S2SToken": []
+          }
+        ],
         "summary": "Create Platform Account",
         "tags": [
           "admin"
@@ -2052,6 +2090,12 @@
             }
           }
         },
+        "security": [
+          {
+            "CallerService": [],
+            "S2SToken": []
+          }
+        ],
         "summary": "Patch Platform Account",
         "tags": [
           "admin"
@@ -2241,6 +2285,12 @@
             }
           }
         },
+        "security": [
+          {
+            "CallerService": [],
+            "S2SToken": []
+          }
+        ],
         "summary": "List Stuck Orders",
         "tags": [
           "admin"
@@ -2448,6 +2498,12 @@
             }
           }
         },
+        "security": [
+          {
+            "CallerService": [],
+            "S2SToken": []
+          }
+        ],
         "summary": "Wedap Delivery Report",
         "tags": [
           "admin"
@@ -2743,6 +2799,12 @@
             }
           }
         },
+        "security": [
+          {
+            "CallerService": [],
+            "S2SToken": []
+          }
+        ],
         "summary": "Collect From Users",
         "tags": [
           "bank-funds"
@@ -3038,6 +3100,12 @@
             }
           }
         },
+        "security": [
+          {
+            "CallerService": [],
+            "S2SToken": []
+          }
+        ],
         "summary": "Distribute To Users",
         "tags": [
           "bank-funds"
@@ -3334,6 +3402,12 @@
             }
           }
         },
+        "security": [
+          {
+            "CallerService": [],
+            "S2SToken": []
+          }
+        ],
         "summary": "Refund To User",
         "tags": [
           "bank-funds"
@@ -3597,6 +3671,12 @@
             }
           }
         },
+        "security": [
+          {
+            "CallerService": [],
+            "S2SToken": []
+          }
+        ],
         "summary": "Reverse Transaction",
         "tags": [
           "bank-funds"
@@ -3863,6 +3943,12 @@
             }
           }
         },
+        "security": [
+          {
+            "CallerService": [],
+            "S2SToken": []
+          }
+        ],
         "summary": "Query Status",
         "tags": [
           "bank-funds"
@@ -4096,6 +4182,11 @@
             }
           }
         },
+        "security": [
+          {
+            "BankApiKey": []
+          }
+        ],
         "summary": "Wedap Transaction Callback",
         "tags": [
           "callbacks"
@@ -4351,6 +4442,12 @@
             }
           }
         },
+        "security": [
+          {
+            "CallerService": [],
+            "S2SToken": []
+          }
+        ],
         "summary": "Deposit Account Detail",
         "tags": [
           "deposit"
@@ -4606,6 +4703,12 @@
             }
           }
         },
+        "security": [
+          {
+            "CallerService": [],
+            "S2SToken": []
+          }
+        ],
         "summary": "Deposit Accounts",
         "tags": [
           "deposit"
@@ -4861,6 +4964,12 @@
             }
           }
         },
+        "security": [
+          {
+            "CallerService": [],
+            "S2SToken": []
+          }
+        ],
         "summary": "Deposit Balance Total",
         "tags": [
           "deposit"
@@ -5116,6 +5225,12 @@
             }
           }
         },
+        "security": [
+          {
+            "CallerService": [],
+            "S2SToken": []
+          }
+        ],
         "summary": "Internal Account Info",
         "tags": [
           "deposit"
@@ -5371,6 +5486,12 @@
             }
           }
         },
+        "security": [
+          {
+            "CallerService": [],
+            "S2SToken": []
+          }
+        ],
         "summary": "Internal Account Transactions",
         "tags": [
           "deposit"
@@ -5626,6 +5747,12 @@
             }
           }
         },
+        "security": [
+          {
+            "CallerService": [],
+            "S2SToken": []
+          }
+        ],
         "summary": "Deposit Transactions",
         "tags": [
           "deposit"
@@ -5888,6 +6015,12 @@
             }
           }
         },
+        "security": [
+          {
+            "CallerService": [],
+            "S2SToken": []
+          }
+        ],
         "summary": "P2P Disbursement",
         "tags": [
           "loans"
@@ -6150,6 +6283,12 @@
             }
           }
         },
+        "security": [
+          {
+            "CallerService": [],
+            "S2SToken": []
+          }
+        ],
         "summary": "P2P Repayment",
         "tags": [
           "loans"
@@ -6414,6 +6553,12 @@
             }
           }
         },
+        "security": [
+          {
+            "CallerService": [],
+            "S2SToken": []
+          }
+        ],
         "summary": "Query Repayment Status",
         "tags": [
           "loans"
@@ -6647,6 +6792,11 @@
             }
           }
         },
+        "security": [
+          {
+            "BankApiKey": []
+          }
+        ],
         "summary": "Recon Notify",
         "tags": [
           "recon"
@@ -6902,6 +7052,12 @@
             }
           }
         },
+        "security": [
+          {
+            "CallerService": [],
+            "S2SToken": []
+          }
+        ],
         "summary": "Users Info",
         "tags": [
           "deposit"
@@ -7134,6 +7290,12 @@
             }
           }
         },
+        "security": [
+          {
+            "CallerService": [],
+            "S2SToken": []
+          }
+        ],
         "summary": "Enqueue Import",
         "tags": [
           "wedap-import"
