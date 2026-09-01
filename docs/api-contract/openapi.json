@@ -1248,7 +1248,7 @@
         ],
         "x-lending-exception-ref": "FU-API-V22-HUB-BLOCKERS-20260828-001",
         "x-lending-problem-compliance": false,
-        "x-lending-unknown-query-parameters": "passthrough"
+        "x-lending-unknown-query-parameters": "reject"
       }
     },
     "/api/v1/admin/platform-accounts": {
@@ -1487,7 +1487,7 @@
         ],
         "x-lending-exception-ref": "FU-API-V22-HUB-BLOCKERS-20260828-001",
         "x-lending-problem-compliance": false,
-        "x-lending-unknown-query-parameters": "passthrough"
+        "x-lending-unknown-query-parameters": "reject"
       },
       "post": {
         "operationId": "create_platform_account_api_v1_admin_platform_accounts_post",
@@ -1788,7 +1788,7 @@
         ],
         "x-lending-exception-ref": "FU-API-V22-HUB-BLOCKERS-20260828-001",
         "x-lending-problem-compliance": false,
-        "x-lending-unknown-query-parameters": "passthrough"
+        "x-lending-unknown-query-parameters": "reject"
       }
     },
     "/api/v1/admin/platform-accounts/{row_id}": {
@@ -2102,7 +2102,7 @@
         ],
         "x-lending-exception-ref": "FU-API-V22-HUB-BLOCKERS-20260828-001",
         "x-lending-problem-compliance": false,
-        "x-lending-unknown-query-parameters": "passthrough"
+        "x-lending-unknown-query-parameters": "reject"
       }
     },
     "/api/v1/admin/stuck-orders": {
@@ -2297,7 +2297,7 @@
         ],
         "x-lending-exception-ref": "FU-API-V22-HUB-BLOCKERS-20260828-001",
         "x-lending-problem-compliance": false,
-        "x-lending-unknown-query-parameters": "passthrough"
+        "x-lending-unknown-query-parameters": "reject"
       }
     },
     "/api/v1/admin/wedap-import/delivery-report": {
@@ -2510,7 +2510,7 @@
         ],
         "x-lending-exception-ref": "FU-API-V22-HUB-BLOCKERS-20260828-001",
         "x-lending-problem-compliance": false,
-        "x-lending-unknown-query-parameters": "passthrough"
+        "x-lending-unknown-query-parameters": "reject"
       }
     },
     "/api/v1/bank-funds/collect-from-users": {
@@ -2811,7 +2811,7 @@
         ],
         "x-lending-exception-ref": "FU-API-V22-HUB-BLOCKERS-20260828-001",
         "x-lending-problem-compliance": false,
-        "x-lending-unknown-query-parameters": "passthrough"
+        "x-lending-unknown-query-parameters": "reject"
       }
     },
     "/api/v1/bank-funds/distribute-to-users": {
@@ -3112,7 +3112,7 @@
         ],
         "x-lending-exception-ref": "FU-API-V22-HUB-BLOCKERS-20260828-001",
         "x-lending-problem-compliance": false,
-        "x-lending-unknown-query-parameters": "passthrough"
+        "x-lending-unknown-query-parameters": "reject"
       }
     },
     "/api/v1/bank-funds/refunds": {
@@ -3414,7 +3414,7 @@
         ],
         "x-lending-exception-ref": "FU-API-V22-HUB-BLOCKERS-20260828-001",
         "x-lending-problem-compliance": false,
-        "x-lending-unknown-query-parameters": "passthrough"
+        "x-lending-unknown-query-parameters": "reject"
       }
     },
     "/api/v1/bank-funds/reversals": {
@@ -3683,7 +3683,7 @@
         ],
         "x-lending-exception-ref": "FU-API-V22-HUB-BLOCKERS-20260828-001",
         "x-lending-problem-compliance": false,
-        "x-lending-unknown-query-parameters": "passthrough"
+        "x-lending-unknown-query-parameters": "reject"
       }
     },
     "/api/v1/bank-funds/status": {
@@ -3955,7 +3955,7 @@
         ],
         "x-lending-exception-ref": "FU-API-V22-HUB-BLOCKERS-20260828-001",
         "x-lending-problem-compliance": false,
-        "x-lending-unknown-query-parameters": "passthrough"
+        "x-lending-unknown-query-parameters": "reject"
       }
     },
     "/api/v1/callbacks/wedap/transactions": {
@@ -4193,13 +4193,376 @@
         ],
         "x-lending-exception-ref": "FU-API-V22-HUB-BLOCKERS-20260828-001",
         "x-lending-problem-compliance": false,
-        "x-lending-unknown-query-parameters": "passthrough"
+        "x-lending-unknown-query-parameters": "reject"
       }
     },
     "/api/v1/deposit/account/detail": {
       "get": {
         "description": "账户详情查询（§5.3）：原样透传所有 query params（custAccountNo 等）+ 审计。",
         "operationId": "deposit_account_detail_api_v1_deposit_account_detail_get",
+        "parameters": [
+          {
+            "description": "业务流水号（wedap 契约 §3.2.1 必填）",
+            "in": "query",
+            "name": "bizSeqNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "业务流水号（wedap 契约 §3.2.1 必填）",
+              "title": "Bizseqno"
+            }
+          },
+          {
+            "description": "交易渠道（wedap 契约 §5.1.37）",
+            "in": "query",
+            "name": "channelId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 3,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "交易渠道（wedap 契约 §5.1.37）",
+              "title": "Channelid"
+            }
+          },
+          {
+            "description": "钱包地址（四选一）",
+            "in": "query",
+            "name": "walletAddress",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "钱包地址（四选一）",
+              "title": "Walletaddress"
+            }
+          },
+          {
+            "description": "钱包 ID（四选一）",
+            "in": "query",
+            "name": "walletId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "钱包 ID（四选一）",
+              "title": "Walletid"
+            }
+          },
+          {
+            "description": "托管用户 ID（四选一）",
+            "in": "query",
+            "name": "custodyUserId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "托管用户 ID（四选一）",
+              "title": "Custodyuserid"
+            }
+          },
+          {
+            "description": "用户 ID（四选一）",
+            "in": "query",
+            "name": "userId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "用户 ID（四选一）",
+              "title": "Userid"
+            }
+          },
+          {
+            "description": "链类型（wedap 契约 §5.1.14）",
+            "in": "query",
+            "name": "chainType",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "链类型（wedap 契约 §5.1.14）",
+              "title": "Chaintype"
+            }
+          },
+          {
+            "description": "客户账号",
+            "in": "query",
+            "name": "custAccountNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "客户账号",
+              "title": "Custaccountno"
+            }
+          },
+          {
+            "description": "客户号",
+            "in": "query",
+            "name": "custNumber",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "客户号",
+              "title": "Custnumber"
+            }
+          },
+          {
+            "description": "币种（ISO 4217）",
+            "in": "query",
+            "name": "currencyCode",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 8,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "币种（ISO 4217）",
+              "title": "Currencycode"
+            }
+          },
+          {
+            "description": "子账户序号",
+            "in": "query",
+            "name": "subaccountSerialNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "子账户序号",
+              "title": "Subaccountserialno"
+            }
+          },
+          {
+            "description": "账号",
+            "in": "query",
+            "name": "accountNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "账号",
+              "title": "Accountno"
+            }
+          },
+          {
+            "description": "证件类型",
+            "in": "query",
+            "name": "idType",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "证件类型",
+              "title": "Idtype"
+            }
+          },
+          {
+            "description": "证件号",
+            "in": "query",
+            "name": "idNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "证件号",
+              "title": "Idno"
+            }
+          },
+          {
+            "description": "分页页码",
+            "in": "query",
+            "name": "pageNum",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "分页页码",
+              "title": "Pagenum"
+            }
+          },
+          {
+            "description": "分页大小",
+            "in": "query",
+            "name": "pageSize",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "分页大小",
+              "title": "Pagesize"
+            }
+          },
+          {
+            "description": "起始日期",
+            "in": "query",
+            "name": "startDate",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "起始日期",
+              "title": "Startdate"
+            }
+          },
+          {
+            "description": "截止日期",
+            "in": "query",
+            "name": "endDate",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "截止日期",
+              "title": "Enddate"
+            }
+          },
+          {
+            "description": "交易方向",
+            "in": "query",
+            "name": "txnDirection",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "交易方向",
+              "title": "Txndirection"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -4454,13 +4817,376 @@
         ],
         "x-lending-exception-ref": "FU-API-V22-HUB-BLOCKERS-20260828-001",
         "x-lending-problem-compliance": false,
-        "x-lending-unknown-query-parameters": "passthrough"
+        "x-lending-unknown-query-parameters": "reject"
       }
     },
     "/api/v1/deposit/accounts": {
       "get": {
         "description": "账户列表查询：原样透传所有 query params（含 wedap 必填 bizSeqNo/channelId）+ 审计。",
         "operationId": "deposit_accounts_api_v1_deposit_accounts_get",
+        "parameters": [
+          {
+            "description": "业务流水号（wedap 契约 §3.2.1 必填）",
+            "in": "query",
+            "name": "bizSeqNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "业务流水号（wedap 契约 §3.2.1 必填）",
+              "title": "Bizseqno"
+            }
+          },
+          {
+            "description": "交易渠道（wedap 契约 §5.1.37）",
+            "in": "query",
+            "name": "channelId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 3,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "交易渠道（wedap 契约 §5.1.37）",
+              "title": "Channelid"
+            }
+          },
+          {
+            "description": "钱包地址（四选一）",
+            "in": "query",
+            "name": "walletAddress",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "钱包地址（四选一）",
+              "title": "Walletaddress"
+            }
+          },
+          {
+            "description": "钱包 ID（四选一）",
+            "in": "query",
+            "name": "walletId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "钱包 ID（四选一）",
+              "title": "Walletid"
+            }
+          },
+          {
+            "description": "托管用户 ID（四选一）",
+            "in": "query",
+            "name": "custodyUserId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "托管用户 ID（四选一）",
+              "title": "Custodyuserid"
+            }
+          },
+          {
+            "description": "用户 ID（四选一）",
+            "in": "query",
+            "name": "userId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "用户 ID（四选一）",
+              "title": "Userid"
+            }
+          },
+          {
+            "description": "链类型（wedap 契约 §5.1.14）",
+            "in": "query",
+            "name": "chainType",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "链类型（wedap 契约 §5.1.14）",
+              "title": "Chaintype"
+            }
+          },
+          {
+            "description": "客户账号",
+            "in": "query",
+            "name": "custAccountNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "客户账号",
+              "title": "Custaccountno"
+            }
+          },
+          {
+            "description": "客户号",
+            "in": "query",
+            "name": "custNumber",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "客户号",
+              "title": "Custnumber"
+            }
+          },
+          {
+            "description": "币种（ISO 4217）",
+            "in": "query",
+            "name": "currencyCode",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 8,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "币种（ISO 4217）",
+              "title": "Currencycode"
+            }
+          },
+          {
+            "description": "子账户序号",
+            "in": "query",
+            "name": "subaccountSerialNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "子账户序号",
+              "title": "Subaccountserialno"
+            }
+          },
+          {
+            "description": "账号",
+            "in": "query",
+            "name": "accountNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "账号",
+              "title": "Accountno"
+            }
+          },
+          {
+            "description": "证件类型",
+            "in": "query",
+            "name": "idType",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "证件类型",
+              "title": "Idtype"
+            }
+          },
+          {
+            "description": "证件号",
+            "in": "query",
+            "name": "idNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "证件号",
+              "title": "Idno"
+            }
+          },
+          {
+            "description": "分页页码",
+            "in": "query",
+            "name": "pageNum",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "分页页码",
+              "title": "Pagenum"
+            }
+          },
+          {
+            "description": "分页大小",
+            "in": "query",
+            "name": "pageSize",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "分页大小",
+              "title": "Pagesize"
+            }
+          },
+          {
+            "description": "起始日期",
+            "in": "query",
+            "name": "startDate",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "起始日期",
+              "title": "Startdate"
+            }
+          },
+          {
+            "description": "截止日期",
+            "in": "query",
+            "name": "endDate",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "截止日期",
+              "title": "Enddate"
+            }
+          },
+          {
+            "description": "交易方向",
+            "in": "query",
+            "name": "txnDirection",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "交易方向",
+              "title": "Txndirection"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -4715,13 +5441,376 @@
         ],
         "x-lending-exception-ref": "FU-API-V22-HUB-BLOCKERS-20260828-001",
         "x-lending-problem-compliance": false,
-        "x-lending-unknown-query-parameters": "passthrough"
+        "x-lending-unknown-query-parameters": "reject"
       }
     },
     "/api/v1/deposit/balances/total": {
       "get": {
         "description": "余额汇总查询：原样透传所有 query params + 审计 + 余额快照。\n\n契约 C 薄透传：不再只挑 userId，按 users/info 同款全透传，wedap 必填的\nbizSeqNo/channelId 及四标识由调用方携带即原样转发，gateway 不剪裁。",
         "operationId": "deposit_balance_total_api_v1_deposit_balances_total_get",
+        "parameters": [
+          {
+            "description": "业务流水号（wedap 契约 §3.2.1 必填）",
+            "in": "query",
+            "name": "bizSeqNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "业务流水号（wedap 契约 §3.2.1 必填）",
+              "title": "Bizseqno"
+            }
+          },
+          {
+            "description": "交易渠道（wedap 契约 §5.1.37）",
+            "in": "query",
+            "name": "channelId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 3,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "交易渠道（wedap 契约 §5.1.37）",
+              "title": "Channelid"
+            }
+          },
+          {
+            "description": "钱包地址（四选一）",
+            "in": "query",
+            "name": "walletAddress",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "钱包地址（四选一）",
+              "title": "Walletaddress"
+            }
+          },
+          {
+            "description": "钱包 ID（四选一）",
+            "in": "query",
+            "name": "walletId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "钱包 ID（四选一）",
+              "title": "Walletid"
+            }
+          },
+          {
+            "description": "托管用户 ID（四选一）",
+            "in": "query",
+            "name": "custodyUserId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "托管用户 ID（四选一）",
+              "title": "Custodyuserid"
+            }
+          },
+          {
+            "description": "用户 ID（四选一）",
+            "in": "query",
+            "name": "userId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "用户 ID（四选一）",
+              "title": "Userid"
+            }
+          },
+          {
+            "description": "链类型（wedap 契约 §5.1.14）",
+            "in": "query",
+            "name": "chainType",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "链类型（wedap 契约 §5.1.14）",
+              "title": "Chaintype"
+            }
+          },
+          {
+            "description": "客户账号",
+            "in": "query",
+            "name": "custAccountNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "客户账号",
+              "title": "Custaccountno"
+            }
+          },
+          {
+            "description": "客户号",
+            "in": "query",
+            "name": "custNumber",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "客户号",
+              "title": "Custnumber"
+            }
+          },
+          {
+            "description": "币种（ISO 4217）",
+            "in": "query",
+            "name": "currencyCode",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 8,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "币种（ISO 4217）",
+              "title": "Currencycode"
+            }
+          },
+          {
+            "description": "子账户序号",
+            "in": "query",
+            "name": "subaccountSerialNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "子账户序号",
+              "title": "Subaccountserialno"
+            }
+          },
+          {
+            "description": "账号",
+            "in": "query",
+            "name": "accountNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "账号",
+              "title": "Accountno"
+            }
+          },
+          {
+            "description": "证件类型",
+            "in": "query",
+            "name": "idType",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "证件类型",
+              "title": "Idtype"
+            }
+          },
+          {
+            "description": "证件号",
+            "in": "query",
+            "name": "idNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "证件号",
+              "title": "Idno"
+            }
+          },
+          {
+            "description": "分页页码",
+            "in": "query",
+            "name": "pageNum",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "分页页码",
+              "title": "Pagenum"
+            }
+          },
+          {
+            "description": "分页大小",
+            "in": "query",
+            "name": "pageSize",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "分页大小",
+              "title": "Pagesize"
+            }
+          },
+          {
+            "description": "起始日期",
+            "in": "query",
+            "name": "startDate",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "起始日期",
+              "title": "Startdate"
+            }
+          },
+          {
+            "description": "截止日期",
+            "in": "query",
+            "name": "endDate",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "截止日期",
+              "title": "Enddate"
+            }
+          },
+          {
+            "description": "交易方向",
+            "in": "query",
+            "name": "txnDirection",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "交易方向",
+              "title": "Txndirection"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -4976,13 +6065,376 @@
         ],
         "x-lending-exception-ref": "FU-API-V22-HUB-BLOCKERS-20260828-001",
         "x-lending-problem-compliance": false,
-        "x-lending-unknown-query-parameters": "passthrough"
+        "x-lending-unknown-query-parameters": "reject"
       }
     },
     "/api/v1/deposit/internal-accounts/info": {
       "get": {
         "description": "内部户信息查询（对接文档 v0.4.0 §5.7 · 闭 D-1）：透传 + 审计 + 余额快照。\n\n内部户（归集/分发/退款中转方，如 INT00101001USD）余额是资金台账 Pool 侧的\n独立对账锚点——此前只能靠推算守恒。响应为单账户扁平形态（accountNo/\naccountBalance），与 balances/total 的 accounts[] 不同，故快照单独落一行；\naccountNo 缺失 / 余额不可解析时跳过快照并 warning，不让查询整体失败。",
         "operationId": "internal_account_info_api_v1_deposit_internal_accounts_info_get",
+        "parameters": [
+          {
+            "description": "业务流水号（wedap 契约 §3.2.1 必填）",
+            "in": "query",
+            "name": "bizSeqNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "业务流水号（wedap 契约 §3.2.1 必填）",
+              "title": "Bizseqno"
+            }
+          },
+          {
+            "description": "交易渠道（wedap 契约 §5.1.37）",
+            "in": "query",
+            "name": "channelId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 3,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "交易渠道（wedap 契约 §5.1.37）",
+              "title": "Channelid"
+            }
+          },
+          {
+            "description": "钱包地址（四选一）",
+            "in": "query",
+            "name": "walletAddress",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "钱包地址（四选一）",
+              "title": "Walletaddress"
+            }
+          },
+          {
+            "description": "钱包 ID（四选一）",
+            "in": "query",
+            "name": "walletId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "钱包 ID（四选一）",
+              "title": "Walletid"
+            }
+          },
+          {
+            "description": "托管用户 ID（四选一）",
+            "in": "query",
+            "name": "custodyUserId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "托管用户 ID（四选一）",
+              "title": "Custodyuserid"
+            }
+          },
+          {
+            "description": "用户 ID（四选一）",
+            "in": "query",
+            "name": "userId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "用户 ID（四选一）",
+              "title": "Userid"
+            }
+          },
+          {
+            "description": "链类型（wedap 契约 §5.1.14）",
+            "in": "query",
+            "name": "chainType",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "链类型（wedap 契约 §5.1.14）",
+              "title": "Chaintype"
+            }
+          },
+          {
+            "description": "客户账号",
+            "in": "query",
+            "name": "custAccountNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "客户账号",
+              "title": "Custaccountno"
+            }
+          },
+          {
+            "description": "客户号",
+            "in": "query",
+            "name": "custNumber",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "客户号",
+              "title": "Custnumber"
+            }
+          },
+          {
+            "description": "币种（ISO 4217）",
+            "in": "query",
+            "name": "currencyCode",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 8,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "币种（ISO 4217）",
+              "title": "Currencycode"
+            }
+          },
+          {
+            "description": "子账户序号",
+            "in": "query",
+            "name": "subaccountSerialNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "子账户序号",
+              "title": "Subaccountserialno"
+            }
+          },
+          {
+            "description": "账号",
+            "in": "query",
+            "name": "accountNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "账号",
+              "title": "Accountno"
+            }
+          },
+          {
+            "description": "证件类型",
+            "in": "query",
+            "name": "idType",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "证件类型",
+              "title": "Idtype"
+            }
+          },
+          {
+            "description": "证件号",
+            "in": "query",
+            "name": "idNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "证件号",
+              "title": "Idno"
+            }
+          },
+          {
+            "description": "分页页码",
+            "in": "query",
+            "name": "pageNum",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "分页页码",
+              "title": "Pagenum"
+            }
+          },
+          {
+            "description": "分页大小",
+            "in": "query",
+            "name": "pageSize",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "分页大小",
+              "title": "Pagesize"
+            }
+          },
+          {
+            "description": "起始日期",
+            "in": "query",
+            "name": "startDate",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "起始日期",
+              "title": "Startdate"
+            }
+          },
+          {
+            "description": "截止日期",
+            "in": "query",
+            "name": "endDate",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "截止日期",
+              "title": "Enddate"
+            }
+          },
+          {
+            "description": "交易方向",
+            "in": "query",
+            "name": "txnDirection",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "交易方向",
+              "title": "Txndirection"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -5237,13 +6689,376 @@
         ],
         "x-lending-exception-ref": "FU-API-V22-HUB-BLOCKERS-20260828-001",
         "x-lending-problem-compliance": false,
-        "x-lending-unknown-query-parameters": "passthrough"
+        "x-lending-unknown-query-parameters": "reject"
       }
     },
     "/api/v1/deposit/internal-accounts/transactions": {
       "get": {
         "description": "内部户交易流水查询（对接文档 v0.4.0 §5.8，底层银行 328）：透传 + 审计。\n\n内部户对账的流水面（与 §5.7 余额锚点互相印证）；分页/时间窗/方向参数\n（accountNo/startDate/endDate/txnDirection/pageNum/pageSize）由调用方带，\ngateway 不剪裁（契约 C）。流水明细不落快照——与 §5.4 deposit/transactions\n同口径，快照只锚余额。",
         "operationId": "internal_account_transactions_api_v1_deposit_internal_accounts_transactions_get",
+        "parameters": [
+          {
+            "description": "业务流水号（wedap 契约 §3.2.1 必填）",
+            "in": "query",
+            "name": "bizSeqNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "业务流水号（wedap 契约 §3.2.1 必填）",
+              "title": "Bizseqno"
+            }
+          },
+          {
+            "description": "交易渠道（wedap 契约 §5.1.37）",
+            "in": "query",
+            "name": "channelId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 3,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "交易渠道（wedap 契约 §5.1.37）",
+              "title": "Channelid"
+            }
+          },
+          {
+            "description": "钱包地址（四选一）",
+            "in": "query",
+            "name": "walletAddress",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "钱包地址（四选一）",
+              "title": "Walletaddress"
+            }
+          },
+          {
+            "description": "钱包 ID（四选一）",
+            "in": "query",
+            "name": "walletId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "钱包 ID（四选一）",
+              "title": "Walletid"
+            }
+          },
+          {
+            "description": "托管用户 ID（四选一）",
+            "in": "query",
+            "name": "custodyUserId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "托管用户 ID（四选一）",
+              "title": "Custodyuserid"
+            }
+          },
+          {
+            "description": "用户 ID（四选一）",
+            "in": "query",
+            "name": "userId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "用户 ID（四选一）",
+              "title": "Userid"
+            }
+          },
+          {
+            "description": "链类型（wedap 契约 §5.1.14）",
+            "in": "query",
+            "name": "chainType",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "链类型（wedap 契约 §5.1.14）",
+              "title": "Chaintype"
+            }
+          },
+          {
+            "description": "客户账号",
+            "in": "query",
+            "name": "custAccountNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "客户账号",
+              "title": "Custaccountno"
+            }
+          },
+          {
+            "description": "客户号",
+            "in": "query",
+            "name": "custNumber",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "客户号",
+              "title": "Custnumber"
+            }
+          },
+          {
+            "description": "币种（ISO 4217）",
+            "in": "query",
+            "name": "currencyCode",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 8,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "币种（ISO 4217）",
+              "title": "Currencycode"
+            }
+          },
+          {
+            "description": "子账户序号",
+            "in": "query",
+            "name": "subaccountSerialNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "子账户序号",
+              "title": "Subaccountserialno"
+            }
+          },
+          {
+            "description": "账号",
+            "in": "query",
+            "name": "accountNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "账号",
+              "title": "Accountno"
+            }
+          },
+          {
+            "description": "证件类型",
+            "in": "query",
+            "name": "idType",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "证件类型",
+              "title": "Idtype"
+            }
+          },
+          {
+            "description": "证件号",
+            "in": "query",
+            "name": "idNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "证件号",
+              "title": "Idno"
+            }
+          },
+          {
+            "description": "分页页码",
+            "in": "query",
+            "name": "pageNum",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "分页页码",
+              "title": "Pagenum"
+            }
+          },
+          {
+            "description": "分页大小",
+            "in": "query",
+            "name": "pageSize",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "分页大小",
+              "title": "Pagesize"
+            }
+          },
+          {
+            "description": "起始日期",
+            "in": "query",
+            "name": "startDate",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "起始日期",
+              "title": "Startdate"
+            }
+          },
+          {
+            "description": "截止日期",
+            "in": "query",
+            "name": "endDate",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "截止日期",
+              "title": "Enddate"
+            }
+          },
+          {
+            "description": "交易方向",
+            "in": "query",
+            "name": "txnDirection",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "交易方向",
+              "title": "Txndirection"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -5498,13 +7313,376 @@
         ],
         "x-lending-exception-ref": "FU-API-V22-HUB-BLOCKERS-20260828-001",
         "x-lending-problem-compliance": false,
-        "x-lending-unknown-query-parameters": "passthrough"
+        "x-lending-unknown-query-parameters": "reject"
       }
     },
     "/api/v1/deposit/transactions": {
       "get": {
         "description": "交易流水查询（对接文档 v0.4.0 §5.4）：原样透传所有 query params + 审计。\n\n分页/时间窗/方向过滤参数（custAccountNo/startDate/endDate/pageNum/pageSize 等）\n由调用方带，gateway 不剪裁（契约 C）；对账/账单展示的证据面查询统一走本端点，\n上游不再直调 wedap。",
         "operationId": "deposit_transactions_api_v1_deposit_transactions_get",
+        "parameters": [
+          {
+            "description": "业务流水号（wedap 契约 §3.2.1 必填）",
+            "in": "query",
+            "name": "bizSeqNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "业务流水号（wedap 契约 §3.2.1 必填）",
+              "title": "Bizseqno"
+            }
+          },
+          {
+            "description": "交易渠道（wedap 契约 §5.1.37）",
+            "in": "query",
+            "name": "channelId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 3,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "交易渠道（wedap 契约 §5.1.37）",
+              "title": "Channelid"
+            }
+          },
+          {
+            "description": "钱包地址（四选一）",
+            "in": "query",
+            "name": "walletAddress",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "钱包地址（四选一）",
+              "title": "Walletaddress"
+            }
+          },
+          {
+            "description": "钱包 ID（四选一）",
+            "in": "query",
+            "name": "walletId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "钱包 ID（四选一）",
+              "title": "Walletid"
+            }
+          },
+          {
+            "description": "托管用户 ID（四选一）",
+            "in": "query",
+            "name": "custodyUserId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "托管用户 ID（四选一）",
+              "title": "Custodyuserid"
+            }
+          },
+          {
+            "description": "用户 ID（四选一）",
+            "in": "query",
+            "name": "userId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "用户 ID（四选一）",
+              "title": "Userid"
+            }
+          },
+          {
+            "description": "链类型（wedap 契约 §5.1.14）",
+            "in": "query",
+            "name": "chainType",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "链类型（wedap 契约 §5.1.14）",
+              "title": "Chaintype"
+            }
+          },
+          {
+            "description": "客户账号",
+            "in": "query",
+            "name": "custAccountNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "客户账号",
+              "title": "Custaccountno"
+            }
+          },
+          {
+            "description": "客户号",
+            "in": "query",
+            "name": "custNumber",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "客户号",
+              "title": "Custnumber"
+            }
+          },
+          {
+            "description": "币种（ISO 4217）",
+            "in": "query",
+            "name": "currencyCode",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 8,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "币种（ISO 4217）",
+              "title": "Currencycode"
+            }
+          },
+          {
+            "description": "子账户序号",
+            "in": "query",
+            "name": "subaccountSerialNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "子账户序号",
+              "title": "Subaccountserialno"
+            }
+          },
+          {
+            "description": "账号",
+            "in": "query",
+            "name": "accountNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "账号",
+              "title": "Accountno"
+            }
+          },
+          {
+            "description": "证件类型",
+            "in": "query",
+            "name": "idType",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "证件类型",
+              "title": "Idtype"
+            }
+          },
+          {
+            "description": "证件号",
+            "in": "query",
+            "name": "idNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "证件号",
+              "title": "Idno"
+            }
+          },
+          {
+            "description": "分页页码",
+            "in": "query",
+            "name": "pageNum",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "分页页码",
+              "title": "Pagenum"
+            }
+          },
+          {
+            "description": "分页大小",
+            "in": "query",
+            "name": "pageSize",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "分页大小",
+              "title": "Pagesize"
+            }
+          },
+          {
+            "description": "起始日期",
+            "in": "query",
+            "name": "startDate",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "起始日期",
+              "title": "Startdate"
+            }
+          },
+          {
+            "description": "截止日期",
+            "in": "query",
+            "name": "endDate",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "截止日期",
+              "title": "Enddate"
+            }
+          },
+          {
+            "description": "交易方向",
+            "in": "query",
+            "name": "txnDirection",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "交易方向",
+              "title": "Txndirection"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -5759,7 +7937,7 @@
         ],
         "x-lending-exception-ref": "FU-API-V22-HUB-BLOCKERS-20260828-001",
         "x-lending-problem-compliance": false,
-        "x-lending-unknown-query-parameters": "passthrough"
+        "x-lending-unknown-query-parameters": "reject"
       }
     },
     "/api/v1/loans/p2p-disbursements": {
@@ -6027,7 +8205,7 @@
         ],
         "x-lending-exception-ref": "FU-API-V22-HUB-BLOCKERS-20260828-001",
         "x-lending-problem-compliance": false,
-        "x-lending-unknown-query-parameters": "passthrough"
+        "x-lending-unknown-query-parameters": "reject"
       }
     },
     "/api/v1/loans/p2p-repayments": {
@@ -6295,7 +8473,7 @@
         ],
         "x-lending-exception-ref": "FU-API-V22-HUB-BLOCKERS-20260828-001",
         "x-lending-problem-compliance": false,
-        "x-lending-unknown-query-parameters": "passthrough"
+        "x-lending-unknown-query-parameters": "reject"
       }
     },
     "/api/v1/loans/p2p-repayments/{biz_seq_no}/status": {
@@ -6565,7 +8743,7 @@
         ],
         "x-lending-exception-ref": "FU-API-V22-HUB-BLOCKERS-20260828-001",
         "x-lending-problem-compliance": false,
-        "x-lending-unknown-query-parameters": "passthrough"
+        "x-lending-unknown-query-parameters": "reject"
       }
     },
     "/api/v1/recon/notify": {
@@ -6803,13 +8981,376 @@
         ],
         "x-lending-exception-ref": "FU-API-V22-HUB-BLOCKERS-20260828-001",
         "x-lending-problem-compliance": false,
-        "x-lending-unknown-query-parameters": "passthrough"
+        "x-lending-unknown-query-parameters": "reject"
       }
     },
     "/api/v1/users/info": {
       "get": {
         "description": "用户信息查询：原样透传所有 query params + 审计。\n\nparams 原样透传 wedap（契约 C）；参数白名单收紧候选项见 spec §11 协调清单。",
         "operationId": "users_info_api_v1_users_info_get",
+        "parameters": [
+          {
+            "description": "业务流水号（wedap 契约 §3.2.1 必填）",
+            "in": "query",
+            "name": "bizSeqNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "业务流水号（wedap 契约 §3.2.1 必填）",
+              "title": "Bizseqno"
+            }
+          },
+          {
+            "description": "交易渠道（wedap 契约 §5.1.37）",
+            "in": "query",
+            "name": "channelId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 3,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "交易渠道（wedap 契约 §5.1.37）",
+              "title": "Channelid"
+            }
+          },
+          {
+            "description": "钱包地址（四选一）",
+            "in": "query",
+            "name": "walletAddress",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "钱包地址（四选一）",
+              "title": "Walletaddress"
+            }
+          },
+          {
+            "description": "钱包 ID（四选一）",
+            "in": "query",
+            "name": "walletId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "钱包 ID（四选一）",
+              "title": "Walletid"
+            }
+          },
+          {
+            "description": "托管用户 ID（四选一）",
+            "in": "query",
+            "name": "custodyUserId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "托管用户 ID（四选一）",
+              "title": "Custodyuserid"
+            }
+          },
+          {
+            "description": "用户 ID（四选一）",
+            "in": "query",
+            "name": "userId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "用户 ID（四选一）",
+              "title": "Userid"
+            }
+          },
+          {
+            "description": "链类型（wedap 契约 §5.1.14）",
+            "in": "query",
+            "name": "chainType",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "链类型（wedap 契约 §5.1.14）",
+              "title": "Chaintype"
+            }
+          },
+          {
+            "description": "客户账号",
+            "in": "query",
+            "name": "custAccountNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "客户账号",
+              "title": "Custaccountno"
+            }
+          },
+          {
+            "description": "客户号",
+            "in": "query",
+            "name": "custNumber",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "客户号",
+              "title": "Custnumber"
+            }
+          },
+          {
+            "description": "币种（ISO 4217）",
+            "in": "query",
+            "name": "currencyCode",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 8,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "币种（ISO 4217）",
+              "title": "Currencycode"
+            }
+          },
+          {
+            "description": "子账户序号",
+            "in": "query",
+            "name": "subaccountSerialNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "子账户序号",
+              "title": "Subaccountserialno"
+            }
+          },
+          {
+            "description": "账号",
+            "in": "query",
+            "name": "accountNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "账号",
+              "title": "Accountno"
+            }
+          },
+          {
+            "description": "证件类型",
+            "in": "query",
+            "name": "idType",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "证件类型",
+              "title": "Idtype"
+            }
+          },
+          {
+            "description": "证件号",
+            "in": "query",
+            "name": "idNo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "证件号",
+              "title": "Idno"
+            }
+          },
+          {
+            "description": "分页页码",
+            "in": "query",
+            "name": "pageNum",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "分页页码",
+              "title": "Pagenum"
+            }
+          },
+          {
+            "description": "分页大小",
+            "in": "query",
+            "name": "pageSize",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "分页大小",
+              "title": "Pagesize"
+            }
+          },
+          {
+            "description": "起始日期",
+            "in": "query",
+            "name": "startDate",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "起始日期",
+              "title": "Startdate"
+            }
+          },
+          {
+            "description": "截止日期",
+            "in": "query",
+            "name": "endDate",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "截止日期",
+              "title": "Enddate"
+            }
+          },
+          {
+            "description": "交易方向",
+            "in": "query",
+            "name": "txnDirection",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "交易方向",
+              "title": "Txndirection"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -7064,7 +9605,7 @@
         ],
         "x-lending-exception-ref": "FU-API-V22-HUB-BLOCKERS-20260828-001",
         "x-lending-problem-compliance": false,
-        "x-lending-unknown-query-parameters": "passthrough"
+        "x-lending-unknown-query-parameters": "reject"
       }
     },
     "/api/v1/wedap/import/enqueue": {
@@ -7302,7 +9843,7 @@
         ],
         "x-lending-exception-ref": "FU-API-V22-HUB-BLOCKERS-20260828-001",
         "x-lending-problem-compliance": false,
-        "x-lending-unknown-query-parameters": "passthrough"
+        "x-lending-unknown-query-parameters": "reject"
       }
     },
     "/api/version": {
@@ -7451,7 +9992,7 @@
         ],
         "x-lending-exception-ref": "FU-API-V22-HUB-BLOCKERS-20260828-001",
         "x-lending-problem-compliance": false,
-        "x-lending-unknown-query-parameters": "passthrough"
+        "x-lending-unknown-query-parameters": "reject"
       }
     },
     "/build-info": {
@@ -7600,7 +10141,7 @@
         ],
         "x-lending-exception-ref": "FU-API-V22-HUB-BLOCKERS-20260828-001",
         "x-lending-problem-compliance": false,
-        "x-lending-unknown-query-parameters": "passthrough"
+        "x-lending-unknown-query-parameters": "reject"
       }
     },
     "/healthz": {
@@ -7748,7 +10289,7 @@
         ],
         "x-lending-exception-ref": "FU-API-V22-HUB-BLOCKERS-20260828-001",
         "x-lending-problem-compliance": false,
-        "x-lending-unknown-query-parameters": "passthrough"
+        "x-lending-unknown-query-parameters": "reject"
       }
     },
     "/readyz": {
@@ -7934,7 +10475,7 @@
         ],
         "x-lending-exception-ref": "FU-API-V22-HUB-BLOCKERS-20260828-001",
         "x-lending-problem-compliance": false,
-        "x-lending-unknown-query-parameters": "passthrough"
+        "x-lending-unknown-query-parameters": "reject"
       }
     }
   }

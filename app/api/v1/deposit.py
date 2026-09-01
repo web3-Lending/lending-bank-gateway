@@ -21,7 +21,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.deps import require_headers
@@ -34,6 +34,59 @@ from app.models.query_audit import BalanceSnapshot, QueryAudit
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["deposit"])
+
+
+def wedap_identity_query(
+    bizSeqNo: str | None = Query(
+        None, max_length=32, description="业务流水号（wedap 契约 §3.2.1 必填）"
+    ),
+    channelId: str | None = Query(None, max_length=3, description="交易渠道（wedap 契约 §5.1.37）"),
+    walletAddress: str | None = Query(None, max_length=128, description="钱包地址（四选一）"),
+    walletId: str | None = Query(None, max_length=64, description="钱包 ID（四选一）"),
+    custodyUserId: str | None = Query(None, max_length=64, description="托管用户 ID（四选一）"),
+    userId: str | None = Query(None, max_length=64, description="用户 ID（四选一）"),
+    chainType: str | None = Query(None, max_length=32, description="链类型（wedap 契约 §5.1.14）"),
+    custAccountNo: str | None = Query(None, max_length=64, description="客户账号"),
+    custNumber: str | None = Query(None, max_length=64, description="客户号"),
+    currencyCode: str | None = Query(None, max_length=8, description="币种（ISO 4217）"),
+    subaccountSerialNo: str | None = Query(None, max_length=64, description="子账户序号"),
+    accountNo: str | None = Query(None, max_length=64, description="账号"),
+    idType: str | None = Query(None, max_length=32, description="证件类型"),
+    idNo: str | None = Query(None, max_length=64, description="证件号"),
+    pageNum: str | None = Query(None, max_length=16, description="分页页码"),
+    pageSize: str | None = Query(None, max_length=16, description="分页大小"),
+    startDate: str | None = Query(None, max_length=32, description="起始日期"),
+    endDate: str | None = Query(None, max_length=32, description="截止日期"),
+    txnDirection: str | None = Query(None, max_length=16, description="交易方向"),
+) -> None:
+    """七条 wedap 透传端点的 query 声明面 —— 只声明，不消费。
+
+    这七条把 query 原样转发给银行，所以「本 operation 接受哪些 query 名」在这之前
+    没有任何地方写下来过：未声明的名字被原样转进一个资金系统的 query location。
+    把允许集合写成路由签名而不是另建一张表，是为了让它**不可能**与实际接受的东西漂移
+    —— `enforce_query_location` 的 `declared_query_names` 直接读这里。
+
+    取值来源（逐项有据，不靠推断）：
+    - bizSeqNo / channelId / walletAddress / walletId / custodyUserId / userId / chainType
+      —— wedap 契约 §3.2.1「查询客户账户总资产余额」、§3.2.2「查询客户存款账户列表」、
+      §3.3.1「查询客户信息」三节的参数表，与 baffle 侧 users.py 的声明逐字一致
+    - custAccountNo —— lending-lifecycel 实际在发（admin-backend
+      app/domain_ops/services/account_8021.py:562，vault NAV 取数链路）
+    - custNumber / currencyCode —— 真 wedap dev 联调实测：balances/total 用这两个
+      （与契约文档里那套标识参数并存，文档未收录）
+    - subaccountSerialNo —— 本仓 wedap 客户端已在用
+    - accountNo / idType / idNo / pageNum / pageSize / startDate / endDate / txnDirection
+      —— tests/api/test_deposit.py 逐条端点按真实契约在发的参数（该文件是这七条
+      passthrough 唯一成文的行为记录；契约文档只收了其中三条端点）
+
+    处理器仍走 `query_location_params(request)` 取值：透传语义一个字没改，
+    这里加的纯粹是「哪些名字是被承认的」这一面。
+
+    handler 不读这些形参（故全部返回 None）—— 它们存在的意义是进 `dependant.query_params`，
+    从而同时成为 OpenAPI 的 `parameters` 声明与守门的允许集合。
+    """
+    return None
+
 
 
 async def _audited_passthrough(
@@ -103,6 +156,7 @@ async def _audited_passthrough(
 @router.get("/api/v1/deposit/balances/total")
 async def deposit_balance_total(
     request: Request,
+    _q: None = Depends(wedap_identity_query),
     hdr: dict[str, str] = Depends(require_headers),
 ) -> dict[str, Any]:
     """余额汇总查询：原样透传所有 query params + 审计 + 余额快照。
@@ -179,6 +233,7 @@ async def deposit_balance_total(
 @router.get("/api/v1/deposit/accounts")
 async def deposit_accounts(
     request: Request,
+    _q: None = Depends(wedap_identity_query),
     hdr: dict[str, str] = Depends(require_headers),
 ) -> dict[str, Any]:
     """账户列表查询：原样透传所有 query params（含 wedap 必填 bizSeqNo/channelId）+ 审计。"""
@@ -201,6 +256,7 @@ async def deposit_accounts(
 @router.get("/api/v1/deposit/account/detail")
 async def deposit_account_detail(
     request: Request,
+    _q: None = Depends(wedap_identity_query),
     hdr: dict[str, str] = Depends(require_headers),
 ) -> dict[str, Any]:
     """账户详情查询（§5.3）：原样透传所有 query params（custAccountNo 等）+ 审计。"""
@@ -223,6 +279,7 @@ async def deposit_account_detail(
 @router.get("/api/v1/users/info")
 async def users_info(
     request: Request,
+    _q: None = Depends(wedap_identity_query),
     hdr: dict[str, str] = Depends(require_headers),
 ) -> dict[str, Any]:
     """用户信息查询：原样透传所有 query params + 审计。
@@ -248,6 +305,7 @@ async def users_info(
 @router.get("/api/v1/deposit/transactions")
 async def deposit_transactions(
     request: Request,
+    _q: None = Depends(wedap_identity_query),
     hdr: dict[str, str] = Depends(require_headers),
 ) -> dict[str, Any]:
     """交易流水查询（对接文档 v0.4.0 §5.4）：原样透传所有 query params + 审计。
@@ -275,6 +333,7 @@ async def deposit_transactions(
 @router.get("/api/v1/deposit/internal-accounts/info")
 async def internal_account_info(
     request: Request,
+    _q: None = Depends(wedap_identity_query),
     hdr: dict[str, str] = Depends(require_headers),
 ) -> dict[str, Any]:
     """内部户信息查询（对接文档 v0.4.0 §5.7 · 闭 D-1）：透传 + 审计 + 余额快照。
@@ -353,6 +412,7 @@ async def internal_account_info(
 @router.get("/api/v1/deposit/internal-accounts/transactions")
 async def internal_account_transactions(
     request: Request,
+    _q: None = Depends(wedap_identity_query),
     hdr: dict[str, str] = Depends(require_headers),
 ) -> dict[str, Any]:
     """内部户交易流水查询（对接文档 v0.4.0 §5.8，底层银行 328）：透传 + 审计。

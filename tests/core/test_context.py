@@ -351,11 +351,18 @@ def _query_of_target_size(path: str, total: int) -> str:
     return "x=" + "a" * (total - len(path) - len("?x="))
 
 
-def test_target_at_budget_passes(app: FastAPI) -> None:
-    """恰好 8,192 bytes 仍按合同处理（边界不能宽一格也不能严一格）。"""
+def test_target_at_budget_is_not_rejected_by_the_budget(app: FastAPI) -> None:
+    """恰好 8,192 bytes 不得由**预算**拒绝（边界不能宽一格也不能严一格）。
+
+    2026-09-01 起本仓实装封闭世界 query 合同，填充用的 `x=aaa...` 是未声明参数，
+    于是这条请求由 query 合同判 422。断言写成「不是 414」而不是「等于 200」：
+    本用例的主题是预算边界，不是 query 合同 —— 写死 200 会让它在下一次合同收紧时
+    再红一次，而它其实什么都没坏。同时断言确实是 422，以确认拒它的是 query 合同。
+    """
     query = _query_of_target_size("/healthz", MAX_REQUEST_TARGET_BYTES)
     r = TestClient(app).get(f"/healthz?{query}")
-    assert r.status_code == 200
+    assert r.status_code != 414, f"预算内被预算拒了，414 边界算错。实际 {r.status_code}"
+    assert r.status_code == 422, f"预期由 query 合同判 422，实际 {r.status_code}"
 
 
 def test_target_over_budget_returns_414(app: FastAPI) -> None:

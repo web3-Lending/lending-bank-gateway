@@ -67,6 +67,7 @@ from app.core.openapi_contract import (
     iter_operations,
 )
 from app.core.openapi_status_scan import scan_app
+from app.core.query_location import enforce_query_location
 from app.main import create_app
 from app.models.base import Base
 
@@ -357,14 +358,34 @@ def iter_dependants(dependant: Any) -> Iterator[Any]:
         yield from iter_dependants(sub)
 
 
-def mechanical_unknown_query(route: APIRoute) -> str:
-    """`reject` only if some query parameter is a model that forbids extras.
+def mechanical_unknown_query(route: APIRoute, app: FastAPI | None = None) -> str:
+    """What this route really does with a query name it does not declare.
 
     Read off ``route.dependant`` (including sub-dependencies), never from the
-    registry: this is the whole point of G5. FastAPI ignores undeclared query
-    parameters unless a bound Pydantic model sets ``extra="forbid"``.
+    registry: that is the whole point of G5.
+
+    Two mechanisms yield ``reject``:
+
+    1. ``app.core.query_location.enforce_query_location``, mounted as an
+       application-level dependency in ``create_app``. Since 2026-09-01 it refuses
+       names the operation does not declare, so in practice every route lands here.
+    2. A bound Pydantic model with ``extra="forbid"`` — FastAPI's own mechanism,
+       kept so this function is not a constant. A route with neither must still
+       resolve to ``passthrough``, otherwise G5 proves nothing.
     """
+    # The mount lives on ``app.router.dependencies``, not on the individual route
+    # dependants: this service runs FastAPI >= 0.141, where ``include_router`` leaves an
+    # ``_IncludedRouter`` placeholder and the routes reachable from ``original_router``
+    # never carry application-level dependencies. Reading the route alone would therefore
+    # answer "passthrough" for every operation while the running service rejects — the
+    # derivation would be confidently wrong rather than merely silent.
+    if app is not None and any(
+        getattr(d, "dependency", None) is enforce_query_location for d in app.router.dependencies
+    ):
+        return "reject"
     for dependant in iter_dependants(route.dependant):
+        if getattr(dependant, "call", None) is enforce_query_location:
+            return "reject"
         for field in dependant.query_params:
             annotation = field.field_info.annotation
             if (
@@ -382,7 +403,7 @@ def test_g5_unknown_query_declaration_matches_the_route(
     for method, path, route in served_routes(contract_app):
         contract = OPERATION_CONTRACTS[(method, path)]
         assert contract.unknown_query in {"reject", "passthrough"}
-        expected = mechanical_unknown_query(route)
+        expected = mechanical_unknown_query(route, contract_app)
         assert contract.unknown_query == expected, (
             f"{method} {path}: declared unknown_query={contract.unknown_query!r} but the route "
             f"mechanically resolves to {expected!r}"
@@ -391,8 +412,18 @@ def test_g5_unknown_query_declaration_matches_the_route(
         assert served == expected
 
 
-def test_g5_passthrough_routes_really_accept_unknown_query() -> None:
-    """Two spot checks that the mechanical verdict matches observed behaviour."""
+def test_g5_routes_really_reject_unknown_query() -> None:
+    """Two spot checks that the mechanical verdict matches observed behaviour.
+
+    Inverted on 2026-09-01. This used to assert 200 — that undeclared names were
+    accepted — and it was honest about the service at the time: on the seven wedap
+    passthroughs such a name was then **forwarded to the bank verbatim**. The
+    registry, the derivation and this behavioural check all said `passthrough`
+    together, which is the only reason the gap was legible at all.
+
+    Now the boundary rejects, so the check asserts the rejection. Keeping the old
+    assertion would have pinned the very behaviour API-HTTP-021 exists to remove.
+    """
     app = create_app()
     asyncio.run(create_tables(app.state.engine))
     client = TestClient(app)
@@ -400,8 +431,8 @@ def test_g5_passthrough_routes_really_accept_unknown_query() -> None:
         "/api/v1/admin/wedap-import/delivery-report?totally_unknown=1",
         headers={"X-Caller-Service": "gate-probe"},
     )
-    assert response.status_code == 200, response.text
-    assert client.get("/healthz?totally_unknown=1").status_code == 200
+    assert response.status_code == 422, response.text
+    assert client.get("/healthz?totally_unknown=1").status_code == 422
 
 
 # ── G6 · required response headers are proven by real responses ──────────────
@@ -993,9 +1024,8 @@ def test_g12_scheme_definitions_carry_no_credential_material(spec: dict[str, Any
     What actually distinguishes a credential is its shape -- a long opaque run
     with at least one digit. English words and header names are neither.
     """
-    blob = json.dumps(
-        (spec.get("components") or {}).get("securitySchemes") or {}, ensure_ascii=False
-    )
+    schemes = (spec.get("components") or {}).get("securitySchemes") or {}
+    blob = json.dumps(schemes, ensure_ascii=False)
     for pattern, what in [
         (r"eyJ[A-Za-z0-9_-]{10,}", "a JWT literal"),
         (r"BEGIN [A-Z ]*PRIVATE KEY", "a private key"),
@@ -1006,3 +1036,66 @@ def test_g12_scheme_definitions_carry_no_credential_material(spec: dict[str, Any
         ),
     ]:
         assert not re.search(pattern, blob), f"securitySchemes contains {what}"
+
+
+# ---------------------------------------------------------------------------
+# G13 --- unknown query names are rejected, not forwarded to the bank
+# ---------------------------------------------------------------------------
+#
+# Until 2026-09-01 this service accepted any query name it did not declare and, on the
+# seven wedap passthroughs, **forwarded it to the bank verbatim**. Two consequences:
+#
+#   * the caller got a 200 and believed its filter applied, when nothing here had ever
+#     looked at that name;
+#   * an unvalidated name reached a money system through a boundary whose whole job is
+#     to be the first controlled hop in front of it.
+#
+# Rejecting is the safer failure mode than forwarding: an unknown name becomes a visible
+# 422 instead of a silent hop into the bank's query location.
+#
+# The original blocker was that the passthroughs had no declared allow-list. They do now:
+# `app.api.v1.deposit` declares the wedap identity parameters on each proxy route, so the
+# allow-list is the route signature and this gate re-derives it from there.
+
+
+def test_g13_unknown_query_name_is_rejected(contract_app: FastAPI) -> None:
+    client = TestClient(contract_app, raise_server_exceptions=False)
+    response = client.get("/api/version?zzunknown=1", headers=FAULT_HEADERS)
+    assert response.status_code == 422, (
+        f"未聲明的 query 名被接受了（{response.status_code}）。在 passthrough 上這意味著"
+        "它會被原樣轉發給銀行 —— §7.2.1 第 2 條禁止靜默忽略，API-HTTP-021 的例外審批人"
+        "在對外合作方 API 上寫的是「不允許」。"
+    )
+
+
+def test_g13_declared_wedap_identity_query_still_passes(contract_app: FastAPI) -> None:
+    """回歸風險面：契約聲明的身份參數必須照舊放行。
+
+    lending-lifecycel 用 ``bizSeqNo`` + ``channelId`` + ``custAccountNo`` 打
+    ``/api/v1/deposit/account/detail``（account_8021.py:562）。守門把它們判成未知，
+    vault NAV 的取數鏈路當場斷掉。
+    """
+    client = TestClient(contract_app, raise_server_exceptions=False)
+    response = client.get(
+        "/api/v1/deposit/account/detail"
+        "?bizSeqNo=AQRY0000000000000000000000000001&channelId=LEN&custAccountNo=ACC001",
+        headers=FAULT_HEADERS,
+    )
+    # 帶憑證是**必須**的：這條路由的 S2S 鑑權在中間件層、先於守門，不帶憑證會拿 401，
+    # 於是 `!= 422` 恆真、這條守衛什麼都證明不了（初版就是這麼寫的，實測 401 才發現）。
+    assert response.status_code != 401, "測試自身沒帶憑證，守門根本沒被執行到"
+    assert response.status_code != 422, (
+        f"lending-lifecycel 實際在發的參數被守門拒了（{response.status_code}），"
+        f"vault NAV 取數會斷。響應：{response.text[:300]}"
+    )
+
+
+def test_g13_every_operation_declares_reject(spec: dict[str, Any]) -> None:
+    """聲明面與實作必須一致 —— 工單主推實施路徑點名要 `reject`。"""
+    stances = {
+        operation.get("x-lending-unknown-query-parameters")
+        for item in spec["paths"].values()
+        for method, operation in item.items()
+        if method in {"get", "post", "put", "patch", "delete"}
+    }
+    assert stances == {"reject"}, f"仍有 operation 不是 reject：{sorted(stances)}"

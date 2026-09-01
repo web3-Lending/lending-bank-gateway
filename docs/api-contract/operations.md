@@ -14,34 +14,34 @@ each set was derived and what is deliberately excluded.
 
 | Method | Path | Success | Failures | Profile | unknown_query | Error media type | Problem-compliant | Status-specific headers |
 |---|---|---|---|---|---|---|---|---|
-| `POST` | `/api/v1/admin/outbox/{outbox_id}/replay` | `200` | `401`, `404`, `414`, `422`, `500` | `ADMIN_OPS` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `GET` | `/api/v1/admin/platform-accounts` | `200` | `401`, `403`, `414`, `422`, `500` | `ADMIN_CONFIG` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `POST` | `/api/v1/admin/platform-accounts` | `200` | `400`, `401`, `403`, `409`, `414`, `422`, `500` | `ADMIN_CONFIG` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `PATCH` | `/api/v1/admin/platform-accounts/{row_id}` | `200` | `400`, `401`, `403`, `404`, `414`, `422`, `500` | `ADMIN_CONFIG` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `GET` | `/api/v1/admin/stuck-orders` | `200` | `401`, `414`, `422`, `500` | `ADMIN_OPS` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `GET` | `/api/v1/admin/wedap-import/delivery-report` | `200` | `401`, `414`, `422`, `500` | `ADMIN_OPS` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `POST` | `/api/v1/bank-funds/collect-from-users` | `200` | `400`, `401`, `403`, `409`, `414`, `422`, `500` | `MONEY_WRITE` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `POST` | `/api/v1/bank-funds/distribute-to-users` | `200` | `400`, `401`, `403`, `409`, `414`, `422`, `500` | `MONEY_WRITE` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `POST` | `/api/v1/bank-funds/refunds` | `200` | `400`, `401`, `403`, `409`, `414`, `422`, `500` | `MONEY_WRITE` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `POST` | `/api/v1/bank-funds/reversals` | `200` | `400`, `401`, `409`, `414`, `422`, `500` | `MONEY_WRITE` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `GET` | `/api/v1/bank-funds/status` | `200` | `400`, `401`, `404`, `414`, `422`, `500` | `LEDGER_QUERY` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `POST` | `/api/v1/callbacks/wedap/transactions` | `200` | `400`, `401`, `414`, `422`, `500` | `INBOUND_CALLBACK` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `GET` | `/api/v1/deposit/account/detail` | `200` | `400`, `401`, `414`, `422`, `500`, `502` | `GATEWAY_BFF` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `GET` | `/api/v1/deposit/accounts` | `200` | `400`, `401`, `414`, `422`, `500`, `502` | `GATEWAY_BFF` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `GET` | `/api/v1/deposit/balances/total` | `200` | `400`, `401`, `414`, `422`, `500`, `502` | `GATEWAY_BFF` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `GET` | `/api/v1/deposit/internal-accounts/info` | `200` | `400`, `401`, `414`, `422`, `500`, `502` | `GATEWAY_BFF` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `GET` | `/api/v1/deposit/internal-accounts/transactions` | `200` | `400`, `401`, `414`, `422`, `500`, `502` | `GATEWAY_BFF` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `GET` | `/api/v1/deposit/transactions` | `200` | `400`, `401`, `414`, `422`, `500`, `502` | `GATEWAY_BFF` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `POST` | `/api/v1/loans/p2p-disbursements` | `200` | `400`, `401`, `409`, `414`, `422`, `500` | `MONEY_WRITE` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `POST` | `/api/v1/loans/p2p-repayments` | `200` | `400`, `401`, `409`, `414`, `422`, `500` | `MONEY_WRITE` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `GET` | `/api/v1/loans/p2p-repayments/{biz_seq_no}/status` | `200` | `400`, `401`, `404`, `414`, `422`, `500` | `LEDGER_QUERY` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `POST` | `/api/v1/recon/notify` | `200` | `400`, `401`, `414`, `422`, `500` | `INBOUND_CALLBACK` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `GET` | `/api/v1/users/info` | `200` | `400`, `401`, `414`, `422`, `500`, `502` | `GATEWAY_BFF` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `POST` | `/api/v1/wedap/import/enqueue` | `200` | `400`, `401`, `414`, `422`, `500` | `INTERNAL_WRITE` | `passthrough` | `application/json` | no | 401: `WWW-Authenticate` |
-| `GET` | `/api/version` | `200` | `414`, `422`, `500` | `PUBLIC_PROBE` | `passthrough` | `application/json` | no | — |
-| `GET` | `/build-info` | `200` | `414`, `422`, `500` | `PUBLIC_PROBE` | `passthrough` | `application/json` | no | — |
-| `GET` | `/healthz` | `200` | `414`, `422`, `500` | `PUBLIC_PROBE` | `passthrough` | `application/json` | no | — |
-| `GET` | `/readyz` | `200` | `414`, `422`, `500`, `503` | `PUBLIC_PROBE` | `passthrough` | `application/json` | no | 503: `Retry-After` |
+| `POST` | `/api/v1/admin/outbox/{outbox_id}/replay` | `200` | `401`, `404`, `414`, `422`, `500` | `ADMIN_OPS` | `reject` | `application/json` | no | 401: `WWW-Authenticate` |
+| `GET` | `/api/v1/admin/platform-accounts` | `200` | `401`, `403`, `414`, `422`, `500` | `ADMIN_CONFIG` | `reject` | `application/json` | no | 401: `WWW-Authenticate` |
+| `POST` | `/api/v1/admin/platform-accounts` | `200` | `400`, `401`, `403`, `409`, `414`, `422`, `500` | `ADMIN_CONFIG` | `reject` | `application/json` | no | 401: `WWW-Authenticate` |
+| `PATCH` | `/api/v1/admin/platform-accounts/{row_id}` | `200` | `400`, `401`, `403`, `404`, `414`, `422`, `500` | `ADMIN_CONFIG` | `reject` | `application/json` | no | 401: `WWW-Authenticate` |
+| `GET` | `/api/v1/admin/stuck-orders` | `200` | `401`, `414`, `422`, `500` | `ADMIN_OPS` | `reject` | `application/json` | no | 401: `WWW-Authenticate` |
+| `GET` | `/api/v1/admin/wedap-import/delivery-report` | `200` | `401`, `414`, `422`, `500` | `ADMIN_OPS` | `reject` | `application/json` | no | 401: `WWW-Authenticate` |
+| `POST` | `/api/v1/bank-funds/collect-from-users` | `200` | `400`, `401`, `403`, `409`, `414`, `422`, `500` | `MONEY_WRITE` | `reject` | `application/json` | no | 401: `WWW-Authenticate` |
+| `POST` | `/api/v1/bank-funds/distribute-to-users` | `200` | `400`, `401`, `403`, `409`, `414`, `422`, `500` | `MONEY_WRITE` | `reject` | `application/json` | no | 401: `WWW-Authenticate` |
+| `POST` | `/api/v1/bank-funds/refunds` | `200` | `400`, `401`, `403`, `409`, `414`, `422`, `500` | `MONEY_WRITE` | `reject` | `application/json` | no | 401: `WWW-Authenticate` |
+| `POST` | `/api/v1/bank-funds/reversals` | `200` | `400`, `401`, `409`, `414`, `422`, `500` | `MONEY_WRITE` | `reject` | `application/json` | no | 401: `WWW-Authenticate` |
+| `GET` | `/api/v1/bank-funds/status` | `200` | `400`, `401`, `404`, `414`, `422`, `500` | `LEDGER_QUERY` | `reject` | `application/json` | no | 401: `WWW-Authenticate` |
+| `POST` | `/api/v1/callbacks/wedap/transactions` | `200` | `400`, `401`, `414`, `422`, `500` | `INBOUND_CALLBACK` | `reject` | `application/json` | no | 401: `WWW-Authenticate` |
+| `GET` | `/api/v1/deposit/account/detail` | `200` | `400`, `401`, `414`, `422`, `500`, `502` | `GATEWAY_BFF` | `reject` | `application/json` | no | 401: `WWW-Authenticate` |
+| `GET` | `/api/v1/deposit/accounts` | `200` | `400`, `401`, `414`, `422`, `500`, `502` | `GATEWAY_BFF` | `reject` | `application/json` | no | 401: `WWW-Authenticate` |
+| `GET` | `/api/v1/deposit/balances/total` | `200` | `400`, `401`, `414`, `422`, `500`, `502` | `GATEWAY_BFF` | `reject` | `application/json` | no | 401: `WWW-Authenticate` |
+| `GET` | `/api/v1/deposit/internal-accounts/info` | `200` | `400`, `401`, `414`, `422`, `500`, `502` | `GATEWAY_BFF` | `reject` | `application/json` | no | 401: `WWW-Authenticate` |
+| `GET` | `/api/v1/deposit/internal-accounts/transactions` | `200` | `400`, `401`, `414`, `422`, `500`, `502` | `GATEWAY_BFF` | `reject` | `application/json` | no | 401: `WWW-Authenticate` |
+| `GET` | `/api/v1/deposit/transactions` | `200` | `400`, `401`, `414`, `422`, `500`, `502` | `GATEWAY_BFF` | `reject` | `application/json` | no | 401: `WWW-Authenticate` |
+| `POST` | `/api/v1/loans/p2p-disbursements` | `200` | `400`, `401`, `409`, `414`, `422`, `500` | `MONEY_WRITE` | `reject` | `application/json` | no | 401: `WWW-Authenticate` |
+| `POST` | `/api/v1/loans/p2p-repayments` | `200` | `400`, `401`, `409`, `414`, `422`, `500` | `MONEY_WRITE` | `reject` | `application/json` | no | 401: `WWW-Authenticate` |
+| `GET` | `/api/v1/loans/p2p-repayments/{biz_seq_no}/status` | `200` | `400`, `401`, `404`, `414`, `422`, `500` | `LEDGER_QUERY` | `reject` | `application/json` | no | 401: `WWW-Authenticate` |
+| `POST` | `/api/v1/recon/notify` | `200` | `400`, `401`, `414`, `422`, `500` | `INBOUND_CALLBACK` | `reject` | `application/json` | no | 401: `WWW-Authenticate` |
+| `GET` | `/api/v1/users/info` | `200` | `400`, `401`, `414`, `422`, `500`, `502` | `GATEWAY_BFF` | `reject` | `application/json` | no | 401: `WWW-Authenticate` |
+| `POST` | `/api/v1/wedap/import/enqueue` | `200` | `400`, `401`, `414`, `422`, `500` | `INTERNAL_WRITE` | `reject` | `application/json` | no | 401: `WWW-Authenticate` |
+| `GET` | `/api/version` | `200` | `414`, `422`, `500` | `PUBLIC_PROBE` | `reject` | `application/json` | no | — |
+| `GET` | `/build-info` | `200` | `414`, `422`, `500` | `PUBLIC_PROBE` | `reject` | `application/json` | no | — |
+| `GET` | `/healthz` | `200` | `414`, `422`, `500` | `PUBLIC_PROBE` | `reject` | `application/json` | no | — |
+| `GET` | `/readyz` | `200` | `414`, `422`, `500`, `503` | `PUBLIC_PROBE` | `reject` | `application/json` | no | 503: `Retry-After` |
 
 ## Route-level notes (statuses this service really returns but no operation declares)
 
