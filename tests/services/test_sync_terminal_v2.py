@@ -229,6 +229,51 @@ async def test_reconcile_once_picks_only_stale_nonterminal(factory) -> None:
 
 
 @pytest.mark.asyncio
+async def test_reconcile_once_actively_queries_refund_in_result_unknown(factory) -> None:
+    """RESULT_UNKNOWN 的 **refund** 单必须被主动查单，不能只等回调。
+
+    起因 FU-GW-REFUND-RESULT-UNKNOWN-20260722-001：wedap 侧 collect 超时有回调兜底，
+    **refund 超时返 PROCESSING 后没有任何自动回调**（RefundService.java:22 类注释）。
+    若收敛只走回调，refund 超时单会永久等一个不会来的回调。
+
+    2026-09-01 复核：``_select_candidates`` 只按 ``status`` + ``created_at`` 选单、
+    **不按交易类型过滤**，主动查单走的是通用 ``GET /transactions/status``（按
+    ``trans_type`` + ``ori_req_date`` 回查，与业务类型无关），所以 refund 本来就被
+    覆盖 —— 但当时**没有任何测试锁住这一点**。将来谁加一句「只收敛 collect」的
+    类型过滤，refund 就会静默退回「永远等回调」，而全量测试照样绿。
+
+    这条用例把「refund 也走主动查单」钉成规格。
+    """
+    await _seed_order(
+        factory,
+        biz="RFND-UNKNOWN",
+        status="RESULT_UNKNOWN",
+        trans_type="BANK_FUND_REFUND",
+    )
+    now = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=60)
+    wedap = AsyncMock()
+    wedap.query_transaction_status.side_effect = _status_resp
+    count = await reconcile_once(
+        factory,
+        wedap=wedap,
+        now=now,
+        stale_after_seconds=1.0,
+        max_age_seconds=1e9,
+        batch_limit=10,
+    )
+    # 被查了，而不是被跳过
+    assert wedap.query_transaction_status.await_count == 1
+    assert count == 1
+    async with factory() as s:
+        status = (
+            await s.execute(
+                select(BankTxnOrder.status).where(BankTxnOrder.biz_seq_no == "RFND-UNKNOWN")
+            )
+        ).scalar_one()
+    assert str(status) == "SUCCEEDED"
+
+
+@pytest.mark.asyncio
 async def test_reconcile_once_not_converged_waits_next_round(factory) -> None:
     """status-query 返回非终态 → 本轮不收敛（count=0），不抛异常，待下轮 / G6 告警。"""
     await _seed_order(factory, biz="DSB-PENDING", status="SUBMITTED")
