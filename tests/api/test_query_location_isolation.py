@@ -167,14 +167,27 @@ def test_control_query_cannot_satisfy_a_header_located_input(
     client_and_wedap: tuple[TestClient, AsyncMock],
 ) -> None:
     """`?tenantId=...` (a name this service does not own in any location) is still
-    not allowed to stand in for the `X-Tenant-Id` header."""
+    not allowed to stand in for the `X-Tenant-Id` header.
+
+    The rejection code changed on 2026-09-01 and the subject did not. Before, the
+    query name was accepted and discarded, so the request died later at
+    `require_headers` with `400 missing X-Tenant-Id`. Now the closed-world query
+    contract refuses the undeclared name first, with `422`. Either way the query
+    location did not satisfy a header-located input — which is the whole point of
+    this control. Asserting on the earlier code would pin the ordering rather than
+    the property.
+    """
     client, _ = client_and_wedap
     response = client.get(
         "/api/v1/deposit/accounts?tenantId=OCBC",
         headers={"X-Caller-Service": "lifecycle", "X-Request-Id": "req-loc-2"},
     )
-    assert response.status_code == 400, response.text
-    assert response.json()["error"]["message"] == "missing X-Tenant-Id"
+    assert response.status_code == 422, response.text
+    body = response.json()["error"]
+    assert body["code"] == "GW_422_UNKNOWN_QUERY_PARAMETER"
+    assert body["details"]["parameters"] == ["tenantId"]
+    # 反面：请求确实没有被当成「租户已给出」而放行 —— 上游一次都没被调到。
+    assert response.status_code != 200
 
 
 def test_control_header_cannot_satisfy_a_query_located_parameter(

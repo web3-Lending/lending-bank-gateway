@@ -256,13 +256,12 @@ def _contract(
         success_status=200,
         failure_statuses=tuple(sorted(statuses)),
         profile=profile,
-        # Still `passthrough`, and deliberately so: the app-level query-location
-        # guard rejects *repeated* names and names belonging to the header location
-        # (API-HTTP-022), but a name this operation simply does not declare is still
-        # accepted -- closing that (API-HTTP-021) needs a per-operation allow-list
-        # the bank contract does not yet pin down for the seven passthroughs.
-        # Declaring "reject" here would be a lie the G5 gate catches.
-        unknown_query="passthrough",
+        # `reject` since 2026-09-01: the app-level query-location guard now also refuses
+        # names the operation does not declare (API-HTTP-021), not just repeated names and
+        # header-location names (API-HTTP-022). The blocker used to be that the seven wedap
+        # passthroughs had no allow-list; they have one now — `deposit.wedap_identity_query`
+        # declares it as route signature, so the guard derives it and it cannot drift.
+        unknown_query="reject",
         error_media_type="application/json",
         problem_compliant=False,
         required_headers=headers,

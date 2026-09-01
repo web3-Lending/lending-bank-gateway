@@ -31,17 +31,22 @@ a router dependency.
 
 Deliberately **not** in scope
 ----------------------------
-Rejecting query names an operation does not declare (API-HTTP-021, report §C1) and
-the byte-level ``%ZZ`` / overlong-UTF-8 / empty-field vectors (report §C4) are
-separate, breaking changes: the first needs a per-operation declared allow-list for
-the seven passthroughs, which the bank contract does not yet pin down. This module
-does not pretend otherwise -- it isolates the location and rejects what is
-unambiguously malformed within it.
+The byte-level ``%ZZ`` / overlong-UTF-8 / empty-field vectors (report §C4) are a
+separate, breaking change and still out of scope here.
+
+Rejecting undeclared names (API-HTTP-021, report §C1) **is** in scope since
+2026-09-01. The old blocker was that the seven passthroughs had no declared
+allow-list; they have one now -- ``app.api.v1.deposit`` declares the wedap identity
+parameters on each proxy route, so the allow-list is the route signature itself and
+cannot drift from what the operation actually accepts.
 """
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import HTTPException, Request
+from fastapi.dependencies.models import Dependant
 
 #: Field names this service binds from the **header** location. A query parameter
 #: carrying one of these names is a location confusion by construction: there is no
@@ -75,6 +80,31 @@ def _reject(code: str, message: str, parameters: list[str]) -> HTTPException:
     message on ``/api/v1/bank-funds/status``.
     """
     return HTTPException(422, detail={"code": code, "message": message, "parameters": parameters})
+
+
+def _param_names(param: Any) -> set[str]:
+    """One declared query parameter's externally visible name(s)."""
+    field_info = getattr(param, "field_info", None)
+    annotation = getattr(field_info, "annotation", None)
+    if annotation is not None and hasattr(annotation, "model_fields"):
+        return {f.alias or name for name, f in annotation.model_fields.items()}
+    alias = getattr(field_info, "alias", None)
+    return {alias or param.name}
+
+
+def declared_query_names(dependant: Dependant) -> set[str]:
+    """Every query name this route **and its sub-dependencies** declare.
+
+    Recursion is required, not tidiness: a sub-dependency can declare query parameters
+    of its own, and reading only the top-level ``dependant.query_params`` would call
+    those unknown and 422 a perfectly well-formed request.
+    """
+    names: set[str] = set()
+    for param in dependant.query_params:
+        names |= _param_names(param)
+    for sub in dependant.dependencies:
+        names |= declared_query_names(sub)
+    return names
 
 
 def enforce_query_location(request: Request) -> dict[str, str]:
@@ -113,6 +143,21 @@ def enforce_query_location(request: Request) -> dict[str, str]:
             "query parameter uses a name this service reads from the header location",
             conflicts,
         )
+    route = request.scope.get("route")
+    dependant = getattr(route, "dependant", None)
+    if dependant is not None:
+        # Names this operation does not declare (API-HTTP-021). On the seven wedap
+        # passthroughs an undeclared name used to be forwarded to the bank verbatim;
+        # rejecting is the safer failure mode -- it becomes a visible 422 here instead
+        # of an unvalidated hop into a money system's query location.
+        # Reported in wire order (first-appearance), per §7.2.1 clause 6/8.
+        undeclared = [n for n in seen if n not in declared_query_names(dependant)]
+        if undeclared:
+            raise _reject(
+                "GW_422_UNKNOWN_QUERY_PARAMETER",
+                "query parameter is not declared by this operation",
+                undeclared,
+            )
     request.state.query_location = seen
     return seen
 
