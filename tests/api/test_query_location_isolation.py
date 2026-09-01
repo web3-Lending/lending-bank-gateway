@@ -222,3 +222,49 @@ def test_control_repeated_value_of_the_same_name_is_still_a_duplicate() -> None:
     response = TestClient(create_app(), raise_server_exceptions=False).get("/healthz?a=1&a=1")
     assert response.status_code == 422, response.text
     assert response.json()["error"]["details"]["parameters"] == ["a"]
+
+
+def test_param_names_expands_a_pydantic_model_into_its_field_aliases() -> None:
+    """`Annotated[SomeModel, Query()]` 展开成各字段名，不是外层那一个形参名。
+
+    FastAPI 对「单个模型字段」形态会把模型展开成各字段来解析，所以 URL 上出现的是
+    字段名（或其 alias）。守门若只看外层形参名，`?page=2` 这种明明写在签名里的字段
+    会被自己的守门判成未声明参数而 422 —— 把合法请求拒掉。
+
+    2026-09-01 补：这一支此前零覆盖（`app/core/query_location.py:90`），origin/main
+    的覆盖率闸因此停在 99.95%。它是「只认外层名」和「按字段名认」的分水岭，
+    改回只认外层名的话，除这条外没有任何用例会红。
+    """
+    from pydantic import BaseModel, Field
+
+    from app.core.query_location import _param_names
+
+    class _Page(BaseModel):
+        page: int = 1
+        size_alias: int = Field(20, alias="size")
+
+    class _FieldInfo:
+        annotation = _Page
+        alias = "outer"
+
+    class _Param:
+        name = "outer"
+        field_info = _FieldInfo()
+
+    # 展开成字段面：alias 优先，没有 alias 的用字段名；外层 "outer" 不出现
+    assert _param_names(_Param()) == {"page", "size"}
+
+
+def test_param_names_falls_back_to_alias_for_a_plain_scalar_param() -> None:
+    """反向鉴别力：非模型参数仍按 alias（无 alias 则形参名）认，不误走展开分支。"""
+    from app.core.query_location import _param_names
+
+    class _FieldInfo:
+        annotation = int
+        alias = "importDate"
+
+    class _Param:
+        name = "import_date"
+        field_info = _FieldInfo()
+
+    assert _param_names(_Param()) == {"importDate"}
