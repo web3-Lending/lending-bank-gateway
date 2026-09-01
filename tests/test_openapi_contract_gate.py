@@ -54,14 +54,14 @@ from sqlalchemy import func, select
 from app.clients.wedap import WedapError
 from app.core.config import Settings
 from app.core.openapi_contract import (
+    CHALLENGE_APIKEY,
+    CHALLENGE_S2S,
     OPERATION_CONTRACTS,
     PROBLEM_COMPLIANCE_EXCEPTION_REF,
     UNIVERSAL_RESPONSE_HEADERS,
     OpenApiContractError,
     OperationContract,
     apply_contracts,
-    CHALLENGE_APIKEY,
-    CHALLENGE_S2S,
     authentication_challenge,
     build_openapi,
     iter_operations,
@@ -961,7 +961,8 @@ def test_g12_each_operation_declares_the_credential_its_challenge_names(
             assert not declared, f"{method} {path} is exempt from S2S but declares {declared}"
         else:
             assert declared == expected_by_challenge[challenge], (
-                f"{method} {path} answers 401 with {challenge!r} but declares {declared or 'nothing'}"
+                f"{method} {path} answers 401 with {challenge!r} "
+                f"but declares {declared or 'nothing'}"
             )
 
 
@@ -973,7 +974,9 @@ def test_g12_every_referenced_scheme_is_defined(spec: dict[str, Any]) -> None:
                 continue
             for requirement in operation.get("security") or []:
                 for name in requirement:
-                    assert name in defined, f"{method.upper()} {path} references undefined scheme {name!r}"
+                    assert name in defined, (
+                        f"{method.upper()} {path} references undefined scheme {name!r}"
+                    )
 
 
 def test_g12_scheme_definitions_carry_no_credential_material(spec: dict[str, Any]) -> None:
@@ -990,10 +993,16 @@ def test_g12_scheme_definitions_carry_no_credential_material(spec: dict[str, Any
     What actually distinguishes a credential is its shape -- a long opaque run
     with at least one digit. English words and header names are neither.
     """
-    blob = json.dumps((spec.get("components") or {}).get("securitySchemes") or {}, ensure_ascii=False)
+    blob = json.dumps(
+        (spec.get("components") or {}).get("securitySchemes") or {}, ensure_ascii=False
+    )
     for pattern, what in [
         (r"eyJ[A-Za-z0-9_-]{10,}", "a JWT literal"),
         (r"BEGIN [A-Z ]*PRIVATE KEY", "a private key"),
-        (r"(?i)\b(secret|token|apikey|password)\s*[:=]\s*[\"']?(?=[A-Za-z0-9+/_=-]*[0-9])[A-Za-z0-9+/_=-]{20,}", "a credential value"),
+        (
+            r"(?i)\b(secret|token|apikey|password)\s*[:=]\s*[\"']?"
+            r"(?=[A-Za-z0-9+/_=-]*[0-9])[A-Za-z0-9+/_=-]{20,}",
+            "a credential value",
+        ),
     ]:
         assert not re.search(pattern, blob), f"securitySchemes contains {what}"
