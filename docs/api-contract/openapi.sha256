@@ -1,4 +1,4 @@
-58f198ed082dfabbcf0cacb18c74a8e661b5d8d119ceea6195fcac2549005211  openapi.json
+f83c50dcea8cdd2601669a0b1aac095b29054a242ab7ba885b0beb2b2338885f  openapi.json
 #
 # 口径：本文件第一个 token 是 openapi.json 的**文件字节** sha256。
 # 因此 `sha256sum -c openapi.sha256` 在本仓可以直接用来校验产物完整性。

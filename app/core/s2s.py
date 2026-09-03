@@ -191,10 +191,58 @@ class S2SMiddleware(BaseHTTPMiddleware):
                         trace_id=trace_id,
                         challenge=_WWW_AUTHENTICATE_S2S,
                     )
+                # 签名值 vs 头值对账：token 里的 caller_service / tenant_id 是 BFF
+                # 签过名的（改一个字节签名就不对），而同名的请求头是明文、可篡改。
+                # 两者本该恒等——BFF 出站时 caller 头与 caller_service claim 同取
+                # IP-ACL 解析出的 caller_name，x-tenant-id 头与 tenant_id claim 同取
+                # 入站那一个头值（lending-console-bff/app/internal_proxy/router.py
+                # :245-283）。所以不等只有两种可能：有人拿着张真 token 改了头，或者
+                # 上游契约变了。两种都不该放行——手里有签名过的真值却按明文头做判断，
+                # 等于白验了这个签名。claim 缺席时不强求（BFF 只在有值时写入）。
+                claim_caller = claims.get("caller_service")
+                if claim_caller is not None and claim_caller != caller:
+                    logger.warning(
+                        "s2s auth failed: path=%s reason=%s caller=%s claim_caller=%s "
+                        "trace_id=%s",
+                        path,
+                        "caller_header_claim_mismatch",
+                        caller,
+                        claim_caller,
+                        trace_id,
+                    )
+                    return _unauthorized(
+                        "GW_401_S2S",
+                        "caller does not match svc token",
+                        trace_id=trace_id,
+                        challenge=_WWW_AUTHENTICATE_S2S,
+                    )
+                claim_tenant = claims.get("tenant_id")
+                header_tenant = current_ids().tenant_id
+                # 租户头缺席交给业务层的 require_headers 报 400（错因更准），这里
+                # 只拦「两个值都在但对不上」——那是越权到别人租户的形状。
+                if (
+                    claim_tenant is not None
+                    and header_tenant is not None
+                    and claim_tenant != header_tenant
+                ):
+                    logger.warning(
+                        "s2s auth failed: path=%s reason=%s caller=%s trace_id=%s",
+                        path,
+                        "tenant_header_claim_mismatch",
+                        caller,
+                        trace_id,
+                    )
+                    return _unauthorized(
+                        "GW_401_S2S",
+                        "tenant does not match svc token",
+                        trace_id=trace_id,
+                        challenge=_WWW_AUTHENTICATE_S2S,
+                    )
                 # 白名单在本通路**照查**（与专属 token 通路的"绑定即免查"不同）：
                 # 专属 token 是本仓运维一个个发出去的，发放动作本身即授权；而 svc JWT
                 # 是 BFF 发的，谁能拿到 aud=bank-gateway 由 BFF 侧 ACL 决定。本仓保留
                 # 自己那份「谁准打进来」的名单，不把准入判断整体外包出去。
+                # 走到这里 caller 已与签名值对上，白名单判的就是签名过的身份。
                 if self._allowed_callers is not None and caller not in self._allowed_callers:
                     logger.warning(
                         "s2s auth failed: path=%s reason=%s caller=%s trace_id=%s",

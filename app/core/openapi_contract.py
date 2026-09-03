@@ -163,7 +163,12 @@ SECURITY_SCHEMES: Mapping[str, Mapping[str, Any]] = {
             "Service JWT signed by the console BFF (RS256, aud=bank-gateway, "
             "iss=lending-console-bff), verified locally against the BFF SVC-JWKS. "
             "This is what callers routed through the BFF internal proxy present, "
-            "since that proxy forwards no X-S2S-Token."
+            "since that proxy forwards no X-S2S-Token. The token's caller_service "
+            "and tenant_id claims must match the X-Caller-Service and X-Tenant-Id "
+            "headers. Note this scheme satisfies authentication only: the "
+            "platform-account admin operations additionally require a "
+            "gateway-issued per-service token and answer 403 to a caller "
+            "authenticated this way."
         ),
     },
     "BankApiKey": {

@@ -125,15 +125,26 @@ class Settings(BaseSettings):
     """
     svc_jwt_issuer: str = "lending-console-bff"
     """svc JWT 期望的 iss（GW_SVC_JWT_ISSUER）。"""
-    svc_jwks_cache_ttl_seconds: float = 300.0
-    """JWKS 本地缓存秒数（GW_SVC_JWKS_CACHE_TTL_SECONDS）。BFF 侧文档口径 ~300s。"""
-    svc_jwt_leeway_seconds: float = 30.0
-    """exp/iat 时钟偏移容忍秒数（GW_SVC_JWT_LEEWAY_SECONDS），对齐 BFF。"""
-    svc_jwks_timeout_seconds: float = 5.0
+    svc_jwks_cache_ttl_seconds: float = Field(default=300.0, ge=0, le=3600, allow_inf_nan=False)
+    """JWKS 本地缓存秒数（GW_SVC_JWKS_CACHE_TTL_SECONDS）。BFF 侧文档口径 ~300s。
+
+    上界 1h：缓存越久，BFF 轮换/吊销公钥后本仓继续用旧公钥验过 token 的窗口越长。
+    """
+    svc_jwt_leeway_seconds: float = Field(default=30.0, ge=0, le=300, allow_inf_nan=False)
+    """exp/iat 时钟偏移容忍秒数（GW_SVC_JWT_LEEWAY_SECONDS），对齐 BFF。
+
+    ``allow_inf_nan=False`` + 上界不是洁癖：PyJWT 的 `leeway` 收到 `inf`/`nan` 时
+    **exp 校验恒过**（实测：leeway=inf 时一个 100000 秒前就过期的 token 照样解出
+    claims）。也就是说一个 `GW_SVC_JWT_LEEWAY_SECONDS=inf` 的配置失误会把 token 时效
+    整个关掉，而且没有任何报错——启动期拒掉这种取值，比事后在日志里找它便宜得多。
+    上界 300s 与 BFF 的 TTL（SERVICE_JWT_TTL_SEC=300）同量级，容不下"过期一小时还认"。
+    """
+    svc_jwks_timeout_seconds: float = Field(default=5.0, gt=0, le=30, allow_inf_nan=False)
     """拉 JWKS 的 HTTP 超时秒数（GW_SVC_JWKS_TIMEOUT_SECONDS）。
 
     取不到就 fail-closed 拒绝，所以超时必须短：JWKS 不可达时不能把资金端点的
-    认证拖成挂起。
+    认证拖成挂起。``gt=0`` 而非 ``ge=0``——0 秒超时等于每次都失败，是 fail-closed
+    的退化形态而不是配置。
     """
     account_guard_mode: str = "off"
     """平台账户守门人三态开关（GW_ACCOUNT_GUARD_MODE = off|observe|enforce）。

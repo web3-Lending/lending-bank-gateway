@@ -33,23 +33,25 @@ def _jwks_payload() -> dict[str, Any]:
     return {"keys": [jwk]}
 
 
-def _bearer(audience: str = "bank-gateway", caller_service: str = "lifecycle") -> str:
+def _bearer(
+    audience: str = "bank-gateway",
+    caller_service: str | None = "lifecycle",
+    tenant_id: str | None = "WBTHK01",
+) -> str:
     now = int(time.time())
-    return pyjwt.encode(
-        {
+    payload: dict[str, Any] = {
             "iss": "lending-console-bff",
             "aud": audience,
             "sub": "bff-service",
-            "tenant_id": "WBTHK01",
+            "tenant_id": tenant_id,
             "caller_service": caller_service,
             "jti": "jti-1",
             "iat": now,
             "exp": now + 300,
-        },
-        _BFF_KEY,
-        algorithm="RS256",
-        headers={"kid": _KID},
-    )
+    }
+    # None = 该 claim 整个缺席（BFF 只在有值时写入），不是写一个 null 进去
+    payload = {k: v for k, v in payload.items() if v is not None}
+    return pyjwt.encode(payload, _BFF_KEY, algorithm="RS256", headers={"kid": _KID})
 
 
 def _verifier() -> BffSvcJwtVerifier:
@@ -255,3 +257,78 @@ def test_caller_with_own_token_still_must_use_it() -> None:
         headers={"X-Caller-Service": "lifecycle", "X-S2S-Token": "WRONG"},
     )
     assert r.status_code == 401
+
+
+# ── 签名值 vs 头值对账（codex 复核 · 手里有签名过的真值就不能按明文头判）────────
+
+
+@respx.mock
+def test_caller_header_must_match_signed_claim() -> None:
+    """拿着 caller_service=lifecycle 的真 token，改头冒充 liquidation → 拒。"""
+    _mock_jwks()
+    r = TestClient(_app()).post(
+        "/api/v1/x",
+        headers={
+            "X-Caller-Service": "liquidation",
+            "Authorization": f"Bearer {_bearer(caller_service='lifecycle')}",
+        },
+    )
+    assert r.status_code == 401
+    assert r.json()["error"]["message"] == "caller does not match svc token"
+
+
+@respx.mock
+def test_tenant_header_must_match_signed_claim() -> None:
+    """拿着 tenant_id=WBTHK01 的真 token 去打别人租户的数据 → 拒。"""
+    _mock_jwks()
+    r = TestClient(_app()).post(
+        "/api/v1/x",
+        headers={
+            "X-Caller-Service": "lifecycle",
+            "X-Tenant-Id": "OTHER01",
+            "Authorization": f"Bearer {_bearer(tenant_id='WBTHK01')}",
+        },
+    )
+    assert r.status_code == 401
+    assert r.json()["error"]["message"] == "tenant does not match svc token"
+
+
+@respx.mock
+def test_matching_tenant_header_passes() -> None:
+    _mock_jwks()
+    r = TestClient(_app()).post(
+        "/api/v1/x",
+        headers={
+            "X-Caller-Service": "lifecycle",
+            "X-Tenant-Id": "WBTHK01",
+            "Authorization": f"Bearer {_bearer(tenant_id='WBTHK01')}",
+        },
+    )
+    assert r.status_code == 200
+
+
+@respx.mock
+def test_absent_tenant_header_is_left_to_the_business_layer() -> None:
+    """租户头缺席不在鉴权层拦——业务层的 400 错因更准，别把它变成 401。"""
+    _mock_jwks()
+    r = TestClient(_app()).post(
+        "/api/v1/x",
+        headers={"X-Caller-Service": "lifecycle", "Authorization": f"Bearer {_bearer()}"},
+    )
+    assert r.status_code == 200
+
+
+@respx.mock
+def test_token_without_identity_claims_still_passes() -> None:
+    """claim 缺席时不强求（BFF 只在有值时写入），签名本身仍是准入依据。"""
+    _mock_jwks()
+    token = _bearer(caller_service=None, tenant_id=None)
+    r = TestClient(_app()).post(
+        "/api/v1/x",
+        headers={
+            "X-Caller-Service": "lifecycle",
+            "X-Tenant-Id": "WBTHK01",
+            "Authorization": f"Bearer {token}",
+        },
+    )
+    assert r.status_code == 200

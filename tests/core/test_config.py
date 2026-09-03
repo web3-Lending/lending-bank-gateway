@@ -43,3 +43,31 @@ def test_wedap_result_buffer_minutes_rejects_negative_inf_nan() -> None:
         Settings(wedap_result_buffer_minutes=float("inf"))
     with pytest.raises(ValidationError):
         Settings(wedap_result_buffer_minutes=float("nan"))
+
+
+def test_svc_jwt_leeway_rejects_inf_nan_and_out_of_range() -> None:
+    """inf/nan 的 leeway 会让 PyJWT 的 exp 校验恒过——等于悄悄关掉 token 时效。
+
+    实测：`jwt.decode(..., leeway=float('inf'))` 对一个 100000 秒前就过期的 token
+    照样解出 claims，且不报任何错。启动期拒掉，别让它变成一条只能靠翻日志发现的
+    生产事故。上界 300s 与 BFF 的 SERVICE_JWT_TTL_SEC 同量级。
+    """
+    for bad in (float("inf"), float("nan"), -1, 301):
+        with pytest.raises(ValidationError):
+            Settings(svc_jwt_leeway_seconds=bad)
+    assert Settings(svc_jwt_leeway_seconds=0).svc_jwt_leeway_seconds == 0
+    assert Settings(svc_jwt_leeway_seconds=300).svc_jwt_leeway_seconds == 300
+
+
+def test_svc_jwks_cache_ttl_rejects_inf_nan_and_out_of_range() -> None:
+    """缓存越久，BFF 轮换/吊销公钥后本仓仍用旧公钥验过 token 的窗口越长。"""
+    for bad in (float("inf"), float("nan"), -1, 3601):
+        with pytest.raises(ValidationError):
+            Settings(svc_jwks_cache_ttl_seconds=bad)
+
+
+def test_svc_jwks_timeout_rejects_zero_inf_nan_and_out_of_range() -> None:
+    """0 秒超时是 fail-closed 的退化形态（每次必失败），不是配置。"""
+    for bad in (0, float("inf"), float("nan"), -1, 31):
+        with pytest.raises(ValidationError):
+            Settings(svc_jwks_timeout_seconds=bad)
