@@ -119,16 +119,22 @@ UNIVERSAL_RESPONSE_HEADERS: tuple[str, ...] = (
 )
 
 #: ``WWW-Authenticate`` challenge values, verbatim from ``app/core/s2s.py``.
-CHALLENGE_S2S = 'S2S realm="lending-bank-gateway", header="X-S2S-Token"'
+CHALLENGE_S2S = (
+    'S2S realm="lending-bank-gateway", header="X-S2S-Token", '
+    'Bearer realm="lending-bank-gateway", audience="bank-gateway"'
+)
 CHALLENGE_APIKEY = 'ApiKey realm="lending-bank-gateway", header="apikey"'
 
 #: The credential each challenge names, as OpenAPI security schemes. Keyed by the
 #: challenge string so this table and ``authentication_challenge`` cannot disagree
 #: about which surface is which: both read the same mounted middleware.
 #:
-#: ``S2SMiddleware.dispatch`` requires ``X-Caller-Service`` *and* ``X-S2S-Token`` on
-#: the S2S surface (app/core/s2s.py:121,135 -- either one missing is a 401), hence
-#: two schemes ANDed rather than one.
+#: ``S2SMiddleware.dispatch`` always requires ``X-Caller-Service`` on the S2S
+#: surface, plus *one of two* credentials: the direct-connect ``X-S2S-Token``, or a
+#: BFF-signed svc JWT in ``Authorization: Bearer`` for callers arriving through the
+#: BFF internal proxy (which never forwards ``X-S2S-Token``). Hence the two
+#: alternative requirement groups in :data:`_SCHEMES_BY_CHALLENGE`, each ANDing its
+#: credential with ``CallerService``.
 SECURITY_SCHEMES: Mapping[str, Mapping[str, Any]] = {
     "S2SToken": {
         "type": "apiKey",
@@ -144,8 +150,20 @@ SECURITY_SCHEMES: Mapping[str, Mapping[str, Any]] = {
         "in": "header",
         "name": "X-Caller-Service",
         "description": (
-            "Identifies the calling service. Required together with X-S2S-Token: "
-            "S2SMiddleware answers 401 when either is absent."
+            "Identifies the calling service. Required alongside whichever "
+            "credential is presented (X-S2S-Token or the BFF svc JWT): "
+            "S2SMiddleware answers 401 when it is absent."
+        ),
+    },
+    "BffSvcJwt": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": (
+            "Service JWT signed by the console BFF (RS256, aud=bank-gateway, "
+            "iss=lending-console-bff), verified locally against the BFF SVC-JWKS. "
+            "This is what callers routed through the BFF internal proxy present, "
+            "since that proxy forwards no X-S2S-Token."
         ),
     },
     "BankApiKey": {
@@ -162,9 +180,12 @@ SECURITY_SCHEMES: Mapping[str, Mapping[str, Any]] = {
 #: challenge -> the schemes that avoid it. Absent challenge (exempt path) -> no
 #: ``security`` key at all: ``security: [{}]`` would mean "optional", which is a
 #: different and wrong claim.
-_SCHEMES_BY_CHALLENGE: Mapping[str, tuple[str, ...]] = {
-    CHALLENGE_S2S: ("S2SToken", "CallerService"),
-    CHALLENGE_APIKEY: ("BankApiKey",),
+_SCHEMES_BY_CHALLENGE: Mapping[str, tuple[tuple[str, ...], ...]] = {
+    # Each inner tuple is one OpenAPI security requirement object (schemes ANDed);
+    # the outer tuple is the alternatives (ORed), matching the two credentials the
+    # middleware accepts on this surface.
+    CHALLENGE_S2S: (("S2SToken", "CallerService"), ("BffSvcJwt", "CallerService")),
+    CHALLENGE_APIKEY: (("BankApiKey",),),
 }
 
 #: Statuses whose ``WWW-Authenticate`` requirement is universal on authenticated
@@ -634,7 +655,8 @@ def apply_contracts(app: FastAPI, schema: dict[str, Any]) -> dict[str, Any]:
             challenge = authentication_challenge(app, path)
             if challenge is not None:
                 operation["security"] = [
-                    {scheme: [] for scheme in _SCHEMES_BY_CHALLENGE[challenge]}
+                    {scheme: [] for scheme in group}
+                    for group in _SCHEMES_BY_CHALLENGE[challenge]
                 ]
             operation["x-lending-unknown-query-parameters"] = contract.unknown_query
             operation["x-lending-problem-compliance"] = contract.problem_compliant

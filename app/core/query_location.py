@@ -56,11 +56,12 @@ from fastapi.dependencies.models import Dependant
 #:
 #: Sources, all read from ``request.headers`` and nowhere else:
 #: ``app/core/context.py`` (X-Request-Id / X-Trace-Id / X-Tenant-Id / X-Biz-Seq-No),
-#: ``app/core/s2s.py`` (X-Caller-Service / X-S2S-Token / apikey),
+#: ``app/core/s2s.py`` (X-Caller-Service / X-S2S-Token / apikey / Authorization),
 #: ``app/api/deps.py`` (Idempotency-Key).
 HEADER_LOCATION_NAMES: frozenset[str] = frozenset(
     {
         "apikey",
+        "authorization",
         "idempotency-key",
         "x-biz-seq-no",
         "x-caller-service",

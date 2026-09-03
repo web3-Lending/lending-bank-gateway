@@ -1,5 +1,6 @@
 import hmac
 import logging
+from typing import TYPE_CHECKING
 
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
@@ -8,13 +9,21 @@ from starlette.responses import JSONResponse, Response
 from app.core.context import current_ids
 from app.core.envelope import err
 
+if TYPE_CHECKING:  # pragma: no cover
+    from app.core.svc_jwt import BffSvcJwtVerifier
+
 logger = logging.getLogger(__name__)
 
-# API-HTTP-004 + §7.4：401 必须带适用的 `WWW-Authenticate`。本仓不用
-# `Authorization: Bearer`——凭证载体是 `X-S2S-Token`（lending 服务间）与 `apikey`
-# （wedap 入站回调），challenge 用与之对应的 scheme 名并点名 header，调用方据此
-# 知道该刷新哪一种凭证，而不是盲目重试。
-_WWW_AUTHENTICATE_S2S = 'S2S realm="lending-bank-gateway", header="X-S2S-Token"'
+# API-HTTP-004 + §7.4：401 必须带适用的 `WWW-Authenticate`。challenge 点名本仓
+# 真正接受的凭证，调用方据此知道该刷新哪一种，而不是盲目重试。
+# S2S 面接受**两种**凭证，故按 RFC 7235 §4.1 并列两个 challenge：
+#   - `S2S`（header `X-S2S-Token`）：lending 服务间直连的共享 secret / 专属 token
+#   - `Bearer`：经 BFF `/internal/proxy` 进来的 svc JWT（BFF 签，aud=bank-gateway）
+# wedap 入站回调面另用 `apikey`，见下。
+_WWW_AUTHENTICATE_S2S = (
+    'S2S realm="lending-bank-gateway", header="X-S2S-Token", '
+    'Bearer realm="lending-bank-gateway", audience="bank-gateway"'
+)
 _WWW_AUTHENTICATE_APIKEY = 'ApiKey realm="lending-bank-gateway", header="apikey"'
 
 
@@ -51,6 +60,18 @@ def parse_caller_tokens(raw: str) -> dict[str, str] | None:
     return tokens or None
 
 
+def _bearer_credential(header_value: str) -> str:
+    """从 `Authorization` 头里取出 Bearer 凭证；不是 Bearer 就返回空串。
+
+    scheme 按 RFC 7235 大小写不敏感。返回空串 = 本请求没有出示 Bearer 凭证，
+    由调用处决定后续（不是"验证失败"，两者的 401 措辞不同）。
+    """
+    scheme, _, credential = header_value.partition(" ")
+    if scheme.lower() != "bearer":
+        return ""
+    return credential.strip()
+
+
 class S2SMiddleware(BaseHTTPMiddleware):
     def __init__(
         self,
@@ -62,6 +83,7 @@ class S2SMiddleware(BaseHTTPMiddleware):
         caller_tokens: dict[str, str] | None = None,
         callback_paths: set[str] | None = None,
         callback_api_key: str | None = None,
+        svc_jwt_verifier: "BffSvcJwtVerifier | None" = None,
     ) -> None:
         super().__init__(app)  # type: ignore[arg-type]
         # 空串与 None 等价：视为"未配置"，退化为 dev 模式（仅校验 caller 头，不校验 token）
@@ -79,6 +101,11 @@ class S2SMiddleware(BaseHTTPMiddleware):
         # 启动期 fail-fast 兜底，保证 prod/dev-hw 必配）。
         self._callback_paths: set[str] = callback_paths or set()
         self._callback_api_key: str | None = callback_api_key or None
+        # BFF svc JWT 验签器（collab brj8tl7t90a7i5n169g69u23）：经 BFF
+        # `/internal/proxy/bank-gateway/...` 进来的请求带的是 `Authorization: Bearer
+        # <RS256 svc JWT>`，**不带** X-S2S-Token（BFF 出站透传白名单里没有这个头，
+        # 调用方也补不了）。None = 未配置 GW_BFF_BASE_URL，该通路整体不启用。
+        self._svc_jwt_verifier = svc_jwt_verifier
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         # 尾斜杠规范化：/foo/ → /foo；根路径 "/" 保持不变
@@ -140,6 +167,55 @@ class S2SMiddleware(BaseHTTPMiddleware):
         # request.state.s2s_token_bound 标记本请求是否凭专属 token 认证——admin 配置面
         # （platform_accounts）只信 token_bound 请求，共享 secret 冒充 caller 头到不了 admin。
         request.state.s2s_token_bound = False
+
+        # 模式零：经 BFF 的 svc JWT。**仅在没有 X-S2S-Token 时**尝试——带了
+        # X-S2S-Token 的请求是在明示"我用直连凭证"，那就照直连规则判它的成败，
+        # 不给它一条"这个不行就换那个"的旁路（凭证择优会让一处泄露即全面失效）。
+        if not token and self._svc_jwt_verifier is not None:
+            bearer = _bearer_credential(request.headers.get("Authorization", ""))
+            if bearer:
+                claims = await self._svc_jwt_verifier.verify(bearer)
+                if claims is None:
+                    # 具体拒因（alg/kid/aud/exp/签名）已由验签器写审计日志；对外
+                    # 只回一句话，不回显 token 结构细节。
+                    logger.warning(
+                        "s2s auth failed: path=%s reason=%s caller=%s trace_id=%s",
+                        path,
+                        "bad_bff_svc_jwt",
+                        caller,
+                        trace_id,
+                    )
+                    return _unauthorized(
+                        "GW_401_S2S",
+                        "bad bff svc token",
+                        trace_id=trace_id,
+                        challenge=_WWW_AUTHENTICATE_S2S,
+                    )
+                # 白名单在本通路**照查**（与专属 token 通路的"绑定即免查"不同）：
+                # 专属 token 是本仓运维一个个发出去的，发放动作本身即授权；而 svc JWT
+                # 是 BFF 发的，谁能拿到 aud=bank-gateway 由 BFF 侧 ACL 决定。本仓保留
+                # 自己那份「谁准打进来」的名单，不把准入判断整体外包出去。
+                if self._allowed_callers is not None and caller not in self._allowed_callers:
+                    logger.warning(
+                        "s2s auth failed: path=%s reason=%s caller=%s trace_id=%s",
+                        path,
+                        "unknown_caller",
+                        caller,
+                        trace_id,
+                    )
+                    return _unauthorized(
+                        "GW_401_S2S",
+                        "unknown caller",
+                        trace_id=trace_id,
+                        challenge=_WWW_AUTHENTICATE_S2S,
+                    )
+                # s2s_token_bound 保持 False：admin 配置面（platform_accounts）只认
+                # 本仓自己签发的专属 token。svc JWT 的 caller_service claim 虽由 BFF
+                # 签名保护，但「哪些 caller 能改资金白名单」这条授权仍应由本仓的
+                # GW_S2S_CALLER_TOKENS 独立决定，不随 BFF 的签发策略漂移
+                # （create_app 的 GW_ADMIN_CALLERS↔专属 token fail-fast 因此仍成立）。
+                return await call_next(request)
+
         if self._caller_tokens is not None:
             expected = self._caller_tokens.get(caller)
             if expected is not None:

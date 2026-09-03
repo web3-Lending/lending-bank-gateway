@@ -102,6 +102,39 @@ class Settings(BaseSettings):
     注意：v1 基于共享 token，无法密码学绑定 caller；白名单为兜底归因加固。
     v2 规划 per-service token/签名绑定，届时可移除本字段。
     """
+    bff_base_url: str = ""
+    """BFF（7018）base URL（GW_BFF_BASE_URL）。空串 = 不接受 BFF 签发的 svc JWT。
+
+    调用方经 BFF `/internal/proxy/bank-gateway/...` 进来时，凭证是
+    `Authorization: Bearer <RS256 svc JWT>`（BFF 按 IP-ACL 权威注入 caller 身份后自签），
+    **不带** `X-S2S-Token`——BFF 的出站透传白名单里没有这个头，调用方也无从补。
+    故本仓必须能本地验 BFF 的 svc JWT，否则经 BFF 的调用一律 401
+    （collab brj8tl7t90a7i5n169g69u23：9000→7018→8022 全端点 GW_401_S2S）。
+
+    留空即该验证路径整体不装配（local/test 与尚未接 BFF 的环境），既有
+    X-S2S-Token 直连链路不受影响。
+    """
+    svc_jwks_path: str = "/internal/svc-jwks.json"
+    """BFF SVC-JWKS 公钥端点路径（GW_SVC_JWKS_PATH），拼在 bff_base_url 之后。"""
+    svc_jwt_audience: str = "bank-gateway"
+    """本仓在 BFF audience 表里的名字（GW_SVC_JWT_AUDIENCE）。
+
+    BFF `service_token.py` 为 BANK_GATEWAY_BASE_URL 映射独立 audience `bank-gateway`
+    （collab s38no5ec2goxjsqrwnylonda），不复用 baffle。aud 不符即拒——这是「BFF 发给
+    别的下游的 token 不能拿来调我」的唯一防线。
+    """
+    svc_jwt_issuer: str = "lending-console-bff"
+    """svc JWT 期望的 iss（GW_SVC_JWT_ISSUER）。"""
+    svc_jwks_cache_ttl_seconds: float = 300.0
+    """JWKS 本地缓存秒数（GW_SVC_JWKS_CACHE_TTL_SECONDS）。BFF 侧文档口径 ~300s。"""
+    svc_jwt_leeway_seconds: float = 30.0
+    """exp/iat 时钟偏移容忍秒数（GW_SVC_JWT_LEEWAY_SECONDS），对齐 BFF。"""
+    svc_jwks_timeout_seconds: float = 5.0
+    """拉 JWKS 的 HTTP 超时秒数（GW_SVC_JWKS_TIMEOUT_SECONDS）。
+
+    取不到就 fail-closed 拒绝，所以超时必须短：JWKS 不可达时不能把资金端点的
+    认证拖成挂起。
+    """
     account_guard_mode: str = "off"
     """平台账户守门人三态开关（GW_ACCOUNT_GUARD_MODE = off|observe|enforce）。
 

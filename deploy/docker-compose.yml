@@ -50,6 +50,9 @@ services:
       GW_WEDAP_STAGING_BUCKET: ${WEDAP_STAGING_BUCKET:-${GW_WEDAP_STAGING_BUCKET:-lending-wedap-staging}}
       GW_WEDAP_IMPORT_BUCKET: ${WEDAP_IMPORT_BUCKET:-${GW_WEDAP_IMPORT_BUCKET:-wedap-flow-import}}
       GW_S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-${GW_S3_ENDPOINT_URL:-}}
+      # BFF svc JWT 入站验签（collab brj8tl7t90a7i5n169g69u23）：配了才启用该通路，
+      # 留空 = 只认 X-S2S-Token（既有直连调用方零影响）。
+      GW_BFF_BASE_URL: ${BFF_BASE_URL:-${GW_BFF_BASE_URL:-}}
       GW_RECON_BASE_URL: ${RECON_BASE_URL:-${GW_RECON_BASE_URL:-}}
       GW_RECON_CALLBACK_HMAC_SECRET: ${RECON_CALLBACK_HMAC_SECRET:-${GW_RECON_CALLBACK_HMAC_SECRET:-}}
       # 账户守门人（FU-GW-ACCOUNT-GUARD）：与 deploy.sh remote 透传清单保持同集

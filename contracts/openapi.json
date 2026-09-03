@@ -992,8 +992,14 @@
         "name": "apikey",
         "type": "apiKey"
       },
+      "BffSvcJwt": {
+        "bearerFormat": "JWT",
+        "description": "Service JWT signed by the console BFF (RS256, aud=bank-gateway, iss=lending-console-bff), verified locally against the BFF SVC-JWKS. This is what callers routed through the BFF internal proxy present, since that proxy forwards no X-S2S-Token.",
+        "scheme": "bearer",
+        "type": "http"
+      },
       "CallerService": {
-        "description": "Identifies the calling service. Required together with X-S2S-Token: S2SMiddleware answers 401 when either is absent.",
+        "description": "Identifies the calling service. Required alongside whichever credential is presented (X-S2S-Token or the BFF svc JWT): S2SMiddleware answers 401 when it is absent.",
         "in": "header",
         "name": "X-Caller-Service",
         "type": "apiKey"
@@ -1081,7 +1087,7 @@
                 }
               },
               "WWW-Authenticate": {
-                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
+                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\", Bearer realm=\"lending-bank-gateway\", audience=\"bank-gateway\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
                 "required": true,
                 "schema": {
                   "type": "string"
@@ -1240,6 +1246,10 @@
           {
             "CallerService": [],
             "S2SToken": []
+          },
+          {
+            "BffSvcJwt": [],
+            "CallerService": []
           }
         ],
         "summary": "Replay Outbox",
@@ -1320,7 +1330,7 @@
                 }
               },
               "WWW-Authenticate": {
-                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
+                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\", Bearer realm=\"lending-bank-gateway\", audience=\"bank-gateway\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
                 "required": true,
                 "schema": {
                   "type": "string"
@@ -1479,6 +1489,10 @@
           {
             "CallerService": [],
             "S2SToken": []
+          },
+          {
+            "BffSvcJwt": [],
+            "CallerService": []
           }
         ],
         "summary": "List Platform Accounts",
@@ -1588,7 +1602,7 @@
                 }
               },
               "WWW-Authenticate": {
-                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
+                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\", Bearer realm=\"lending-bank-gateway\", audience=\"bank-gateway\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
                 "required": true,
                 "schema": {
                   "type": "string"
@@ -1780,6 +1794,10 @@
           {
             "CallerService": [],
             "S2SToken": []
+          },
+          {
+            "BffSvcJwt": [],
+            "CallerService": []
           }
         ],
         "summary": "Create Platform Account",
@@ -1902,7 +1920,7 @@
                 }
               },
               "WWW-Authenticate": {
-                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
+                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\", Bearer realm=\"lending-bank-gateway\", audience=\"bank-gateway\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
                 "required": true,
                 "schema": {
                   "type": "string"
@@ -2094,6 +2112,10 @@
           {
             "CallerService": [],
             "S2SToken": []
+          },
+          {
+            "BffSvcJwt": [],
+            "CallerService": []
           }
         ],
         "summary": "Patch Platform Account",
@@ -2163,7 +2185,7 @@
                 }
               },
               "WWW-Authenticate": {
-                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
+                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\", Bearer realm=\"lending-bank-gateway\", audience=\"bank-gateway\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
                 "required": true,
                 "schema": {
                   "type": "string"
@@ -2289,6 +2311,10 @@
           {
             "CallerService": [],
             "S2SToken": []
+          },
+          {
+            "BffSvcJwt": [],
+            "CallerService": []
           }
         ],
         "summary": "List Stuck Orders",
@@ -2376,7 +2402,7 @@
                 }
               },
               "WWW-Authenticate": {
-                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
+                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\", Bearer realm=\"lending-bank-gateway\", audience=\"bank-gateway\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
                 "required": true,
                 "schema": {
                   "type": "string"
@@ -2502,6 +2528,10 @@
           {
             "CallerService": [],
             "S2SToken": []
+          },
+          {
+            "BffSvcJwt": [],
+            "CallerService": []
           }
         ],
         "summary": "Wedap Delivery Report",
@@ -2611,7 +2641,7 @@
                 }
               },
               "WWW-Authenticate": {
-                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
+                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\", Bearer realm=\"lending-bank-gateway\", audience=\"bank-gateway\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
                 "required": true,
                 "schema": {
                   "type": "string"
@@ -2803,6 +2833,10 @@
           {
             "CallerService": [],
             "S2SToken": []
+          },
+          {
+            "BffSvcJwt": [],
+            "CallerService": []
           }
         ],
         "summary": "Collect From Users",
@@ -2912,7 +2946,7 @@
                 }
               },
               "WWW-Authenticate": {
-                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
+                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\", Bearer realm=\"lending-bank-gateway\", audience=\"bank-gateway\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
                 "required": true,
                 "schema": {
                   "type": "string"
@@ -3104,6 +3138,10 @@
           {
             "CallerService": [],
             "S2SToken": []
+          },
+          {
+            "BffSvcJwt": [],
+            "CallerService": []
           }
         ],
         "summary": "Distribute To Users",
@@ -3214,7 +3252,7 @@
                 }
               },
               "WWW-Authenticate": {
-                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
+                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\", Bearer realm=\"lending-bank-gateway\", audience=\"bank-gateway\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
                 "required": true,
                 "schema": {
                   "type": "string"
@@ -3406,6 +3444,10 @@
           {
             "CallerService": [],
             "S2SToken": []
+          },
+          {
+            "BffSvcJwt": [],
+            "CallerService": []
           }
         ],
         "summary": "Refund To User",
@@ -3516,7 +3558,7 @@
                 }
               },
               "WWW-Authenticate": {
-                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
+                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\", Bearer realm=\"lending-bank-gateway\", audience=\"bank-gateway\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
                 "required": true,
                 "schema": {
                   "type": "string"
@@ -3675,6 +3717,10 @@
           {
             "CallerService": [],
             "S2SToken": []
+          },
+          {
+            "BffSvcJwt": [],
+            "CallerService": []
           }
         ],
         "summary": "Reverse Transaction",
@@ -3788,7 +3834,7 @@
                 }
               },
               "WWW-Authenticate": {
-                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
+                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\", Bearer realm=\"lending-bank-gateway\", audience=\"bank-gateway\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
                 "required": true,
                 "schema": {
                   "type": "string"
@@ -3947,6 +3993,10 @@
           {
             "CallerService": [],
             "S2SToken": []
+          },
+          {
+            "BffSvcJwt": [],
+            "CallerService": []
           }
         ],
         "summary": "Query Status",
@@ -4060,7 +4110,7 @@
                 }
               },
               "WWW-Authenticate": {
-                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
+                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\", Bearer realm=\"lending-bank-gateway\", audience=\"bank-gateway\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
                 "required": true,
                 "schema": {
                   "type": "string"
@@ -4650,7 +4700,7 @@
                 }
               },
               "WWW-Authenticate": {
-                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
+                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\", Bearer realm=\"lending-bank-gateway\", audience=\"bank-gateway\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
                 "required": true,
                 "schema": {
                   "type": "string"
@@ -4809,6 +4859,10 @@
           {
             "CallerService": [],
             "S2SToken": []
+          },
+          {
+            "BffSvcJwt": [],
+            "CallerService": []
           }
         ],
         "summary": "Deposit Account Detail",
@@ -5274,7 +5328,7 @@
                 }
               },
               "WWW-Authenticate": {
-                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
+                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\", Bearer realm=\"lending-bank-gateway\", audience=\"bank-gateway\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
                 "required": true,
                 "schema": {
                   "type": "string"
@@ -5433,6 +5487,10 @@
           {
             "CallerService": [],
             "S2SToken": []
+          },
+          {
+            "BffSvcJwt": [],
+            "CallerService": []
           }
         ],
         "summary": "Deposit Accounts",
@@ -5898,7 +5956,7 @@
                 }
               },
               "WWW-Authenticate": {
-                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
+                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\", Bearer realm=\"lending-bank-gateway\", audience=\"bank-gateway\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
                 "required": true,
                 "schema": {
                   "type": "string"
@@ -6057,6 +6115,10 @@
           {
             "CallerService": [],
             "S2SToken": []
+          },
+          {
+            "BffSvcJwt": [],
+            "CallerService": []
           }
         ],
         "summary": "Deposit Balance Total",
@@ -6522,7 +6584,7 @@
                 }
               },
               "WWW-Authenticate": {
-                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
+                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\", Bearer realm=\"lending-bank-gateway\", audience=\"bank-gateway\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
                 "required": true,
                 "schema": {
                   "type": "string"
@@ -6681,6 +6743,10 @@
           {
             "CallerService": [],
             "S2SToken": []
+          },
+          {
+            "BffSvcJwt": [],
+            "CallerService": []
           }
         ],
         "summary": "Internal Account Info",
@@ -7146,7 +7212,7 @@
                 }
               },
               "WWW-Authenticate": {
-                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
+                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\", Bearer realm=\"lending-bank-gateway\", audience=\"bank-gateway\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
                 "required": true,
                 "schema": {
                   "type": "string"
@@ -7305,6 +7371,10 @@
           {
             "CallerService": [],
             "S2SToken": []
+          },
+          {
+            "BffSvcJwt": [],
+            "CallerService": []
           }
         ],
         "summary": "Internal Account Transactions",
@@ -7770,7 +7840,7 @@
                 }
               },
               "WWW-Authenticate": {
-                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
+                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\", Bearer realm=\"lending-bank-gateway\", audience=\"bank-gateway\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
                 "required": true,
                 "schema": {
                   "type": "string"
@@ -7929,6 +7999,10 @@
           {
             "CallerService": [],
             "S2SToken": []
+          },
+          {
+            "BffSvcJwt": [],
+            "CallerService": []
           }
         ],
         "summary": "Deposit Transactions",
@@ -8038,7 +8112,7 @@
                 }
               },
               "WWW-Authenticate": {
-                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
+                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\", Bearer realm=\"lending-bank-gateway\", audience=\"bank-gateway\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
                 "required": true,
                 "schema": {
                   "type": "string"
@@ -8197,6 +8271,10 @@
           {
             "CallerService": [],
             "S2SToken": []
+          },
+          {
+            "BffSvcJwt": [],
+            "CallerService": []
           }
         ],
         "summary": "P2P Disbursement",
@@ -8306,7 +8384,7 @@
                 }
               },
               "WWW-Authenticate": {
-                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
+                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\", Bearer realm=\"lending-bank-gateway\", audience=\"bank-gateway\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
                 "required": true,
                 "schema": {
                   "type": "string"
@@ -8465,6 +8543,10 @@
           {
             "CallerService": [],
             "S2SToken": []
+          },
+          {
+            "BffSvcJwt": [],
+            "CallerService": []
           }
         ],
         "summary": "P2P Repayment",
@@ -8576,7 +8658,7 @@
                 }
               },
               "WWW-Authenticate": {
-                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
+                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\", Bearer realm=\"lending-bank-gateway\", audience=\"bank-gateway\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
                 "required": true,
                 "schema": {
                   "type": "string"
@@ -8735,6 +8817,10 @@
           {
             "CallerService": [],
             "S2SToken": []
+          },
+          {
+            "BffSvcJwt": [],
+            "CallerService": []
           }
         ],
         "summary": "Query Repayment Status",
@@ -8848,7 +8934,7 @@
                 }
               },
               "WWW-Authenticate": {
-                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
+                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\", Bearer realm=\"lending-bank-gateway\", audience=\"bank-gateway\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
                 "required": true,
                 "schema": {
                   "type": "string"
@@ -9438,7 +9524,7 @@
                 }
               },
               "WWW-Authenticate": {
-                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
+                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\", Bearer realm=\"lending-bank-gateway\", audience=\"bank-gateway\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
                 "required": true,
                 "schema": {
                   "type": "string"
@@ -9597,6 +9683,10 @@
           {
             "CallerService": [],
             "S2SToken": []
+          },
+          {
+            "BffSvcJwt": [],
+            "CallerService": []
           }
         ],
         "summary": "Users Info",
@@ -9709,7 +9799,7 @@
                 }
               },
               "WWW-Authenticate": {
-                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
+                "description": "`S2S realm=\"lending-bank-gateway\", header=\"X-S2S-Token\", Bearer realm=\"lending-bank-gateway\", audience=\"bank-gateway\"` on service-to-service paths, `ApiKey realm=\"lending-bank-gateway\", header=\"apikey\"` on the two inbound wedap callback paths.",
                 "required": true,
                 "schema": {
                   "type": "string"
@@ -9835,6 +9925,10 @@
           {
             "CallerService": [],
             "S2SToken": []
+          },
+          {
+            "BffSvcJwt": [],
+            "CallerService": []
           }
         ],
         "summary": "Enqueue Import",

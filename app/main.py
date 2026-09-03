@@ -43,6 +43,7 @@ from app.core.envelope import err
 from app.core.openapi_contract import build_openapi
 from app.core.query_location import enforce_query_location
 from app.core.s2s import S2SMiddleware, parse_caller_tokens
+from app.core.svc_jwt import BffSvcJwtVerifier
 from app.workers.supervisor import supervised
 
 logger = logging.getLogger(__name__)
@@ -491,6 +492,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # 解析 per-service token（A-m-002）：`caller:token,...`；空串 = 不启用。
     # 混合语义：在表内的 caller 强制专属 token，不在表内的回退共享 secret（s2s.py）。
     caller_tokens = parse_caller_tokens(settings.s2s_caller_tokens)
+    # BFF svc JWT 入站验签（collab brj8tl7t90a7i5n169g69u23）：配了 GW_BFF_BASE_URL
+    # 才装配。经 BFF `/internal/proxy/bank-gateway/...` 的调用方带的是
+    # `Authorization: Bearer <svc JWT>`，BFF 的出站透传白名单里没有 X-S2S-Token，
+    # 没有本验签器时这条通路必 401（cutover 的硬前置）。留空 = 该通路不启用，
+    # 既有直连（liquidation / recon / fund-ops）零影响。
+    svc_jwt_verifier = (
+        BffSvcJwtVerifier(
+            jwks_url=settings.bff_base_url.rstrip("/") + settings.svc_jwks_path,
+            audience=settings.svc_jwt_audience,
+            issuer=settings.svc_jwt_issuer,
+            cache_ttl_seconds=settings.svc_jwks_cache_ttl_seconds,
+            leeway_seconds=settings.svc_jwt_leeway_seconds,
+            timeout_seconds=settings.svc_jwks_timeout_seconds,
+        )
+        if settings.bff_base_url.strip()
+        else None
+    )
 
     # 同时注册 Starlette 基类（路由 miss 404）和 FastAPI 子类（显式 raise HTTPException）
     app.add_exception_handler(StarletteHTTPException, _http_exception_handler)  # type: ignore[arg-type]
@@ -513,6 +531,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "/api/v1/recon/notify",
         },
         callback_api_key=settings.wedap_callback_api_key,
+        svc_jwt_verifier=svc_jwt_verifier,
     )
     # §7.2.1 顺序表第 1 步：raw request-target 预算先于认证与路由裁决，
     # 故装在 S2S 之外；又在 Identifier 之内，使 414 响应仍带受控 id 与 no-store。

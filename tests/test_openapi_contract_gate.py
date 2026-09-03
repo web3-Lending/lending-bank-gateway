@@ -981,7 +981,9 @@ def test_g12_each_operation_declares_the_credential_its_challenge_names(
     above cannot see, because both sets would still be the same size.
     """
     expected_by_challenge = {
-        CHALLENGE_S2S: {"S2SToken", "CallerService"},
+        # The S2S surface accepts either credential, so its ``security`` is two
+        # requirement groups ORed; flattening them is what this assertion compares.
+        CHALLENGE_S2S: {"S2SToken", "CallerService", "BffSvcJwt"},
         CHALLENGE_APIKEY: {"BankApiKey"},
     }
     for method, path, _route in served_routes(contract_app):

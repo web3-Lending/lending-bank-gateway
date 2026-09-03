@@ -327,6 +327,7 @@ if [ "$DEPLOY_MODE" = "remote" ]; then
             "GW_ACCOUNT_GUARD_MODE=${ACCOUNT_GUARD_MODE:-}" \
             "GW_ADMIN_CALLERS=${ADMIN_CALLERS:-}" \
             "GW_S2S_CALLER_TOKENS=${S2S_CALLER_TOKENS:-}" \
+            "GW_BFF_BASE_URL=${BFF_BASE_URL:-}" \
             "GW_RECON_BASE_URL=${RECON_BASE_URL:-}" \
             "GW_RECON_CALLBACK_HMAC_SECRET=${RECON_CALLBACK_HMAC_SECRET:-}" \
             "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}" \
